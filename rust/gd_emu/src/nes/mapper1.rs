@@ -87,7 +87,11 @@ impl Mapper for Mapper1 {
 
     fn cpu_read(&self, addr: u16) -> u8 {
         if addr >= 0x6000 && addr < 0x8000 {
-            let ram_disabled = (self.prg_bank & 0x10) != 0;
+            let ram_disabled = if self.prg_rom.len() == 524288 {
+                false // SUROM ignores RAM disable; PRG-RAM is always on
+            } else {
+                (self.prg_bank & 0x10) != 0 // Standard MMC1 behavior
+            };
             if ram_disabled {
                 return 0x00;
             }
@@ -159,7 +163,11 @@ impl Mapper for Mapper1 {
 
     fn cpu_write(&mut self, addr: u16, value: u8) {
         if addr >= 0x6000 && addr < 0x8000 {
-            let ram_disabled = (self.prg_bank & 0x10) != 0;
+            let ram_disabled = if self.prg_rom.len() == 524288 {
+                false // SUROM ignores RAM disable; PRG-RAM is always on
+            } else {
+                (self.prg_bank & 0x10) != 0 // Standard MMC1 behavior
+            };
             if !ram_disabled && !self.prg_ram.is_empty() {
                 let index = (addr - 0x6000) as usize % self.prg_ram.len();
                 self.prg_ram[index] = value;
@@ -168,10 +176,19 @@ impl Mapper for Mapper1 {
             return;
         }
         if addr < 0x8000 { return }
-        
-//        godot_print!("Cycle:{ }, last_write_cycle:{ }|write_count={ }|Addr={:04X}|value={ }", self.current_cycle, self.last_write_cycle, self.write_count, addr, value);
 
-        if self.last_write_cycle >= 0 && (self.current_cycle - self.last_write_cycle) <= 1 {
+        let mut suppressed:bool = false;
+        if self.last_write_cycle < 0 || self.last_write_cycle >= 0 && (self.current_cycle - self.last_write_cycle) <= 1 {
+            if self.last_write_cycle < 0 { self.last_write_cycle = 0; }
+            suppressed = true;
+        }
+//        godot_print!("Cycle:{ }, last_write_cycle:{ }|write_count={ }|Addr={:04X}|value={ }", self.current_cycle, self.last_write_cycle, self.write_count, addr, value);
+        godot_print!("MMC1 write: cycle={} last_write_cycle={} addr={:04X} val={:02X} suppressed={} write_count={} -> control={:02X} chr0={:02X} chr1={:02X} prg={:02X}",
+            self.current_cycle, self.last_write_cycle, addr, value, suppressed, self.write_count,
+            self.control, self.chr_bank_0, self.chr_bank_1, self.prg_bank);
+
+
+        if suppressed {
             return; 
         }
         self.last_write_cycle = self.current_cycle;
@@ -209,8 +226,6 @@ impl Mapper for Mapper1 {
                     self.chr_bank_1 = self.shift_reg;
                 }
                 3 => { // $E000-$FFFF: PRG Bank
-                    // Strip the PRG RAM protect bit (bit 4) if present
-                    let prg_bank_stripped = self.shift_reg & 0x0F;
 //                    godot_print!("prg_bank updated from {:02X} to {:02X}", self.prg_bank, self.shift_reg);
                     self.prg_bank = self.shift_reg;
                 }

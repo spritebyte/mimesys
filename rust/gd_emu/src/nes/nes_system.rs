@@ -208,9 +208,10 @@ impl NesSystem {
 
     #[func]
     pub fn power_on(&mut self, mut audio_player: Gd<AudioStreamPlayer>) {
-        self.cpu.power_on(&self.bus);
+        self.cpu.power_on(&mut self.bus);
         self.is_running.store(true, Ordering::SeqCst);
         let _playback = audio_player.get_stream_playback();
+        /*
         let lo = self.bus.read_byte(0xFFFC);
         let hi = self.bus.read_byte(0xFFFD);
         let lo2 = self.bus.read_byte(0xFFFE);
@@ -220,6 +221,7 @@ impl NesSystem {
          - Reset Vector Bytes: [$FFFC] = 0x{:02X}, [$FFFD] = 0x{:02X}\n\
          - 0x{:02X}, 0x{:02X}\n\
          - Initial Program Counter (PC): 0x{:04X}", lo, hi, lo2, hi2, self.cpu.pc);
+        */
         let save_path = format!("{}/{}.sav", self.save_battery_path, self.save_filename);
         if self.bus.cartridge.has_battery && godot::classes::FileAccess::file_exists(&save_path) {
             if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::READ) {
@@ -229,7 +231,7 @@ impl NesSystem {
                 godot_print!("SRAM loaded successfully during power_on.");
             }
         } else { println!("File doesn't exist at {save_path}"); }
-        println!("NES System Power On: Audio streams mapped and SRAM components pulled into RAM.");
+        println!("NES System Power On: Audio streams mapped and checked for SRAM");
     }
     
     #[func]

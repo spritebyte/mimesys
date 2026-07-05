@@ -573,7 +573,7 @@ impl M6502Cpu {
         self.status.interrupt_disable
     }
 
-    pub fn power_on(&mut self, bus: &impl AddressBus) {
+    pub fn power_on(&mut self, bus: &mut impl AddressBus) {
         self.is_running = true;
         self.a = 0; self.x = 0; self.y = 0;
         self.sp = 0xFD;
@@ -582,19 +582,21 @@ impl M6502Cpu {
         self.prev_nmi_line = false;
         self.last_cycles = 0;
         self.last_opcode = 0;
-        self.total_cycles = 0;
+        for _ in 0..6 {
+            bus.step_cycles(1);
+        }
         self.operand_address_crossed_page = false;
 
         let lo = bus.read_byte(0xFFFC) as u16;
+        bus.step_cycles(1);
         let hi = bus.read_byte(0xFFFD) as u16;
+        bus.step_cycles(1);
         self.pc = (hi << 8) | lo;
+        self.total_cycles = 7;
     }
 
     pub fn reset(&mut self, bus: &impl AddressBus) {
         self.sp = self.sp.wrapping_sub(3);
-        self.a = 0;
-        self.x = 0;
-        self.y = 0;
         self.status.interrupt_disable = true;
         self.nmi_pending = false;
         self.prev_nmi_line = false;
@@ -621,8 +623,8 @@ impl M6502Cpu {
                 self.current_opcode = bus.read_byte(self.pc);
 //                if self.total_cycles >= 62100 && self.total_cycles <= 63246 {
 //                if self.test_print {
-                if self.pc >= 0xA350 && self.pc <= 0xA370 {
-                    emu_print!("Current opcode: {:02x} PC={:04x}|A={:02x}|SP={:04x}|", self.current_opcode, self.pc, self.a, self.sp);
+                if bus.total_cycles() <= 100 || (self.pc >= 0xA350 && self.pc <= 0xA370) {
+                    emu_print!("{ } Current opcode: {:02x} PC={:04x}|A={:02x}|SP={:04x}|", bus.total_cycles(), self.current_opcode, self.pc, self.a, self.sp);
                 }
                 let (op, mode, cycles) = self.decode_opcode(self.current_opcode);
                 self.pc = self.pc.wrapping_add(1);
