@@ -69,9 +69,9 @@ impl SystemDisplayInfo {
         SystemDisplayInfo {
             buffer_width: 256,
             buffer_height: 240,
-            visible_x: 8,
+            visible_x: 0,
             visible_y: 8,
-            visible_width: 240,
+            visible_width: 256,
             visible_height: 224,
             target_aspect_ratio: 4.0/3.0,
         }
@@ -187,12 +187,20 @@ impl NesSystem {
 //        self.bus.pad1_state = 0x01;
         let mut cycles_this_frame:u16 = 0;
         while cycles_this_frame < 29780 {
-            let mapper = self.bus.cartridge.mapper_mut();
-            self.bus.ppu.get_mut().step(mapper, 3);
-            self.cpu.step_one_cycle(&mut self.bus);
+            if !self.bus.bus_available {
+                self.bus.step_dma_one_cycle(&mut self.cpu);
+            } else {
+                self.cpu.step_one_cycle(&mut self.bus);
+            }
+
             self.bus.total_cpu_cycles += 1;
             self.bus.step_cycles(1);
             cycles_this_frame += 1;
+
+            for _ in 0..3 {
+                let mapper = self.bus.cartridge.mapper_mut();
+                self.bus.ppu.get_mut().step_one_cycle(mapper);
+            }
         }
         let samples = self.bus.apu.get_mut().take_audio_samples();
 //        godot_print!("Frame sample size={}", samples.len());

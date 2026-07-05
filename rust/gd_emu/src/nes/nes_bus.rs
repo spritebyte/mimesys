@@ -4,6 +4,7 @@ use crate::nes::mappers::Mapper;
 use crate::nes::cartridge::Cartridge;
 use crate::nes::nes_ppu::NesPPU;
 use crate::nes::nes_apu::NesAPU;
+use crate::common::m6502::M6502Cpu;
 use crate::nes::nes_apu::DmcMemoryReader;
 use std::cell::{UnsafeCell, Cell};
 use std::sync::Arc;
@@ -18,7 +19,10 @@ pub struct NesBus {
     pub pad1_state: u8,
     pub pad1_shift_reg: Cell<u8>,
     pub pad_strobe: bool,
-    pub dma_cycles: u32,
+    pub dma_cycles_remaining: u16,
+    pub dma_base_address: u16,
+    pub dma_temp_buffer: u8,
+    pub bus_available: bool,
     pub total_cpu_cycles: u64,
 }
 
@@ -35,7 +39,8 @@ impl NesBus {
             pad1_state: 0,
             pad1_shift_reg: Cell::new(0),
             pad_strobe: false,
-            dma_cycles: 0,
+            bus_available: true,
+            dma_cycles_remaining: 0, dma_base_address: 0, dma_temp_buffer: 0,
             total_cpu_cycles: 0,
         }
     }
@@ -46,6 +51,39 @@ impl NesBus {
     pub fn step_cycles(&mut self, cycles: u64) {
         // Forward the updated cycle counter to the cartridge's mapper
         self.cartridge.mapper_mut().step_cycles(cycles);
+    }
+
+    pub fn step_dma_one_cycle(&mut self, cpu: &mut M6502Cpu) {
+        if self.dma_cycles_remaining == 0 {
+            return;
+        }
+
+        // 1. Handle the initial initialization/halt cycles (cycles 514 or 513 down to 512)
+        if self.dma_cycles_remaining > 512 {
+            self.dma_cycles_remaining -= 1;
+            return;
+        }
+
+        // 2. Active copy window (512 cycles remaining down to 1)
+        let dma_step = 512 - self.dma_cycles_remaining;
+        let sprite_offset = dma_step / 2;
+
+        if dma_step % 2 == 0 {
+            // EVEN CYCLE: Read from CPU memory space
+            let target_addr = self.dma_base_address + sprite_offset;
+            self.dma_temp_buffer = self.read_byte(target_addr);
+        } else {
+            // ODD CYCLE: Write to PPU OAM data register directly ($2004)
+            // This implicitly updates the PPU's OAM array in real system time
+            self.write_byte(0x2004, self.dma_temp_buffer);
+        }
+
+        self.dma_cycles_remaining -= 1;
+
+        // If that was the final cycle, release the CPU!
+        if self.dma_cycles_remaining == 0 {
+            self.bus_available = true;
+        }
     }
 }
 
@@ -108,22 +146,10 @@ impl AddressBus for NesBus {
                 ppu_mut.cpu_write_reg(mapper_ref, register, value);
             }
             0x4014 => {
-                let page_start = (value as u16) << 8;
-                let mut dma_buffer = [0u8; 256];
-
-                for i in 0..256 {
-                    dma_buffer[i] = self.read_byte(page_start + i as u16);
-                }
-
-                self.ppu.get_mut().write_oam_dma(&dma_buffer);
-//                let write_cycle = self.total_cpu_cycles + 3;
-
-                let mut cycles_to_burn = 513;
- //               if write_cycle % 2 != 0 {
-                if self.total_cpu_cycles % 2 != 0 {
-                    cycles_to_burn += 1;
-                }
-                self.dma_cycles += cycles_to_burn;
+                self.dma_base_address = (value as u16) << 8;
+                let cycles_to_burn = 513 + (self.total_cpu_cycles % 2);
+                self.dma_cycles_remaining = cycles_to_burn as u16;
+                self.bus_available = false;
             }
             0x4016 => {
                 self.pad_strobe = (value & 0x01) == 0x01;

@@ -182,11 +182,10 @@ impl Mapper for Mapper1 {
             if self.last_write_cycle < 0 { self.last_write_cycle = 0; }
             suppressed = true;
         }
-//        godot_print!("Cycle:{ }, last_write_cycle:{ }|write_count={ }|Addr={:04X}|value={ }", self.current_cycle, self.last_write_cycle, self.write_count, addr, value);
-        godot_print!("MMC1 write: cycle={} last_write_cycle={} addr={:04X} val={:02X} suppressed={} write_count={} -> control={:02X} chr0={:02X} chr1={:02X} prg={:02X}",
+/*        godot_print!("MMC1 write: cycle={} last_write_cycle={} addr={:04X} val={:02X} suppressed={} write_count={} -> control={:02X} chr0={:02X} chr1={:02X} prg={:02X}",
             self.current_cycle, self.last_write_cycle, addr, value, suppressed, self.write_count,
             self.control, self.chr_bank_0, self.chr_bank_1, self.prg_bank);
-
+*/
 
         if suppressed {
             return; 

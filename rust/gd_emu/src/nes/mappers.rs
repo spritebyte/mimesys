@@ -80,7 +80,8 @@ impl Mapper for Mapper0 {
 
     fn ppu_read(&self, addr: u16) -> u8 {
         if self.chr_rom.len() > 0 {
-            return self.chr_rom[addr as usize];
+            let masked_addr = (addr & 0x1FFF) as usize;
+            return self.chr_rom[masked_addr % self.chr_rom.len()];
         }
         0
     }

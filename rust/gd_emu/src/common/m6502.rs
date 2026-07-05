@@ -483,6 +483,7 @@ pub struct M6502Cpu {
     pub status: StatusFlags,
     nmi_pending: bool,
     prev_nmi_line: bool,
+    bus_available: bool,  // false during dma transfer
     last_cycles: u8,
     last_opcode: u8, // Save most recent instruction for debugging
     operand_address_crossed_page: bool,
@@ -555,6 +556,7 @@ impl M6502Cpu {
             total_cycles: 0,
             operand_address_crossed_page: false,
             is_running: false,
+            bus_available: true,
             config,
             stall_cycles: 0,
             temp_addr_low: 0,
@@ -1321,11 +1323,11 @@ impl M6502Cpu {
                     2 => {
                     // Cycle 2: Dummy Read
                         let _dummy = bus.read_byte(self.pc);
-                            emu_print!("Interrupt cycle 2 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());                        
+//                            emu_print!("Interrupt cycle 2 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());                        
                         if self.current_op == Operation::Brk {
                             // Software BRK is a 2-byte instruction frame, so it advances PC here.
                             // Hardware interrupts do NOT advance PC.
-                            emu_print!("Operation is BRK at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
+//                            emu_print!("Operation is BRK at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
                             self.pc = self.pc.wrapping_add(1);
                         }
                     }
@@ -1334,14 +1336,14 @@ impl M6502Cpu {
                         let pc_high = (self.pc >> 8) as u8;
                         bus.write_byte(STACK_BASE + (self.sp as u16), pc_high);
                         self.sp = self.sp.wrapping_sub(1);
-                            emu_print!("Interrupt cycle 3 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
+//                            emu_print!("Interrupt cycle 3 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
                     }
                     4 => {
                         // Cycle 4: Push PC Low Byte to Stack
                         let pc_low = (self.pc & 0x00FF) as u8;
                         bus.write_byte(STACK_BASE + (self.sp as u16), pc_low);
                         self.sp = self.sp.wrapping_sub(1);
-                        emu_print!("Interrupt cycle 4 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
+//                        emu_print!("Interrupt cycle 4 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
                     }
                     5 => {
                         // Cycle 5: Push Status Flags to Stack
@@ -1350,12 +1352,12 @@ impl M6502Cpu {
             
                         bus.write_byte(STACK_BASE + (self.sp as u16), status_byte);
                         self.sp = self.sp.wrapping_sub(1);
-                        emu_print!("Interrupt cycle 5 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
+//                        emu_print!("Interrupt cycle 5 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
                     }
                     6 => {
                         // Cycle 6: Fetch Vector Low Byte
                         self.temp_addr_low = bus.read_byte(vector_base_addr);
-                        emu_print!("Interrupt cycle 6 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
+//                        emu_print!("Interrupt cycle 6 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
                     }
                     7 => {
                         // Cycle 7: Fetch Vector High Byte and perform the actual vector jump!
