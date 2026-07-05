@@ -92,126 +92,6 @@ impl NesPPU {
         self.w_latch = false; self.v_addr = 0; self.t_addr = 0;
     }
 
-    pub fn catch_up(&mut self, mapper: &mut dyn Mapper, cpu_cycles: u64) {
-        let target_ppu_cycles: u64 = cpu_cycles * 3;
-        while self.total_ppu_cycles < target_ppu_cycles {
-            self.step_one_ppu_cycle(mapper);
-            self.total_ppu_cycles += 1;
-        }
-    }
-    pub fn step_one_ppu_cycle(&mut self, mapper: &mut dyn Mapper) {
-        let rendering_enabled = self.rendering_enabled();
-
-        match self.scanline {
-            0..=239 => {
-                    // ---- VISIBLE SCANLINES ----
-                if self.cycle == 0 {
-                        // Batch render background and sprites using current v_addr state
-//                      godot_print!("mask=0x{:02X}", self.mask);
-                    self.mid_scanline_write = false;
-                    self.prefetch_scanline(mapper);
-                }
-
-                if self.cycle < 256 {
-                    self.render_pixel(mapper, self.cycle as usize);
-                }
-
-                if rendering_enabled {
-                        // Increment coarse X every 8 dots across the visible scanline
-                    if self.cycle > 0 && self.cycle <= 256 && self.cycle % 8 == 0 {
-                        self.increment_coarse_x();
-                    }
-                        // Increment fine Y at the end of the tile fetching phase
-                    if self.cycle == 256 {
-                        self.increment_fine_y();
-                    }
-                        // Reset horizontal scroll back to starting parameters for the next line
-                    if self.cycle == 257 {
-                        self.copy_horizontal();
-                    }
-                    }
-                }
-                240 => {
-                // ---- POST-RENDER BLANK SCANLINE ----
-                // Idle scanline; no rendering or scrolling operations happen here.
-                if self.cycle == 0 {
-                    let mut completed_buffer = std::mem::replace(&mut self.back_buffer, vec![0; 256 * 240 * 4]);
-                    self.front_buffer = Arc::new(completed_buffer);
-                    self.system_frame_ready.store(true, Ordering::Release);
-                }
-                }
-                241 => {
-                // ---- VBLANK START SCANLINE ----
-                    if self.cycle == 1 {
-//                        godot_print!("palette_ram: {:02X?}", self.palette_ram);
-                        self.status |= 0x80;
-//                      godot_print!("VBlank set at scanline 241, status={:02X}|ctrl={:02X} total_cycles={}", self.status, self.ctrl, self.total_ppu_cycles);
-                    }
-                }
-                242..=260 => {
-                // ---- REMAINING VBLANK SCANLINES ----
-                // Idle; CPU normally updates scrolling parameters (t_addr) during this window.
-                }
-                261 => {
-                // ---- PRE-RENDER SCANLINE ----
-                    if self.cycle == 1 {
-                        self.status &= 0x3F;// Clear VBlank flag at start of new frame
-                    }
-
-                    if rendering_enabled {
-                        // Replicate horizontal & fine Y progressions to keep registers synchronized
-                        if self.cycle > 0 && self.cycle <= 256 && self.cycle % 8 == 0 {
-                            self.increment_coarse_x();
-                        }
-                        if self.cycle == 256 {
-                            self.increment_fine_y();
-                        }
-                        if self.cycle == 257 {
-                            self.copy_horizontal();
-                        }
-                        // Crucial: Copy total vertical scroll configurations throughout the lookahead window
-                        if self.cycle >= 280 && self.cycle <= 304 {
-                            self.copy_vertical();
-                        }
-                    }
-                }
-                _ => {}
-            }
-
-        //  ---- MMC3 IRQ HOOK (From previous architecture evaluation) ----
-        //  If your MMC3 mapper uses a dedicated scanline clock counter instead of filtering A12:
-  //        if self.cycle == 260 && (self.scanline < 240 || self.scanline == 261) && rendering_enabled {
-            if rendering_enabled {
-                if self.scanline < 240 || self.scanline == 261 {
-                    let target_clock_cycle = if self.background_pattern_table == 0x1000 {
-                        4
-                    } else { 260 };
-                    if self.cycle == target_clock_cycle {
-//                      if self.total_ppu_cycles % 50000 < 341 {
-//                          godot_print!(
-//                              "IRQ_DIAG: scanline={} cycle={} bg_table={:#X} spr_table={:#X} spr_size={} ctrl={:#04X}",
-//                               self.scanline, self.cycle, self.background_pattern_table,
-//                                self.sprite_pattern_table, self.sprite_size, self.ctrl
-//                            );
-//                      }
-//                      godot_print!("IRQ Clocked: Scanline {}, Cycle {}", self.scanline, self.cycle);
-                        mapper.clock_scanline();
-                    }
-                }
-            }
-
-            self.cycle += 1;
-            if self.cycle >= 341 {
-                self.cycle = 0;
-                self.scanline += 1;
-                // end of scanline
-                if self.scanline > 261 {
-                    self.scanline = 0; // Wrap back around to the top of the frame
-                    mapper.notify_frame_start();
-                }
-        }
-    }
-
     pub fn step(&mut self, mapper: &mut dyn Mapper, cycles: u64) {
         for _ in 0..cycles {
             let rendering_enabled = self.rendering_enabled();
@@ -222,7 +102,6 @@ impl NesPPU {
                     if self.cycle == 0 {
                         // Batch render background and sprites using current v_addr state
 //                      godot_print!("mask=0x{:02X}", self.mask);
-                        self.mid_scanline_write = false;
                         self.prefetch_scanline(mapper);
                     }
 

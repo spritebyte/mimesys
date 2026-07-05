@@ -45,7 +45,7 @@ impl Mapper1 {
             prg_bank: 0,
             write_count: 0,
             sram_dirty: false,
-            last_write_cycle: 0,
+            last_write_cycle: -1,
             current_cycle: 0,
         }
     }

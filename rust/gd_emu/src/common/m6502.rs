@@ -621,11 +621,11 @@ impl M6502Cpu {
                 self.current_opcode = bus.read_byte(self.pc);
 //                if self.total_cycles >= 62100 && self.total_cycles <= 63246 {
 //                if self.test_print {
-//                    emu_print!("Current opcode: {:02x} PC={:04x}|A={:02x}|SP={:04x}|", self.current_opcode, self.pc, self.a, self.sp);
-//                }
-                self.pc = self.pc.wrapping_add(1);
-
+                if self.pc >= 0xA350 && self.pc <= 0xA370 {
+                    emu_print!("Current opcode: {:02x} PC={:04x}|A={:02x}|SP={:04x}|", self.current_opcode, self.pc, self.a, self.sp);
+                }
                 let (op, mode, cycles) = self.decode_opcode(self.current_opcode);
+                self.pc = self.pc.wrapping_add(1);
                 self.current_mode = mode;
                 self.current_op = op;
                 self.cycles_remaining = cycles;
@@ -715,7 +715,7 @@ impl M6502Cpu {
             0x6D => (Operation::Adc, AddressingMode::Absolute, 4),
             0x6E => (Operation::Ror, AddressingMode::Absolute, 6),
             0x70 => (Operation::Bvs, AddressingMode::Relative, 2),
-            0x71 => (Operation::Adc, AddressingMode::AbsoluteY, 5),
+            0x71 => (Operation::Adc, AddressingMode::IndirectY, 5),
             0x75 => (Operation::Adc, AddressingMode::ZeroPageX, 4),
             0x76 => (Operation::Ror, AddressingMode::ZeroPageX, 6),
             0x78 => (Operation::Sei, AddressingMode::Implied, 2),
@@ -801,7 +801,7 @@ impl M6502Cpu {
             0xF8 => (Operation::Sed, AddressingMode::Implied, 2),
             0xFD => (Operation::Sbc, AddressingMode::AbsoluteX, 4),
             0xFE => (Operation::Inc, AddressingMode::AbsoluteX, 7),
-            _=> { emu_print!("Opcode unimplemented: {:02X}", opcode);
+            _=> { emu_print!("Opcode unimplemented: {:02X}. {:04X}", opcode, self.pc);
                 todo!() },
         }
     }
@@ -1174,7 +1174,7 @@ impl M6502Cpu {
                         // Cycle 4: Read target address high byte from the next zero-page location.
                         // Hardware constraint: The vector address increment wraps strictly inside Page 0!
                         let ptr_high = self.temp_addr_low.wrapping_add(1) as u16;
-                        self.temp_addr_high = bus.read_byte(ptr_high);
+                        self.temp_addr_high = bus.read_byte(ptr_high) & 0xFF;
 
                         // Construct the base target address and add the Y offset to form effective address
                         let base_target = ((self.temp_addr_high as u16) << 8) | (self.temp_value as u16);

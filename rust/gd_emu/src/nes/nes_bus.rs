@@ -73,11 +73,8 @@ impl AddressBus for NesBus {
             0x0000..=0x1FFF => self.ram[(addr % 0x0800) as usize],
             0x2000..=0x3FFF => {
                 let register = addr % 8;
-//                let mapper_for_catchup = &mut *self.cartridge.mapper;
                 let ppu_mut = unsafe { &mut *self.ppu.get() };
-//                ppu_mut.catch_up(self.cartridge.mapper_mut(), self.total_cpu_cycles);
 //                println!("BUS read_byte: {:04X} reg:{ :02X} ", addr, register);
-//                ppu_mut.catch_up(self.cartridge.mapper_mut(), self.total_cpu_cycles);
                 let mapper_ref = self.cartridge.mapper();
                 ppu_mut.cpu_read_reg(mapper_ref, register)
             }
@@ -108,11 +105,9 @@ impl AddressBus for NesBus {
                 let mapper_ref = self.cartridge.mapper_mut();
 
                 let ppu_mut = self.ppu.get_mut();
-//                ppu_mut.catch_up(self.cartridge.mapper_mut(), self.total_cpu_cycles);
                 ppu_mut.cpu_write_reg(mapper_ref, register, value);
             }
             0x4014 => {
-//                self.ppu.get_mut().catch_up(self.cartridge.mapper_mut(), self.total_cpu_cycles);
                 let page_start = (value as u16) << 8;
                 let mut dma_buffer = [0u8; 256];
 

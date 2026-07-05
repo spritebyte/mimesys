@@ -188,7 +188,6 @@ impl NesSystem {
         let mut cycles_this_frame:u16 = 0;
         while cycles_this_frame < 29780 {
             let mapper = self.bus.cartridge.mapper_mut();
-//            self.bus.ppu.get_mut().catch_up(mapper, 1);
             self.bus.ppu.get_mut().step(mapper, 3);
             self.cpu.step_one_cycle(&mut self.bus);
             self.bus.total_cpu_cycles += 1;
