@@ -1,3 +1,7 @@
+/* TODO: Make sure to implement HALT bug 
+    If HALT executed with IME=0 and a pending interrupt, the next byte after HALT gets executed twice.
+*/
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum GbVariant {
     Dmg,
@@ -96,7 +100,13 @@ impl GameBoyCpu {
     pub fn set_hl(&mut self, v: u16) { self.h = (v >> 8) as u8; self.l = v as u8; }
     pub fn af(&self) -> u16 { ((self.a as u16) << 8) | self.f as u16 }
     pub fn set_af(&mut self, v: u16) { self.a = (v >> 8) as u8; self.f = v as u8; }
-
+    fn get_r8_value(&self, reg_idx: u8) -> u8 {
+        match reg_idx {
+            0 => self.b, 1 => self.c, 2 => self.d, 3 => self.e,
+            4 => self.h, 5 => self.l, 6 => 0, // (HL) - handled separately
+            7 => self.a, _ => 0,
+        }
+    }
     pub fn step_one_m_cycle(&mut self, bus: &mut GameBoyBus) {
         if self.cycles_remaining == 0 && self.handle_interrupts(bus) {
             return; 

@@ -92,6 +92,7 @@ impl AddressBus for NesBus {
                     let next_shift = (shift_reg >> 1) | 0x80;
                     self.pad1_shift_reg.set(next_shift);
                 }
+//                godot_print!("$4016 READ: Returned {}", value);
                 value
             }
             0x4020..=0xFFFF => self.cartridge.mapper().cpu_read(addr),

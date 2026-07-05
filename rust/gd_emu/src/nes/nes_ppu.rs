@@ -259,7 +259,7 @@ impl NesPPU {
                     if self.cycle == 1 {
 //                        godot_print!("palette_ram: {:02X?}", self.palette_ram);
                         self.status |= 0x80;
-//                      godot_print!("VBlank set at scanline 241, status={:02X}|ctrl={:02X} total_cycles={}", self.status, self.ctrl, self.total_ppu_cycles);
+                        godot_print!("VBlank set at scanline 241, status={:02X}|ctrl={:02X} total_cycles={}", self.status, self.ctrl, self.total_ppu_cycles);
                     }
                 }
                 242..=260 => {
@@ -269,6 +269,7 @@ impl NesPPU {
                 261 => {
                 // ---- PRE-RENDER SCANLINE ----
                     if self.cycle == 1 {
+                        godot_print!("PPU CLEARED VBLANK ON SCANLINE 261");
                         self.status &= 0x3F;// Clear VBlank flag at start of new frame
                     }
 
@@ -709,9 +710,10 @@ fn rendering_enabled(&self) -> bool {
         match reg {
             2 => { // $2002 - PPUSTATUS
                 let mut res = self.status;
-                if self.scanline >= 240 && self.scanline <= 252 {
-                    godot_print!("$2002 read: current scanline={}. Status={:02X}", self.scanline, self.status);
-                }
+//                if self.scanline >= 240 && self.scanline <= 252 {
+                    if self.status & 0x80 != 0 {
+                        godot_print!("$2002 read cleared v-blank: current scanline={}. Status={:02X}", self.scanline, self.status);
+                    }
                 self.status &= 0x7F; // Reading status clears V-Blank bit
                 self.w_latch = false;    // And resets scroll/address double-write latch
                 res

@@ -184,31 +184,19 @@ impl NesSystem {
 
 //        godot_print!("nes_pad_state: 0x{:02X}", nes_pad_state);
         self.bus.pad1_state = nes_pad_state;
-
+//        self.bus.pad1_state = 0x01;
         let mut cycles_this_frame:u16 = 0;
         while cycles_this_frame < 29780 {
             let mapper = self.bus.cartridge.mapper_mut();
-            self.bus.ppu.get_mut().catch_up(mapper, self.bus.total_cpu_cycles);
-            self.bus.step_cycles(1);
-            self.cpu.step(&mut self.bus);
+//            self.bus.ppu.get_mut().catch_up(mapper, 1);
+            self.bus.ppu.get_mut().step(mapper, 3);
+            self.cpu.step_one_cycle(&mut self.bus);
             self.bus.total_cpu_cycles += 1;
-            unsafe { (*self.bus.apu.get()).step(1, &self.bus); }
+            self.bus.step_cycles(1);
             cycles_this_frame += 1;
-            if self.bus.dma_cycles > 0 {
-                let dma_penalty = self.bus.dma_cycles;
-                self.bus.dma_cycles = 0;
-                for _ in 0..dma_penalty {
-                    let mapper = self.bus.cartridge.mapper_mut();
-                    self.bus.ppu.get_mut().catch_up(mapper, self.bus.total_cpu_cycles);
-                    self.bus.total_cpu_cycles += 1;      
-                    self.bus.step_cycles(1);
-                    unsafe { (*self.bus.apu.get()).step(1, &self.bus); }
-                    cycles_this_frame += 1;
-                }
-            }
         }
         let samples = self.bus.apu.get_mut().take_audio_samples();
-        godot_print!("Frame sample size={}", samples.len());
+//        godot_print!("Frame sample size={}", samples.len());
         if !samples.is_empty() {
             if let Some(playback) = self.playback.as_mut() {
                 let frames: PackedVector2Array = samples.iter()
