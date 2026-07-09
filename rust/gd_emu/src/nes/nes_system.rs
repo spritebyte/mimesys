@@ -15,6 +15,7 @@ use crate::nes::mapper69::Mapper69;
 use crate::nes::mapper206::Mapper206;
 
 use godot::prelude::*;
+use serde::{Serialize, Deserialize};
 use godot::classes::{Node, AudioStreamGeneratorPlayback};
 use godot::global::godot_print;
 use godot::classes::{AudioStreamPlayer,Image,ImageTexture,Texture2D};
@@ -101,7 +102,23 @@ impl NesSystem {
     pub fn get_display_info(&self) -> Gd<SystemDisplayInfo> {
         self.sys_display.clone()
     }
-
+/*
+    fn get_cpu_debug_info(&self) -> GodotDictionary {
+        let state = self.cpu.get_state();
+        let mut dict = GodotDictionary::new();
+        
+        dict.insert("pc", state.pc);
+        dict.insert("a", state.a);
+        dict.insert("x", state.x);
+        dict.insert("y", state.y);
+        dict.insert("sp", state.sp);
+        dict.insert("cycles_remaining", state.cycles_remaining);
+        dict.insert("instruction_step", state.instruction_step);
+        dict.insert("opcode", format!("0x{:02X}", state.current_opcode));
+        
+        dict
+    }
+*/
     #[func]
     pub fn create_from_bytes(rom_bytes: PackedByteArray, base_name: String) -> Option<Gd<Self>> {
         // Validate header and get sizes
@@ -151,8 +168,8 @@ impl NesSystem {
 
         Some(Gd::from_init_fn(|_base| {
             Self {
-                cpu: M6502Cpu::new(CpuVariant::Ricoh2A03),
                 bus,
+                cpu: M6502Cpu::new(CpuVariant::Ricoh2A03),
                 save_filename: base_name,
                 frame_ready,
                 is_running: Arc::new(AtomicBool::new(false)),
@@ -185,23 +202,36 @@ impl NesSystem {
 //        godot_print!("nes_pad_state: 0x{:02X}", nes_pad_state);
         self.bus.pad1_state = nes_pad_state;
 //        self.bus.pad1_state = 0x01;
-        let mut cycles_this_frame:u16 = 0;
-        while cycles_this_frame < 29780 {
+        let mut cpu_cycles_run:u16 = 0;
+        while !unsafe { (*self.bus.ppu.get()).is_frame_complete() } {
             if !self.bus.bus_available {
+                self.bus.step_one_cycle();
                 self.bus.step_dma_one_cycle(&mut self.cpu);
+                self.bus.step_remaining_ppu_cycles();
             } else {
+                self.bus.step_one_cycle();
                 self.cpu.step_one_cycle(&mut self.bus);
+                self.bus.step_remaining_ppu_cycles();
             }
+            cpu_cycles_run += 1;
+//            for _ in 0..3 {
+//                let mapper = self.bus.cartridge.mapper_mut();
+//                self.bus.ppu.get_mut().step_one_cycle(mapper);
+//            }
+//            let mapper = self.bus.cartridge.mapper_mut();
+//            godot_print!("CPU cycles: {} | Bus cycles: {} | PPU cycles: { } | APU cycles: {} | Mapper cycles: {}", self.cpu.total_cycles(), self.bus.total_cycles(), unsafe { (*self.bus.ppu.get()).total_cycles() }, self.bus.apu.get_mut().total_cycles(), mapper.total_cycles());
+//            if self.bus.total_cpu_cycles >= 100000 && self.bus.total_cpu_cycles <= 120000 {
+//                godot_print!("CYCLE COUNT: cpu: {}, ppu: {}", self.bus.total_cpu_cycles, self.bus.ppu.get_mut().total_ppu_cycles);
+//            }
 
-            self.bus.total_cpu_cycles += 1;
-            self.bus.step_cycles(1);
-            cycles_this_frame += 1;
-
-            for _ in 0..3 {
-                let mapper = self.bus.cartridge.mapper_mut();
-                self.bus.ppu.get_mut().step_one_cycle(mapper);
+            // failsafe
+            if cpu_cycles_run > 35000 {
+                break;
             }
         }
+
+        self.bus.ppu.get_mut().clear_frame_complete_flag();
+        
         let samples = self.bus.apu.get_mut().take_audio_samples();
 //        godot_print!("Frame sample size={}", samples.len());
         if !samples.is_empty() {
@@ -253,7 +283,7 @@ impl NesSystem {
     #[func]
     pub fn reset(&mut self) {
         self.bus.ppu.get_mut().reset();
-        self.cpu.reset(&self.bus);
+        self.cpu.reset(&mut self.bus);
             // self.bus.reset_ram();
     }
 

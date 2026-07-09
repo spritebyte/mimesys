@@ -9,3 +9,5 @@ crate-type = ["cdylib"]
 [dependencies]
 bitflags = "2.13.0"
 godot = { version = "0.5.3", features = ["experimental-threads"] }
+godot-binary-serialization = "0.2.0"
+serde = { version = "1.0.228", features = ["derive"] }

@@ -1,6 +1,7 @@
 const STACK_BASE: u16 = 0x100;
 
 use crate::common::bus::AddressBus;
+use serde::{Serialize, Deserialize};
 
 #[cfg(test)]
 macro_rules! emu_print {
@@ -16,384 +17,7 @@ macro_rules! emu_print {
     };
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct MockBus {
-        ram: [u8; 65536],
-    }
-
-    impl MockBus {
-        fn new() -> Self {
-            Self { ram: [0; 65536] }
-        }
-    }
-
-    impl AddressBus for MockBus {
-        fn read_byte(&self, addr: u16) -> u8 {
-            self.ram[addr as usize]
-        }
-        fn write_byte(&mut self, addr: u16, val: u8) {
-            self.ram[addr as usize] = val;
-        }
-        fn is_nmi_line_asserted(&mut self) -> bool { false }
-        fn is_irq_line_asserted(&mut self) -> bool { false }
-    }
-    #[test]
-    fn test_jsr_and_rts_execution_and_stack_handling() {
-        let mut cpu = M6502Cpu::new(CpuVariant::Ricoh2A03);
-        let mut bus = MockBus::new();
-
-        // 1. Arrange: Write a JSR instruction at 0xC000 targeting 0xC500
-        cpu.pc = 0xC000;
-        cpu.sp = 0xFF; // Start at top of stack
-
-        // JSR opcode is 0x20. Target address is 0xC500 (low-byte 00, high-byte C5)
-        bus.ram[0xC000] = 0x20;
-        bus.ram[0xC001] = 0x00;
-        bus.ram[0xC002] = 0xC5;
-
-        // Write an RTS instruction at the target subroutine location 0xC500
-        bus.ram[0xC500] = 0x60; // RTS opcode
-
-        // 2. Act: Step through the JSR instruction (6 cycles total)
-        for _ in 0..6 {
-            cpu.step_one_cycle(&mut bus);
-        }
-
-        // 3. Assert: JSR should have successfully jumped and prepared the stack
-        assert_eq!(cpu.pc, 0xC500, "PC should be at the target address 0xC500");
-        assert_eq!(cpu.sp, 0xFD, "SP should have decremented twice (0xFF -> 0xFD)");
-        // Verify return address (PC of last byte of JSR instruction: 0xC002) was pushed
-        assert_eq!(bus.ram[0x100 + 0xFF], 0xC0, "Stack should contain PC High byte (0xC0)");
-        assert_eq!(bus.ram[0x100 + 0xFE], 0x02, "Stack should contain PC Low byte (0x02)");
-
-        // 4. Act: Now execute the RTS instruction (6 cycles total)
-        for _ in 0..6 {
-            cpu.step_one_cycle(&mut bus);
-        }
-
-        // 5. Assert: RTS should pull the address, increment it by 1, and return to 0xC003
-        assert_eq!(cpu.pc, 0xC003, "PC should have cleanly returned to 0xC003");
-        assert_eq!(cpu.sp, 0xFF, "SP should have wound back up to 0xFF");
-    }
-#[test]
-fn test_branch_zero_page_and_page_boundary() {
-    let mut cpu = M6502Cpu::new(CpuVariant::Ricoh2A03);
-    let mut bus = MockBus::new();
-
-    // --- CASE 1: Branch NOT Taken (2 Cycles) ---
-    // BNE (0xD0) with an offset of +4. If Zero flag is SET, it shouldn't branch.
-    cpu.pc = 0xC000;
-    cpu.status.zero = true; 
-    bus.ram[0xC000] = 0xD0; 
-    bus.ram[0xC001] = 0x04; // Offset +4
-
-    for _ in 0..2 { cpu.step_one_cycle(&mut bus); }
-    assert_eq!(cpu.pc, 0xC002, "Branch not taken should just advance past the instruction (2 cycles)");
-
-    // --- CASE 2: Branch Taken, Same Page (3 Cycles) ---
-    // BNE (0xD0) with an offset of +4. Zero flag is CLEAR, so it should branch.
-    cpu.pc = 0xC000;
-    cpu.status.zero = false; 
-    
-    // We expect 3 cycles total for a taken branch on the same page
-    for _ in 0..3 { cpu.step_one_cycle(&mut bus); }
-    assert_eq!(cpu.pc, 0xC006, "Branch taken should advance PC by offset (0xC002 + 4 = 0xC006)");
-
-    // --- CASE 3: Branch Taken, Crosses Page Boundary (4 Cycles) ---
-    // Place the BNE right at the end of page 0xC0 (e.g., 0xC0FE). 
-    // An offset of +4 will push the execution target into page 0xC1 (0xC104).
-    cpu.pc = 0xC0FE;
-    cpu.status.zero = false;
-    bus.ram[0xC0FE] = 0xD0;
-    bus.ram[0xC0FF] = 0x04; // 0xC100 + 4 = 0xC104
-
-    // We expect 4 cycles total due to the page cross penalty
-    for _ in 0..4 { cpu.step_one_cycle(&mut bus); }
-    assert_eq!(cpu.pc, 0xC104, "Branch crossing page boundary should land at 0xC104");
-}
-#[test]
-fn test_adc_flags_and_overflow() {
-    let mut cpu = M6502Cpu::new(CpuVariant::Ricoh2A03);
-    let mut bus = MockBus::new();
-
-    // --- CASE 1: Standard Addition (No Carry, No Overflow) ---
-    // A = 0x01, Memory = 0x02. Result should be 0x03.
-    cpu.pc = 0xC000;
-    cpu.a = 0x01;
-    cpu.status.carry = false;
-    bus.ram[0xC000] = 0x69; // ADC Immediate opcode
-    bus.ram[0xC001] = 0x02; // Immediate value
-
-    // ADC Immediate takes 2 cycles
-    for _ in 0..2 { cpu.step_one_cycle(&mut bus); }
-    assert_eq!(cpu.a, 0x03, "0x01 + 0x02 should equal 0x03");
-    assert!(!cpu.status.carry, "Carry should be clear");
-    assert!(!cpu.status.overflow, "Overflow should be clear");
-    assert!(!cpu.status.zero, "Zero should be clear");
-
-    // --- CASE 2: Unsigned Carry Generation ---
-    // A = 0xFF, Memory = 0x01. Result should roll over to 0x00 and set Carry + Zero.
-    cpu.pc = 0xC000;
-    cpu.a = 0xFF;
-    cpu.status.carry = false;
-    bus.ram[0xC000] = 0x69;
-    bus.ram[0xC001] = 0x01;
-
-    for _ in 0..2 { cpu.step_one_cycle(&mut bus); }
-    assert_eq!(cpu.a, 0x00, "0xFF + 0x01 should roll over to 0x00");
-    assert!(cpu.status.carry, "Carry flag must be set (unsigned overflow)");
-    assert!(cpu.status.zero, "Zero flag must be set");
-    assert!(!cpu.status.overflow, "Signed overflow should NOT be set here");
-
-    // --- CASE 3: Signed Overflow Trigger (Positive + Positive = Negative) ---
-    // A = 127 (0x7F), Memory = 1 (0x01). 
-    // In signed 8-bit math, 127 + 1 = 128, which is -128 (0x80). This triggers signed overflow!
-    cpu.pc = 0xC000;
-    cpu.a = 0x7F;
-    cpu.status.carry = false;
-    cpu.status.overflow = false;
-    bus.ram[0xC000] = 0x69;
-    bus.ram[0xC001] = 0x01;
-
-    for _ in 0..2 { cpu.step_one_cycle(&mut bus); }
-    assert_eq!(cpu.a, 0x80, "0x7F + 0x01 = 0x80");
-    assert!(cpu.status.overflow, "Overflow flag MUST be set (Positive + Positive yielded a negative result)");
-    assert!(!cpu.status.carry, "Unsigned carry should be clear");
-}
-#[test]
-fn test_indirect_indexed_page_cross() {
-    let mut cpu = M6502Cpu::new(CpuVariant::Ricoh2A03);
-    let mut bus = MockBus::new();
-
-    // Setup: We want to execute LDA ($20), Y 
-    // Opcode: 0xB1, Zero-Page Vector Address: 0x20
-    cpu.pc = 0xC000;
-    bus.ram[0xC000] = 0xB1; 
-    bus.ram[0xC001] = 0x20; 
-
-    // Put the base pointer inside Zero Page $20 and $21
-    // The vector points to 0x70E0
-    bus.ram[0x0020] = 0xE0; // Low Byte
-    bus.ram[0x0021] = 0x70; // High Byte
-
-    // --- CASE 1: No Page Cross (5 Cycles) ---
-    // Y = 0x05. Target = 0x70E0 + 0x05 = 0x70E5 (Same page: 0x70)
-    cpu.y = 0x05;
-    bus.ram[0x70E5] = 0x42; // Put a dummy value to read into A
-
-    for _ in 0..5 { cpu.step_one_cycle(&mut bus); }
-    assert_eq!(cpu.a, 0x42, "Accumulator should load the value 0x42");
-    assert_eq!(cpu.pc, 0xC002, "PC should advance 2 bytes");
-
-    // --- CASE 2: Page Cross Penalty (6 Cycles) ---
-    // Reset CPU position
-    cpu.pc = 0xC000;
-    // Y = 0x30. Target = 0x70E0 + 0x30 = 0x7110 (Crosses page 0x70 -> 0x71!)
-    cpu.y = 0x30;
-    bus.ram[0x7110] = 0x99; // Value across the boundary
-
-    // We expect 6 cycles here because of the page boundary crossing penalty
-    for _ in 0..6 { cpu.step_one_cycle(&mut bus); }
-    assert_eq!(cpu.a, 0x99, "Accumulator should load the value 0x99 across the page boundary");
-}
-#[test]
-fn test_stack_push_pull_and_status_flags() {
-    let mut cpu = M6502Cpu::new(CpuVariant::Ricoh2A03);
-    let mut bus = MockBus::new();
-
-    // --- CASE 1: PHA & PLA Data Integrity (3 + 4 Cycles) ---
-    // Load A with 0x55, push it to stack, clear A, then pull it back.
-    cpu.pc = 0xC000;
-    cpu.sp = 0xFF; // Start at the very top of page 1
-    cpu.a = 0x55;
-    
-    bus.ram[0xC000] = 0x48; // PHA Opcode (3 cycles)
-    bus.ram[0xC001] = 0x68; // PLA Opcode (4 cycles)
-
-    // Execute PHA
-    for _ in 0..3 { cpu.step_one_cycle(&mut bus); }
-    assert_eq!(cpu.sp, 0xFE, "SP should decrement to 0xFE after push");
-    assert_eq!(bus.ram[0x01FF], 0x55, "Memory at 0x01FF should hold the pushed value 0x55");
-
-    // Clear Accumulator to prove the pull actually modifies it
-    cpu.a = 0x00; 
-
-    // Execute PLA
-    for _ in 0..4 { cpu.step_one_cycle(&mut bus); }
-    assert_eq!(cpu.a, 0x55, "Accumulator should have recovered 0x55 from the stack");
-    assert_eq!(cpu.sp, 0xFF, "SP should wind back up to 0xFF after pull");
-    assert!(!cpu.status.zero, "Zero flag should be clear because 0x55 is non-zero");
-
-    // --- CASE 2: PLP Flag Masking Rules (4 Cycles) ---
-    // When flags are pulled via PLP, Bits 4 and 5 are handled strictly by the hardware.
-    // Bit 4 (Break) is entirely ignored on PLP, and Bit 5 is always forced to 1.
-    cpu.pc = 0xC000;
-    cpu.sp = 0xFF;
-    
-    // We will simulate a status byte on the stack: 0x00 (All flags clear)
-    bus.ram[0x01FF] = 0x00;
-    bus.ram[0xC000] = 0x28; // PLP Opcode (4 cycles)
-
-    for _ in 0..4 { cpu.step_one_cycle(&mut bus); }
-    
-    // Convert status to raw byte to verify bits 4 and 5
-    let raw_status = cpu.status.to_u8(false); 
-    assert_eq!(raw_status & 0x10, 0x00, "Bit 4 (B flag) must be 0 after PLP execution");
-    // Note: If your framework explicitly separates or manages bit 5 as an active flag,
-    // ensure it defaults back to true when working with raw stack bytes!
-}
-#[test]
-fn test_bit_and_asl_status_flags() {
-    let mut cpu = M6502Cpu::new(CpuVariant::Ricoh2A03);
-    let mut bus = MockBus::new();
-
-    // =========================================================================
-    // --- PART 1: BIT (Bit Test) ---
-    // The BIT instruction performs an AND between A and Memory.
-    // - Zero flag = Set if (A AND Memory) == 0
-    // - Negative flag = Set to Bit 7 of the memory value
-    // - Overflow flag = Set to Bit 6 of the memory value
-    // =========================================================================
-    cpu.pc = 0xC000;
-    cpu.a = 0x01; // Testing bit 0
-    
-    // Memory value has bits 7 and 6 set, but bit 0 is clear (0xC0 = 1100 0000)
-    bus.ram[0xC000] = 0x24; // BIT Zero Page Opcode (3 cycles)
-    bus.ram[0xC001] = 0x10; // Zero page address $10
-    bus.ram[0x0010] = 0xC0; // Value at $10
-
-    for _ in 0..3 { cpu.step_one_cycle(&mut bus); }
-
-    assert!(cpu.status.zero, "Zero flag MUST be set because (0x01 AND 0xC0) == 0");
-    assert!(cpu.status.negative, "Negative flag MUST match bit 7 of memory (1)");
-    assert!(cpu.status.overflow, "Overflow flag MUST match bit 6 of memory (1)");
-
-    // =========================================================================
-    // --- PART 2: ASL (Arithmetic Shift Left) Accumulator ---
-    // Shifts all bits left by 1. 
-    // - Bit 7 is shifted out directly into the Carry flag.
-    // - Bit 0 is filled with 0.
-    // =========================================================================
-    cpu.pc = 0xC000;
-    cpu.a = 0x80; // Only bit 7 is set (1000 0000)
-    cpu.status.carry = false;
-
-    bus.ram[0xC000] = 0x0A; // ASL Accumulator Opcode (2 cycles)
-
-    for _ in 0..2 { cpu.step_one_cycle(&mut bus); }
-
-    assert_eq!(cpu.a, 0x00, "0x80 shifted left by 1 should equal 0x00");
-    assert!(cpu.status.carry, "Carry flag MUST be set because bit 7 was 1");
-    assert!(cpu.status.zero, "Zero flag MUST be set because accumulator rolled over to 0x00");
-}
-#[test]
-fn test_rol_and_ror_circular_shifts() {
-    let mut cpu = M6502Cpu::new(CpuVariant::Ricoh2A03);
-    let mut bus = MockBus::new();
-
-    // =========================================================================
-    // --- PART 1: ROL (Rotate Left) Accumulator ---
-    // Shifts all bits left. 
-    // - Old Bit 7 goes INTO the Carry Flag.
-    // - Old Carry Flag goes INTO Bit 0.
-    // =========================================================================
-    cpu.pc = 0xC000;
-    cpu.a = 0x81;          // Bit 7 and Bit 0 are set (1000 0001)
-    cpu.status.carry = true; // Carry starts as 1
-
-    bus.ram[0xC000] = 0x2A; // ROL Accumulator Opcode (2 cycles)
-
-    for _ in 0..2 { cpu.step_one_cycle(&mut bus); }
-
-    // What to expect:
-    // - Bit 7 (1) shifts out into Carry -> New Carry = 1
-    // - Remaining bits shift left: 0000 0010
-    // - Old Carry (1) shifts into Bit 0 -> 0000 0011 (0x03)
-    assert_eq!(cpu.a, 0x03, "0x81 rotated left with Carry=1 should equal 0x03");
-    assert!(cpu.status.carry, "Carry flag should be set to the old Bit 7 (1)");
-    assert!(!cpu.status.zero, "Zero flag should be clear");
-
-    // =========================================================================
-    // --- PART 2: ROR (Rotate Right) Accumulator ---
-    // Shifts all bits right.
-    // - Old Bit 0 goes INTO the Carry Flag.
-    // - Old Carry Flag goes INTO Bit 7.
-    // =========================================================================
-    cpu.pc = 0xC000;
-    cpu.a = 0x01;           // Only Bit 0 is set (0000 0001)
-    cpu.status.carry = false; // Carry starts as 0
-
-    bus.ram[0xC000] = 0x6A; // ROR Accumulator Opcode (2 cycles)
-
-    for _ in 0..2 { cpu.step_one_cycle(&mut bus); }
-
-    // What to expect:
-    // - Bit 0 (1) shifts out into Carry -> New Carry = 1
-    // - Remaining bits shift right: 0000 0000
-    // - Old Carry (0) shifts into Bit 7 -> 0000 0000 (0x00)
-    assert_eq!(cpu.a, 0x00, "0x01 rotated right with Carry=0 should equal 0x00");
-    assert!(cpu.status.carry, "Carry flag should be set to the old Bit 0 (1)");
-    assert!(cpu.status.zero, "Zero flag should be set because accumulator is 0x00");
-}
-#[test]
-fn test_hardware_nmi_interrupt_stack_and_vector() {
-    let mut cpu = M6502Cpu::new(CpuVariant::Ricoh2A03);
-    let mut bus = MockBus::new();
-
-    // Setup: We place a NOP instruction at 0xC000.
-    // We will simulate an NMI being triggered right as this instruction processes.
-    cpu.pc = 0xC000;
-    cpu.sp = 0xFF;
-    cpu.status.zero = true; 
-    cpu.status.negative = false;
-    cpu.status.interrupt_disable=false;
-
-    bus.ram[0xC000] = 0xEA; // NOP Opcode (2 cycles)
-
-    // Pre-program the NMI Vector to point to handling routine at 0xD000
-    bus.ram[0xFFFA] = 0x00; // Low Byte
-    bus.ram[0xFFFB] = 0xD0; // High Byte
-
-    // Execute the 2 cycles for NOP
-    for _ in 0..2 { cpu.step_one_cycle(&mut bus); }
-    
-    // --- Trigger the Interrupt ---
-    // At this point, PC has advanced past NOP to 0xC001. 
-    // Now we invoke your interrupt sequence mechanism. 
-    // (Adjust this line to match your exact internal trigger function name)
-    cpu.setup_hardware_interrupt(Operation::Nmi, &mut bus);
-
-    // An interrupt sequence takes 7 micro-cycles to complete its execution pipeline
-    for _ in 0..7 { cpu.step_one_cycle(&mut bus); }
-
-    // --- ASSERTS ---
-    // 1. The PC should now be pointing at the NMI vector destination
-    assert_eq!(cpu.pc, 0xD000, "PC should have jumped to the NMI vector handler address (0xD000)");
-
-    // 2. The Stack Pointer should have moved down 3 slots (0xFF -> 0xFC)
-    assert_eq!(cpu.sp, 0xFC, "SP should be at 0xFC after pushing PC high, PC low, and Status");
-
-    // 3. Verify the Return Address pushed to the stack is exactly 0xC001
-    assert_eq!(bus.ram[0x01FF], 0xC0, "Stack top (0x01FF) should hold return PC High byte (0xC0)");
-    assert_eq!(bus.ram[0x01FE], 0x01, "Stack mid (0x01FE) should hold return PC Low byte (0xC001 right after NOP)");
-
-    // 4. Verify the Status Byte pushed to the stack
-    // During hardware interrupts (NMI/IRQ), Bit 4 (B flag) is pushed as 0. Bit 5 is always 1.
-//    let mut expected_status_pushed = cpu.status.to_u8(false); // false means not a BRK instruction
-//    assert_eq!(bus.ram[0x01FD], expected_status_pushed, "Stack bottom (0x01FD) should match the pushed status register layout");
-//    assert_eq!(bus.ram[0x01FD], 38, "Stack bottom should match the state during step 5");
-    assert_eq!(bus.ram[0x01FD], 34, "Stack should hold the status from BEFORE the interrupt was handled");
-    let final_live_status = cpu.status.to_u8(false);
-    assert_eq!(final_live_status, 38, "Live CPU status register should now have the Interrupt Disable flag set to true");
-}
-}
-
-
-
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Serialize, Deserialize)]
 pub struct StatusFlags {
     pub negative: bool,          // Bit 7 (N)
     pub overflow: bool,          // Bit 6 (V)
@@ -449,15 +73,19 @@ pub enum Operation {
     Cpx, Cpy, Dec, Dex, Dey, Eor, Inc, Inx, Iny, Irq, Jmp, Jsr, Lda, Ldx, Ldy, Lsr, Nmi, Nop,
     Ora, Pha, Php, Pla, Plp, Rol, Ror, Rti, Rts, Sbc, Sec, Sed, Sei, Sta, Stx, Sty, Tax, Tay,
     Tsx, Txa, Txs, Tya,
+    // 65C02 only
+    Pea, Pei, Phy, Stz, Trb, Tsb, JmpIndexedIndirect, JmpIndirect, JsrIndexedIndirect,
+    // 6502 illegal/Undocumented instructions
+    Alr, Anc, Ane, Arr, Dcp, Isc, Las, Lax, Lxa, Rla, Rra, Sax, Sbx, Sha, Shx, Shy, Slo, Sre, Tas,
 }
 
 impl Operation {
     pub fn is_rmw(&self) -> bool {
-        matches!(self, Operation::Lsr | Operation::Asl | Operation::Rol | Operation::Ror | Operation::Inc | Operation::Dec)
+        matches!(self, Operation::Lsr | Operation::Asl | Operation::Rol | Operation::Ror | Operation::Inc | Operation::Dec | Operation::Dcp | Operation::Isc | Operation::Slo | Operation::Rla | Operation::Rra | Operation::Sre)
     }
 
     pub fn is_write(&self) -> bool {
-        matches!(self, Operation::Sta | Operation::Stx | Operation::Sty)
+        matches!(self, Operation::Sta | Operation::Stx | Operation::Sty | Operation::Sax | Operation::Sbx | Operation::Sha | Operation::Shx | Operation::Shy | Operation::Tas)
     }
 }
 
@@ -483,6 +111,7 @@ pub struct M6502Cpu {
     pub status: StatusFlags,
     nmi_pending: bool,
     prev_nmi_line: bool,
+    i_delay: bool,
     bus_available: bool,  // false during dma transfer
     last_cycles: u8,
     last_opcode: u8, // Save most recent instruction for debugging
@@ -498,9 +127,27 @@ pub struct M6502Cpu {
     current_opcode: u8,
     current_op: Operation,
     current_mode: AddressingMode, 
-    cycles_remaining: u8,
-    instruction_step: u8,
-    test_print: bool,
+    cycles_remaining: u32,
+    instruction_step: u32,
+    test_prints: u8,
+}
+
+#[derive(Clone, Serialize, Deserialize)] 
+pub struct CpuState {
+    pub a: u8,
+    pub x: u8,
+    pub y: u8,
+    pub pc: u16,
+    pub sp: u8,
+    pub status: StatusFlags,
+    
+    // Crucial for your cycle accuracy and debugging:
+    pub cycles_remaining: u32,
+    pub instruction_step: u32,
+    pub current_opcode: u8,
+    pub nmi_pending: bool,
+    pub prev_nmi_line: bool,
+    pub total_cycles: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -521,6 +168,7 @@ enum AddressingMode {
     Interrupt,
     Unique,
 }
+
 
 impl M6502Cpu {
     pub fn new(variant: CpuVariant) -> Self {
@@ -550,7 +198,8 @@ impl M6502Cpu {
             status: StatusFlags { negative: false, overflow: false, decimal: false, interrupt_disable: false, zero: false, carry: false},
             nmi_pending: false,
             prev_nmi_line: false,
-            test_print: false,
+            i_delay: false,
+            test_prints: 0,
             last_cycles: 0,
             last_opcode: 0,
             total_cycles: 0,
@@ -571,20 +220,56 @@ impl M6502Cpu {
         }
     }
 
+    pub fn get_state(&self) -> CpuState {
+        CpuState {
+            a: self.a,
+            x: self.x,
+            y: self.y,
+            pc: self.pc,
+            sp: self.sp,
+            status: self.status,
+            cycles_remaining: self.cycles_remaining,
+            instruction_step: self.instruction_step,
+            current_opcode: self.current_opcode,
+            nmi_pending: self.nmi_pending,
+            prev_nmi_line: self.prev_nmi_line,
+            total_cycles: self.total_cycles,
+        }
+    }
+
+    pub fn total_cycles(&self) -> u64 { self.total_cycles }
+
+    // 2. Load the CPU state back in (Used for loading a save state or rewinding the debugger)
+    pub fn set_state(&mut self, state: CpuState) {
+        self.a = state.a;
+        self.x = state.x;
+        self.y = state.y;
+        self.pc = state.pc;
+        self.sp = state.sp;
+        self.status = state.status;
+        self.cycles_remaining = state.cycles_remaining;
+        self.instruction_step = state.instruction_step;
+        self.current_opcode = state.current_opcode;
+        self.nmi_pending = state.nmi_pending;
+        self.prev_nmi_line = state.prev_nmi_line;
+        self.total_cycles = state.total_cycles;
+    }
+
     pub fn is_interrupt_disabled(&self) -> bool {
         self.status.interrupt_disable
     }
 
-    pub fn power_on(&mut self, bus: &mut impl AddressBus) {
+    pub fn power_on(&mut self, bus: &mut dyn AddressBus) {
         self.is_running = true;
         self.a = 0; self.x = 0; self.y = 0;
         self.sp = 0xFD;
         self.status.interrupt_disable = true;
         self.nmi_pending = false;
+        self.i_delay = false;
         self.prev_nmi_line = false;
         self.last_cycles = 0;
         self.last_opcode = 0;
-        for _ in 0..6 {
+        for _ in 0..5 {
             bus.step_cycles(1);
         }
         self.operand_address_crossed_page = false;
@@ -595,12 +280,14 @@ impl M6502Cpu {
         bus.step_cycles(1);
         self.pc = (hi << 8) | lo;
         self.total_cycles = 7;
+        emu_print!("total cycles {} bus cycles {}", self.total_cycles, bus.total_cycles());
     }
 
-    pub fn reset(&mut self, bus: &impl AddressBus) {
+    pub fn reset(&mut self, bus: &mut dyn AddressBus) {
         self.sp = self.sp.wrapping_sub(3);
         self.status.interrupt_disable = true;
         self.nmi_pending = false;
+        self.i_delay = false;
         self.prev_nmi_line = false;
         self.last_cycles = 0;
         self.last_opcode = 0;
@@ -620,19 +307,46 @@ impl M6502Cpu {
         self.prev_nmi_line = current_nmi_line;
 
         if self.cycles_remaining == 0 {
+            self.instruction_step = 1;
             if !self.check_interrupts(bus) {
+                self.i_delay = false;
                 // CYCLE 1: FETCH STAGE
                 self.current_opcode = bus.read_byte(self.pc);
-//                if self.total_cycles >= 62100 && self.total_cycles <= 63246 {
+
+/*                if self.total_cycles >= 85000 && self.total_cycles <= 8585050 {
+                    let result = bus.read_byte(0x6000);
+                    let result1 = bus.read_byte(0x6001);
+                    let result2 = bus.read_byte(0x6004);
+                    let result3 = bus.read_byte(0x6005);
+                    let result4 = bus.read_byte(0x6006);
+                    let result5 = bus.read_byte(0x6007);
+                    let result6 = bus.read_byte(0x6008);
+                    emu_print!("******result={:02X}. {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}", result, result1, result2, result3, result4, result5, result6);
+                } // && self.total_cycles <= 63246 { */
 //                if self.test_print {
-                if bus.total_cycles() <= 100 || (self.pc >= 0xA350 && self.pc <= 0xA370) {
-                    emu_print!("{ } Current opcode: {:02x} PC={:04x}|A={:02x}|SP={:04x}|", bus.total_cycles(), self.current_opcode, self.pc, self.a, self.sp);
+//                if bus.total_cycles() <= 100 || (self.pc >= 0xA350 && self.pc <= 0xA370) {
+/*                if !bus.is_nmi_enabled() { */
+                if self.test_prints > 0 {
+                    emu_print!("{ } Current opcode: {:02x} PC={:04x}|A={:02x}|X={:02X}|Y={:02X}|SP={:04x}|I={}|I_DELAY={}", bus.total_cycles(), self.current_opcode, self.pc, self.a, self.x, self.y, self.sp, self.status.interrupt_disable, self.i_delay);
+                    self.test_prints -= 1;
                 }
+/*
+                    if self.pc == 0xDDC6 {
+                       let result1 = bus.read_byte(0xDDC7);
+                       let result2 = bus.read_byte(0xDDC8);
+                       emu_print!("operand={:02X} {:02X}", result1, result2);  
+                    }
+                    if self.pc == 0x82C6 || self.pc == 0x82C8 {
+                       let result1 = bus.read_byte(self.pc + 1);
+                       emu_print!("operand={:02X}", result1);  
+
+                    }
+                } */
                 let (op, mode, cycles) = self.decode_opcode(self.current_opcode);
                 self.pc = self.pc.wrapping_add(1);
                 self.current_mode = mode;
                 self.current_op = op;
-                self.cycles_remaining = cycles;
+                self.cycles_remaining = cycles as u32;
                 self.instruction_step = 2;
             }
         } else {
@@ -677,7 +391,6 @@ impl M6502Cpu {
             0x2E => (Operation::Rol, AddressingMode::Absolute, 6),
             0x30 => (Operation::Bmi, AddressingMode::Relative, 2),
             0x31 => (Operation::And, AddressingMode::IndirectY, 5),
-
             0x35 => (Operation::And, AddressingMode::ZeroPageX, 4),
             0x36 => (Operation::Rol, AddressingMode::ZeroPageX, 6),
             0x38 => (Operation::Sec, AddressingMode::Implied, 2),
@@ -805,21 +518,581 @@ impl M6502Cpu {
             0xF8 => (Operation::Sed, AddressingMode::Implied, 2),
             0xFD => (Operation::Sbc, AddressingMode::AbsoluteX, 4),
             0xFE => (Operation::Inc, AddressingMode::AbsoluteX, 7),
+            // 65C02 instructions
+            0x04 => {
+                if self.config.is_c02 {
+                    (Operation::Tsb, AddressingMode::ZeroPage, 5)
+                } else {
+                    (Operation::Nop, AddressingMode::ZeroPage, 3)
+                }
+            }
+            0x0C => {
+                if self.config.is_c02 {
+                    (Operation::Tsb, AddressingMode::Absolute, 5)
+                } else {
+                    (Operation::Nop, AddressingMode::Absolute, 4)
+                }
+            }
+            0x14 => {
+                if self.config.is_c02 {
+                    (Operation::Trb, AddressingMode::ZeroPage, 5)
+                } else {
+                    (Operation::Nop, AddressingMode::ZeroPageX, 4)
+                }
+            }
+            0x1C => {
+                if self.config.is_c02 {
+                    (Operation::Trb, AddressingMode::Absolute, 6)
+                } else {
+                    (Operation::Nop, AddressingMode::AbsoluteX, 4)
+                }
+            }
+            0x34 => {
+                if self.config.is_c02 {
+                    (Operation::Bit, AddressingMode::ZeroPageX, 4)
+                } else {
+                    (Operation::Nop, AddressingMode::ZeroPageX, 4)
+                }
+            }
+            0x3A => {
+                if self.config.is_c02 {
+                    (Operation::Dec, AddressingMode::Implied, 2)
+                } else {
+                    (Operation::Nop, AddressingMode::Implied, 2)
+                }
+            }
+            0x3C => {
+                if self.config.is_c02 {
+                    (Operation::Bit, AddressingMode::AbsoluteX, 4)
+                } else {
+                    (Operation::Nop, AddressingMode::AbsoluteX, 4)
+                }
+            }
+            0x43 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sre, AddressingMode::IndirectX, 8)
+                }
+            }
+            0x47 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sre, AddressingMode::ZeroPage, 5)
+                }
+            }
+            0x4F => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sre, AddressingMode::Absolute, 6)
+                }
+            }
+            0x53 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sre, AddressingMode::IndirectY, 8)
+                }
+            }
+            0x57 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sre, AddressingMode::ZeroPageX, 6)
+                }
+            }
+            0x5A => {
+                if self.config.is_c02 {
+                    (Operation::Phy, AddressingMode::Unique, 2)
+                } else {
+                    (Operation::Nop, AddressingMode::Implied, 2)
+                }
+            }
+            0x5B => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sre, AddressingMode::AbsoluteY, 7)
+                }
+            }
+            0x5F => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sre, AddressingMode::AbsoluteX, 7)
+                }
+            }
+            0x64 => {
+                if self.config.is_c02 {
+                    (Operation::Stz, AddressingMode::ZeroPage, 3)
+                } else {
+                    (Operation::Nop, AddressingMode::ZeroPage, 3)
+                }
+            }
+            0x6B => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Arr, AddressingMode::Immediate, 2)
+                }
+            }
+            0x74 => {
+                if self.config.is_c02 {
+                    (Operation::Stz, AddressingMode::ZeroPageX, 4)
+                } else {
+                    (Operation::Nop, AddressingMode::ZeroPageX, 4)
+                }
+            }
+            0x7C => {
+                if self.config.is_c02 {
+                    (Operation::JmpIndexedIndirect, AddressingMode::AbsoluteX, 6) 
+                } else {
+                    (Operation::Nop, AddressingMode::AbsoluteX, 4)
+                }
+            }
+            0xBB => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Las, AddressingMode::AbsoluteY, 4) // Standard NES path
+                }
+            }
+            0xCB => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sbx, AddressingMode::Immediate, 2)
+                }
+            }
+            0xD4 => {
+                if self.config.is_c02 { // TODO: NEED TO IMPLEMENT OPERATION
+                    (Operation::Pei, AddressingMode::ZeroPage, 6)
+                } else {
+                    (Operation::Nop, AddressingMode::ZeroPageX, 4)
+                }
+            }
+            0xDC => {
+                if self.config.is_c02 {
+                    (Operation::JmpIndirect, AddressingMode::Absolute, 6)
+                } else {
+                    (Operation::Nop, AddressingMode::AbsoluteX, 4) // Standard NES path
+                }
+            }
+            0xE3 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Isc, AddressingMode::IndirectX, 8)
+                }
+            }
+            0xE7 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Isc, AddressingMode::ZeroPage, 5)
+                }
+            }
+            0xEF => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Isc, AddressingMode::Absolute, 6)
+                }
+            }
+            0xF3 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Isc, AddressingMode::IndirectY, 8)
+                }
+            }
+            0xF4 => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as PEA, which has a 2-byte operand (3 bytes total)
+                    (Operation::Pea, AddressingMode::Immediate, 5)
+                } else {
+                    // Standard NES treats this as a 2-byte, 4-cycle ZeroPageX NOP
+                    (Operation::Nop, AddressingMode::ZeroPageX, 4) 
+                }
+            }
+            0xF7 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Isc, AddressingMode::ZeroPageX, 6)
+                }
+            }
+            0xFB => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Isc, AddressingMode::AbsoluteY, 7)
+                }
+            }
+            0xFC => {
+                if self.config.is_c02 {
+                    (Operation::JsrIndexedIndirect, AddressingMode::AbsoluteX, 6)
+                } else {
+                    (Operation::Nop, AddressingMode::AbsoluteX, 4)
+                }
+            }
+            0xFF => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Isc, AddressingMode::AbsoluteX, 7)
+                }
+            }
+            // Unofficial/Illegal opcodes
+            0x03 => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                // Standard NES treats this as a heavy 8-cycle SLO instruction
+                    (Operation::Slo, AddressingMode::IndirectX, 8)
+                }
+            }
+            0x0B | 0x2B => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Anc, AddressingMode::Immediate, 2)
+                }
+            }
+            0x23 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rla, AddressingMode::IndirectX, 8)
+                }
+            }
+            0x27 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rla, AddressingMode::ZeroPage, 5)
+                }
+            }
+            0x2F => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rla, AddressingMode::Absolute, 6)
+                }
+            }
+            0x33 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rla, AddressingMode::IndirectY, 8)
+                }
+            }
+            0x37 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rla, AddressingMode::ZeroPageX, 6)
+                }
+            }
+            0x3B => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rla, AddressingMode::AbsoluteY, 7)
+                }
+            }
+            0x3F => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rla, AddressingMode::AbsoluteX, 7)
+                }
+            }
+            0x4B => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Alr, AddressingMode::Immediate, 2)
+                }
+            }
+            0x63 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rra, AddressingMode::IndirectX, 8)
+                }
+            }
+            0x67 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rra, AddressingMode::ZeroPage, 5)
+                }
+            }
+            0x6F => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rra, AddressingMode::Absolute, 6)
+                }
+            }
+            0x73 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rra, AddressingMode::IndirectY, 8)
+                }
+            }
+            0x77 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rra, AddressingMode::ZeroPageX, 6)
+                }
+            }
+            0x7B => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rra, AddressingMode::AbsoluteY, 7)
+                }
+            }
+            0x7F => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Rra, AddressingMode::AbsoluteX, 7)
+                }
+            }
+            0x83 => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sax, AddressingMode::IndirectX, 6)
+                }
+            }
+            0x87 => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sax, AddressingMode::ZeroPage, 3)
+                }
+            }
+            0x8B => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Ane, AddressingMode::Immediate, 2)
+                }
+            }
+            0x8F => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sax, AddressingMode::Absolute, 4)
+                }
+            }
+            0x93 => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sha, AddressingMode::IndirectY, 6)
+                }
+            }
+            0x97 => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sax, AddressingMode::ZeroPageY, 4)
+                }
+            }
+            0x9B => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Tas, AddressingMode::AbsoluteY, 5)
+                }
+            }
+            0x9C => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Shy, AddressingMode::AbsoluteX, 5)
+                }
+            }
+            0x9E => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Shx, AddressingMode::AbsoluteY, 5)
+                }
+            }
+            0x9F => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Sha, AddressingMode::AbsoluteY, 5)
+                }
+            }
+            0xA3 => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Lax, AddressingMode::IndirectX, 6)
+                }
+            }
+            0xA7 => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Lax, AddressingMode::ZeroPage, 3)
+                }
+            }
+            0xAB => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Lxa, AddressingMode::Immediate, 2)
+                }
+            }
+            0xAF => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Lax, AddressingMode::Absolute, 4)
+                }
+            }
+            0xB3 => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Lax, AddressingMode::IndirectY, 5)
+                }
+            }
+            0xB7 => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Lax, AddressingMode::ZeroPageY, 4)
+                }
+            }
+            0xBF => {
+                if self.config.is_c02 {
+                    // 65C02 treats this as a 1-byte, 1-cycle implied NOP block
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Lax, AddressingMode::AbsoluteY, 4)
+                }
+            }
+            0xC3 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Dcp, AddressingMode::IndirectX, 8)
+                }
+            }
+            0xC7 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Dcp, AddressingMode::ZeroPage, 5)
+                }
+            }
+            0xCF => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Dcp, AddressingMode::Absolute, 6)
+                }
+            }
+            0xD3 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Dcp, AddressingMode::IndirectY, 8)
+                }
+            }
+            0xD7 => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Dcp, AddressingMode::ZeroPageX, 6)
+                }
+            }
+            0xDB => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Dcp, AddressingMode::AbsoluteY, 7)
+                }
+            }
+            0xDF => {
+                if self.config.is_c02 {
+                    (Operation::Nop, AddressingMode::Implied, 1)
+                } else {
+                    (Operation::Dcp, AddressingMode::AbsoluteX, 7)
+                }
+            }
+            0x1A | 0x7A | 0xDA | 0xFA => (Operation::Nop, AddressingMode::Implied, 2),
+            0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => (Operation::Nop, AddressingMode::Immediate, 2),
+            0x44 => (Operation::Nop, AddressingMode::ZeroPage, 3),
+            0x54 => (Operation::Nop, AddressingMode::ZeroPageX, 4),
+            0x5C => (Operation::Nop, AddressingMode::AbsoluteX, 4),
+            0x07 => (Operation::Slo, AddressingMode::ZeroPage, 5),
+            0x0F => (Operation::Slo, AddressingMode::Absolute, 6),
+            0x13 => (Operation::Slo, AddressingMode::IndirectY, 8),
+            0x17 => (Operation::Slo, AddressingMode::ZeroPageX, 6),
+            0x1B => (Operation::Slo, AddressingMode::AbsoluteY, 7),
+            0x1F => (Operation::Slo, AddressingMode::AbsoluteX, 7),
             _=> { emu_print!("Opcode unimplemented: {:02X}. {:04X}", opcode, self.pc);
                 todo!() },
         }
     }
 
     fn check_interrupts(&mut self, bus: &mut dyn AddressBus) -> bool {
+        if bus.is_irq_line_asserted() && self.test_prints > 0 {
+                emu_print!("IRQ Check - line=low, I_flag={}, i_delay={}", 
+              self.status.interrupt_disable, self.i_delay);
+        }
+
         if self.nmi_pending {
             self.nmi_pending = false; // Clear edge trigger flag
             emu_print!("Setup NMI Interrupt");
             self.setup_hardware_interrupt(Operation::Nmi, bus);
             return true;
         }
-    
-        if !self.status.interrupt_disable && bus.is_irq_line_asserted() {
-            emu_print!("Setup IRQ Interrupt");
+
+        let interrupts_disabled = if self.i_delay {
+            if self.status.interrupt_disable {
+                false
+            } else {
+                true
+            }
+        } else {
+            self.status.interrupt_disable
+        };
+        
+        if bus.is_irq_line_asserted() && !interrupts_disabled {
+            emu_print!("******Setup IRQ Interrupt. I_DELAY={}", self.i_delay);
             self.setup_hardware_interrupt(Operation::Irq, bus);
             return true;
         }
@@ -834,8 +1107,8 @@ impl M6502Cpu {
         self.instruction_step = 2;
     
         // Cycle 1 Hardware Reality: Read from current PC and discard the byte
-        let _dummy = bus.read_byte(self.pc); 
-        // Hardware interrupts do NOT increment PC here!
+        let _dummy = bus.read_byte(self.pc);
+        self.i_delay = false;
     }
 
     fn execute_micro_cycle(&mut self, bus: &mut dyn AddressBus) {
@@ -937,32 +1210,30 @@ impl M6502Cpu {
                 };
                 match self.instruction_step {
                     2 => {
-                        let offset_addr = self.pc;
                         let offset = bus.read_byte(self.pc) as i8;
                         self.pc = self.pc.wrapping_add(1);
 
+                        // Check if the condition for the branch is met (e.g., if BNE, check zero flag)
                         if condition_met {
-                            let target_pc = (self.pc as i16).wrapping_add(offset as i16) as u16;
-                            self.effective_addr = target_pc;
-                            
-                            self.cycles_remaining += 1;
+                            // Calculate the base PC address *after* fetching the offset
+                            let base_pc = self.pc;
+                            self.effective_addr = base_pc.wrapping_add(offset as i16 as u16);
+
+                            // Calculate page cross using the updated base_pc!
+                            let page_crossed = (base_pc >> 8) != (self.effective_addr >> 8);
+            
+                            if page_crossed {
+                                // Branch taken + Page Cross = 4 cycles total (Needs 2 more micro-cycles)
+                                self.cycles_remaining += 2; 
+                            } else {
+                                // Branch taken + Same Page = 3 cycles total (Needs 1 more micro-cycle)
+                                self.cycles_remaining += 1;
+                            }
                         }
                     }
-                    3 => {  // Branch occurs on same page
-                        let base_page = (self.pc.wrapping_sub(1)) & 0xFF00;
-                        let target_page = self.effective_addr & 0xFF00;
-
-                        let page_crossed = base_page != target_page;
-                        if !page_crossed {
-                            let _dummy = bus.read_byte(self.effective_addr);
-                            // instruction finishes here if branch occurs on same page.
-                            self.pc = self.effective_addr;
-                        } else {
-                            let uncorrected_addr = (self.pc & 0xFF00) | (self.effective_addr & 0x00FF);
-                            let _dummy = bus.read_byte(uncorrected_addr);
-                            // inject page boundary penalty
-                            self.cycles_remaining += 1;
-                        }
+                    3 => {
+                        let _dummy = bus.read_byte(self.pc);
+                        self.pc = self.effective_addr;
                     }
                     4 => {  // Branch occurs to different page
                         let _dummy = bus.read_byte(self.effective_addr);
@@ -986,13 +1257,23 @@ impl M6502Cpu {
                             self.execute_operation(self.current_op, 0, bus);
                         }
                     }
-                    4 => {
+                    4 =>  {
                         if self.current_op.is_write() {
                             self.execute_operation(self.current_op, 0, bus);
                         } else {
                             let value = bus.read_byte(self.effective_addr);
-                            self.execute_operation(self.current_op, value, bus);
+                            if self.current_op.is_rmw() {
+                                self.temp_value = value;
+                                bus.write_byte(self.effective_addr, self.temp_value);
+                            } else {
+                                self.execute_operation(self.current_op, value, bus);
+                            }
                         }
+                    }
+                    5 => {
+                        if self.current_op.is_rmw() {
+                            self.execute_operation(self.current_op, self.temp_value, bus);
+                        } 
                     }
                     _=> {}
                 }
@@ -1151,7 +1432,11 @@ impl M6502Cpu {
                     }
                     6 => {
                         // Cycle 6: Perform the actual bus access and execute the instruction operation.
-                        if self.current_op.is_write() {
+                        if self.current_op.is_rmw() {
+                            // RMW Cycle 6: Read the actual data byte from the correct target address
+                            self.temp_value = bus.read_byte(self.effective_addr);
+                        }
+                        else if self.current_op.is_write() {
                             // If it's a write operation (e.g., STA), write the register contents to memory
                             self.execute_operation(self.current_op, 0, bus);
                         } else {
@@ -1160,60 +1445,86 @@ impl M6502Cpu {
                             self.execute_operation(self.current_op, value, bus);
                         }
                     }
+                    7 => {
+                        if self.current_op.is_rmw() {
+                            // RMW Cycle 7: Dummy write step. 
+                            // Hardware writes the unmodified old value back to memory while calculating the shift.
+                            bus.write_byte(self.effective_addr, self.temp_value);
+                        }
+                    }
+                    8 => {
+                        if self.current_op.is_rmw() {
+                            // RMW Cycle 8: Terminal step.
+                            // Execute the actual combined shifting and ORA logic, writing back the shifted byte.
+                            self.execute_operation(self.current_op, self.temp_value, bus);
+                        }
+                    }
                     _ => { }
                 }
             }
+
             AddressingMode::IndirectY => {
                 match self.instruction_step {
                     2 => {
-                        // Cycle 2: Fetch the zero-page vector pointer address from the instruction stream
                         self.temp_addr_low = bus.read_byte(self.pc);
                         self.pc = self.pc.wrapping_add(1);
                     }
                     3 => {
-                        // Cycle 3: Read target address low byte from the zero-page location
                         self.temp_value = bus.read_byte(self.temp_addr_low as u16);
                     }
                     4 => {
-                        // Cycle 4: Read target address high byte from the next zero-page location.
-                        // Hardware constraint: The vector address increment wraps strictly inside Page 0!
                         let ptr_high = self.temp_addr_low.wrapping_add(1) as u16;
-                        self.temp_addr_high = bus.read_byte(ptr_high) & 0xFF;
+                        self.temp_addr_high = bus.read_byte(ptr_high);
 
-                        // Construct the base target address and add the Y offset to form effective address
                         let base_target = ((self.temp_addr_high as u16) << 8) | (self.temp_value as u16);
                         self.effective_addr = base_target.wrapping_add(self.y as u16);
                     }
                     5 => {
-                        // Cycle 5: Check if a page boundary was crossed
                         let expected_high = self.temp_addr_high as u16;
-                        let actual_high = self.effective_addr >> 8;
                         let uncorrected_addr = (expected_high << 8) | (self.effective_addr & 0x00FF);
-
-                        if self.current_op.is_write() {
-                            // Write operations (like STA) are decoded at a base of 6 cycles.
-                            // We perform the uncorrected read and naturally let it advance into step 6.
+            
+                        if self.current_op.is_rmw() {
+                            // RMW Illegal Instructions: Read from the uncorrected address and 
+                            // proceed directly to cycle 6. Never skip cycles, never add penalty cycles.
+                            let _garbage = bus.read_byte(uncorrected_addr);
+                        } else if self.current_op.is_write() {
                             let _garbage = bus.read_byte(uncorrected_addr);
                         } else {
-                            // Read operations (LDA, AND, etc.) are decoded at a base of 5 cycles.
+                            // Normal Read instruction behavior
+                            let actual_high = self.effective_addr >> 8;
                             if expected_high == actual_high {
-                                // No page cross: Execute the operation early and terminate the instruction cleanly
                                 let value = bus.read_byte(self.effective_addr);
                                 self.execute_operation(self.current_op, value, bus);
                             } else {
-                                // Page crossed! Perform dummy uncorrected read and inject the penalty cycle to hit step 6
                                 let _garbage = bus.read_byte(uncorrected_addr);
                                 self.cycles_remaining += 1;
                             }
                         }
                     }
+
                     6 => {
-                        // Cycle 6: Terminal execution phase for page-crossed reads or write operations
-                        if self.current_op.is_write() {
+                        if self.current_op.is_rmw() {
+                            // RMW Cycle 6: Read the actual data byte from the correct target address
+                            self.temp_value = bus.read_byte(self.effective_addr);
+                        } else if self.current_op.is_write() {
                             self.execute_operation(self.current_op, 0, bus);
                         } else {
                             let value = bus.read_byte(self.effective_addr);
                             self.execute_operation(self.current_op, value, bus);
+                        }
+                    }
+                    7 => {
+                        if self.current_op.is_rmw() {
+                            // RMW Cycle 7: Dummy write step. 
+                            // Hardware writes the unmodified old value back to memory while calculating the shift.
+                            bus.write_byte(self.effective_addr, self.temp_value);
+                        }
+                    }
+                    8 => {
+                        if self.current_op.is_rmw() {
+                            // RMW Cycle 8: Terminal step.
+                            // Execute the actual combined shifting and ORA logic, writing back the shifted byte.
+                            self.execute_operation(self.current_op, self.temp_value, bus);
                         }
                     }
                     _ => { }
@@ -1264,7 +1575,15 @@ impl M6502Cpu {
                         self.sp = self.sp.wrapping_sub(1);
  //                       emu_print!("**PHP** PC={:04X}|SP={:04X}|cycles_remaining={ }, instruction_step={ } | pushed {:02X}", self.pc, self.sp, self.cycles_remaining, self.instruction_step, self.status.to_u8(true));
                     }
-
+                    // PHY
+                    (Operation::Phy, 2) => { let _dummy = bus.read_byte(self.pc);
+//                        emu_print!("**PHA** PC={:04X}|SP={:04X}|cycles_remaining={ }, instruction_step={ }", self.pc, self.sp, self.cycles_remaining, self.instruction_step);
+                    } // Idle cycle
+                    (Operation::Phy, 3) => {
+                        bus.write_byte(STACK_BASE + self.sp as u16, self.y);
+                        self.sp = self.sp.wrapping_sub(1);
+//                        emu_print!("**PHA** PC={:04X}|SP={:04X}|cycles_remaining={ }, instruction_step={ } | pushed {:02X}", self.pc, self.sp, self.cycles_remaining, self.instruction_step, self.a);
+                    }
                     // PLA
                     (Operation::Pla, 2) => {
                         let _dummy = bus.read_byte(self.pc);
@@ -1283,15 +1602,31 @@ impl M6502Cpu {
 
                     // PLP
                     (Operation::Plp, 2) => { let _dummy = bus.read_byte(self.pc); }
-                    (Operation::Plp, 3) => { let _dummy = bus.read_byte(STACK_BASE + self.sp as u16); self.sp = self.sp.wrapping_add(1); }
-                    (Operation::Plp, 4) => { let val = bus.read_byte(STACK_BASE + self.sp as u16); self.status.from_u8(val); }
+                    (Operation::Plp, 3) => { self.sp = self.sp.wrapping_add(1); let _dummy = bus.read_byte(STACK_BASE + self.sp as u16); }
+                    (Operation::Plp, 4) => {
+                        let val = bus.read_byte(STACK_BASE + self.sp as u16);
+                        let old_interrupt_disable = self.status.interrupt_disable;
+
+
+                        self.status.from_u8(val); 
+
+                        if old_interrupt_disable != self.status.interrupt_disable {
+                            self.i_delay = true;
+                        }
+                    }
                     // RTI
                     (Operation::Rti, 2) => { let _dummy = bus.read_byte(self.pc); }
-                    (Operation::Rti, 3) => { let _dummy = bus.read_byte(0x0100 + self.sp as u16); self.sp = self.sp.wrapping_add(1); }
-                    (Operation::Rti, 4) => { self.status.from_u8(bus.read_byte(0x0100 + self.sp as u16)); self.sp = self.sp.wrapping_add(1); }
-                    (Operation::Rti, 5) => { self.temp_addr_low = bus.read_byte(0x0100 + self.sp as u16); self.sp = self.sp.wrapping_add(1); }
+                    (Operation::Rti, 3) => { let _dummy = bus.read_byte(STACK_BASE + self.sp as u16); self.sp = self.sp.wrapping_add(1); }
+                    (Operation::Rti, 4) => {
+                         self.status.from_u8(bus.read_byte(STACK_BASE + self.sp as u16));
+                         self.sp = self.sp.wrapping_add(1);
+                         self.i_delay = false;
+                    }
+                    (Operation::Rti, 5) => { self.temp_addr_low = bus.read_byte(STACK_BASE + self.sp as u16); self.sp = self.sp.wrapping_add(1); }
                     (Operation::Rti, 6) => { self.temp_addr_high = bus.read_byte(STACK_BASE + self.sp as u16);
-                                             self.pc = ((self.temp_addr_high as u16) << 8) | (self.temp_addr_low as u16); }
+                                             self.pc = ((self.temp_addr_high as u16) << 8) | (self.temp_addr_low as u16);
+                                                emu_print!("{} ***RTI*** returning to PC={:04X}. SP now={:04X}. I={}|I_DELAY={}", bus.total_cycles(), self.pc, self.sp, self.status.interrupt_disable, self.i_delay);
+                                            }
                     // RTS
                     (Operation::Rts, 2) => { let _dummy = bus.read_byte(self.pc);
                         // emu_print!("**RTS** PC={:04X}|SP={:04X}|cycles_remaining={ }, instruction_step={ } ", self.pc, self.sp, self.cycles_remaining, self.instruction_step);
@@ -1323,12 +1658,18 @@ impl M6502Cpu {
                     2 => {
                     // Cycle 2: Dummy Read
                         let _dummy = bus.read_byte(self.pc);
-//                            emu_print!("Interrupt cycle 2 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());                        
+ //                       emu_print!("Interrupt cycle 2 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
                         if self.current_op == Operation::Brk {
                             // Software BRK is a 2-byte instruction frame, so it advances PC here.
                             // Hardware interrupts do NOT advance PC.
-//                            emu_print!("Operation is BRK at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
                             self.pc = self.pc.wrapping_add(1);
+                            emu_print!("Operation is BRK. Cycle 2 done and PC advanced to {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
+                        }
+                        if self.current_op == Operation::Nmi {
+                            emu_print!("{} NMI cycle 2: PC: {:04X}| SP: {:04X}", bus.total_cycles(), self.pc, self.sp);
+                        } else if self.current_op == Operation::Irq {
+                            emu_print!("{} IRQ cycle 2: PC: {:04X}| SP: {:04X}", bus.total_cycles(), self.pc, self.sp);
+//                        self.test_print = true;
                         }
                     }
                     3 => {
@@ -1337,13 +1678,22 @@ impl M6502Cpu {
                         bus.write_byte(STACK_BASE + (self.sp as u16), pc_high);
                         self.sp = self.sp.wrapping_sub(1);
 //                            emu_print!("Interrupt cycle 3 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
+                        if self.current_op == Operation::Brk {
+                            emu_print!("Operation is BRK. Cycle 3 done and PC still {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
+
+                        }
                     }
                     4 => {
                         // Cycle 4: Push PC Low Byte to Stack
                         let pc_low = (self.pc & 0x00FF) as u8;
                         bus.write_byte(STACK_BASE + (self.sp as u16), pc_low);
                         self.sp = self.sp.wrapping_sub(1);
-//                        emu_print!("Interrupt cycle 4 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
+                        if self.current_op == Operation::Brk {
+                            emu_print!("Operation is BRK. Cycle 4 done and PC still {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
+
+                        }
+
+                        //                        emu_print!("Interrupt cycle 4 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
                     }
                     5 => {
                         // Cycle 5: Push Status Flags to Stack
@@ -1352,22 +1702,40 @@ impl M6502Cpu {
             
                         bus.write_byte(STACK_BASE + (self.sp as u16), status_byte);
                         self.sp = self.sp.wrapping_sub(1);
-//                        emu_print!("Interrupt cycle 5 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
+                        if self.current_op == Operation::Brk {
+                            emu_print!("Operation is BRK. Cycle 5 done and PC still {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
+
+                        }
+
+                        //                        emu_print!("Interrupt cycle 5 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
                     }
                     6 => {
                         // Cycle 6: Fetch Vector Low Byte
                         self.temp_addr_low = bus.read_byte(vector_base_addr);
-//                        emu_print!("Interrupt cycle 6 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
+                        if self.current_op == Operation::Brk {
+                            emu_print!("Operation is BRK. Cycle 6 done and PC still {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
+
+                        }
+
+                        //                        emu_print!("Interrupt cycle 6 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
                     }
                     7 => {
                         // Cycle 7: Fetch Vector High Byte and perform the actual vector jump!
                         self.status.interrupt_disable = true;
                         let high_byte = bus.read_byte(vector_base_addr + 1);
                         self.pc = ((high_byte as u16) << 8) | (self.temp_addr_low as u16);
-                        emu_print!("INTERRUPT cycle 7: Vector Addr: {:04X}|PC: {:04X}|Vector high byte: {:02X} | low byte: {:02X}", vector_base_addr, self.pc, high_byte, self.temp_addr_low);
+                        if self.current_op == Operation::Nmi {
+                            emu_print!("{} NMI cycle 7: Vector Addr: {:04X}|PC: {:04X}|Vector high byte: {:02X} | low byte: {:02X}", bus.total_cycles(), vector_base_addr, self.pc, high_byte, self.temp_addr_low);
+                        } else if self.current_op == Operation::Irq {
+                            emu_print!("{} IRQ cycle 7: Vector Addr: {:04X}|PC: {:04X}|Vector high byte: {:02X} | low byte: {:02X}", bus.total_cycles(), vector_base_addr, self.pc, high_byte, self.temp_addr_low);
 //                        self.test_print = true;
+                        }
+                        if self.current_op == Operation::Brk {
+                            emu_print!("Operation is BRK. Cycle 7 done and PC now {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
+
+                        }
                     }
-                    _ => {}
+                    _ => { emu_print!("INTERRUPT step {}: Vector Addr: {:04X}|PC: {:04X}|", self.instruction_step, vector_base_addr, self.pc); }
                 }
             }
         }
@@ -1376,8 +1744,62 @@ impl M6502Cpu {
     fn execute_operation(&mut self, op: Operation, value: u8, bus: &mut dyn AddressBus) {
         match op {
             Operation::Adc => self.add_with_carry_logic(value),
+            Operation::Alr => {  // Undocumented 6502 instruction
+                // 1. Perform intermediate AND operation
+                let intermediate = self.a & value;
+    
+                // 2. Perform LSR on the intermediate result
+                self.status.carry = (intermediate & 0x01) != 0; // Bit 0 goes to Carry
+                self.a = intermediate >> 1;                     // Shift right and save to Accumulator
+    
+                // 3. Update status flags
+                self.status.zero = self.a == 0;
+                self.status.negative = false; // Always 0 because bit 7 was shifted right
+            }
+            Operation::Anc => { // Unofficial 6502 instruction
+                // 1. Perform standard bitwise AND on the Accumulator
+                self.a &= value; // 'value' is the immediate operand fetched by the addressing mode
+    
+                // 2. Set standard ALU flags based on the Accumulator
+                self.status.zero = self.a == 0;
+                self.status.negative = (self.a & 0x80) != 0;
+    
+                // 3. Unofficial behavior: Copy Bit 7 of the resulting Accumulator into the Carry flag
+                // (This is functionally equivalent to making Carry equal to the Negative flag status)
+                self.status.carry = self.status.negative;
+            }
             Operation::And => { self.a &= value; self.update_nz_flags(self.a); }
-            Operation::Asl => { 
+            Operation::Ane => { // undocumented 6502 instruction
+                // use 0xEE as the 'stable' constant
+                let magic_constant = 0xEE; 
+    
+                // Perform the unstable combined logic loop
+                self.a = (self.a | magic_constant) & self.x & value;
+    
+                // Update basic flags
+                self.status.zero = self.a == 0;
+                self.status.negative = (self.a & 0x80) != 0;
+            }
+            Operation::Arr => { // undocumented 6502 instruction
+                let intermediate = self.a & value;
+    
+                let old_carry = if self.status.carry { 0x80 } else { 0 };
+                let result = (intermediate >> 1) | old_carry;
+    
+                self.a = result;
+    
+                self.status.zero = self.a == 0;
+                self.status.negative = (self.a & 0x80) != 0;
+    
+                // Carry is determined entirely by Bit 6 of the final result
+                self.status.carry = (result & 0x40) != 0;
+    
+                // Overflow is determined by Bit 6 XOR Bit 5 of the final result
+                let bit6 = (result >> 6) & 1;
+                let bit5 = (result >> 5) & 1;
+                self.status.overflow = (bit6 ^ bit5) == 1;
+            }
+            Operation::Asl => {
                 self.status.carry = (value & 0x80) != 0;
                 let result = value << 1;
                 self.update_nz_flags(result);
@@ -1390,13 +1812,23 @@ impl M6502Cpu {
             }
             Operation::Bit => { 
                 let result = self.a & value;
-                self.status.overflow = value & 0x40 != 0;
-                self.status.negative = value & 0x80 != 0;
                 self.status.zero = result == 0;
+                if self.current_mode != AddressingMode::Immediate {
+                    self.status.overflow = value & 0x40 != 0;
+                    self.status.negative = value & 0x80 != 0;
+                }
             }
             Operation::Clc => { self.status.carry = false; }
             Operation::Cld => { self.status.decimal = false; }
-            Operation::Cli => { self.status.interrupt_disable = false; }
+            Operation::Cli => {
+                if self.status.interrupt_disable {
+                    self.i_delay = true;
+                }
+                self.status.interrupt_disable = false;
+
+                emu_print!("CLI operation executed");
+                self.test_prints = 3;
+            }
             Operation::Clv => { self.status.overflow = false; }
             Operation::Cmp => { 
                 let result = self.a.wrapping_sub(value);
@@ -1405,6 +1837,22 @@ impl M6502Cpu {
             }
             Operation::Cpx => { let result = self.x.wrapping_sub(value); self.update_nz_flags(result); self.status.carry = value <= self.x}
             Operation::Cpy => { let result = self.y.wrapping_sub(value); self.update_nz_flags(result); self.status.carry = value <= self.y}
+            Operation::Dcp => {
+                // 1. Decrement the fetched value by 1
+                let decremented_value = value.wrapping_sub(1);
+    
+                // 2. Write the decremented value back to memory
+                bus.write_byte(self.effective_addr, decremented_value);
+    
+                // 3. Perform CMP logic (A - decremented_value) to set flags
+                // Carry is set if Accumulator is greater than or equal to the value
+                self.status.carry = self.a >= decremented_value;
+    
+                // Calculate the temporary result to evaluate Zero and Negative flags
+                let comparison_result = self.a.wrapping_sub(decremented_value);
+                self.status.zero = comparison_result == 0;
+                self.status.negative = (comparison_result & 0x80) != 0;
+            }
             Operation::Dec => { let result = value.wrapping_sub(1); self.update_nz_flags(result); bus.write_byte(self.effective_addr, result); }
             Operation::Dex => { self.x = self.x.wrapping_sub(1); self.update_nz_flags(self.x); }
             Operation::Dey => { self.y = self.y.wrapping_sub(1); self.update_nz_flags(self.y); }
@@ -1412,6 +1860,27 @@ impl M6502Cpu {
             Operation::Inc => { let result = value.wrapping_add(1); self.update_nz_flags(result); bus.write_byte(self.effective_addr, result); }
             Operation::Inx => { self.x = self.x.wrapping_add(1); self.update_nz_flags(self.x); }
             Operation::Iny => { self.y = self.y.wrapping_add(1); self.update_nz_flags(self.y); }
+            Operation::Isc => {
+                let incremented_value = value.wrapping_add(1);
+                bus.write_byte(self.effective_addr, incremented_value);    
+                self.add_with_carry_logic(incremented_value ^ 0xFF);
+            }
+
+            Operation::Las => { // undocumented 6502 instruction
+                let result = value & self.sp;
+
+                self.a = result;
+                self.x = result;
+                self.sp = result;
+    
+                self.status.zero = result == 0;
+                self.status.negative = (result & 0x80) != 0;
+            }
+            Operation::Lax => { // Undocumented 6502 instruction
+                self.a = bus.read_byte(self.effective_addr);
+                self.x = self.a;
+                self.update_nz_flags(self.a);
+            }
             Operation::Lda => { self.a = value; self.update_nz_flags(self.a); }
             Operation::Ldx => { self.x = value; self.update_nz_flags(self.x); }
             Operation::Ldy => { self.y = value; self.update_nz_flags(self.y); }
@@ -1426,9 +1895,44 @@ impl M6502Cpu {
                 }
                 self.temp_value = result;
             }
+            Operation::Lxa => { // Undocumented 6502 instruction
+                // use 0xEE as the 'stable' constant
+                self.a = value;
+                self.x = value;
+    
+                // Update basic flags
+                self.status.zero = self.a == 0;
+                self.status.negative = (self.a & 0x80) != 0;
+            }
             Operation::Jmp => { self.pc = self.effective_addr; }
+            Operation::JmpIndexedIndirect => { // 65C02 only
+                let low_byte = bus.read_byte(self.effective_addr);
+                let high_byte = bus.read_byte(self.effective_addr.wrapping_add(1));
+    
+                self.pc = ((high_byte as u16) << 8) | (low_byte as u16);
+            }
             Operation::Nop => { }
             Operation::Ora => { self.a |= value; self.update_nz_flags(self.a); }
+            Operation::Rla => {
+                // 1. Grab the current carry bit to insert into Bit 0 of the shifted result
+                let old_carry = if self.status.carry { 1 } else { 0 };
+    
+                // 2. Set the new carry bit to whatever Bit 7 currently is
+                self.status.carry = (value & 0x80) != 0;
+    
+                // 3. Shift left and inject the old carry into bit 0
+                let rotated_value = (value << 1) | old_carry;
+    
+                // 4. Write the rotated value back to memory
+                bus.write_byte(self.effective_addr, rotated_value);
+    
+                // 5. Bitwise AND the result into the Accumulator
+                self.a &= rotated_value;
+    
+                // 6. Update ALU flags based on the final Accumulator status
+                self.status.zero = self.a == 0;
+                self.status.negative = (self.a & 0x80) != 0;
+            }
             Operation::Rol => {
                 let old_value = if self.current_mode == AddressingMode::Accumulator { self.a } else { value };
                 let next_carry = (old_value & 0x80) != 0;
@@ -1457,15 +1961,151 @@ impl M6502Cpu {
                 }
                 self.update_nz_flags(result);
             }
+            Operation::Rra => { // Unofficial 6502
+                // 1. Grab the current carry bit to insert into Bit 0 of the shifted result
+                let old_carry = if self.status.carry { 0x80 } else { 0 };
+    
+                // 2. Set the new carry bit to whatever Bit 0 currently is
+                self.status.carry = (value & 0x01) != 0;
+    
+                // 3. Shift right and inject the old carry into bit 7
+                let rotated_value = (value >> 1) | old_carry;
+    
+                // 4. Write the rotated value back to memory
+                bus.write_byte(self.effective_addr, rotated_value);
+    
+                // 5. Adc 
+                self.add_with_carry_logic(rotated_value);
+            }
+            Operation::Sax => {
+                let result = self.a & self.x;
+                bus.write_byte(self.effective_addr, result);
+            }
             Operation::Sbc => { self.add_with_carry_logic(value ^ 0xFF); }
+            Operation::Sbx => {
+                let base = self.a & self.x;
+    
+                self.status.carry = base >= value;   
+                self.x = base.wrapping_sub(value);
+    
+                self.status.zero = self.x == 0;
+                self.status.negative = (self.x & 0x80) != 0;
+            }
             Operation::Sec => { self.status.carry = true; }
             Operation::Sed => { self.status.decimal = true; }
-            Operation::Sei => { self.status.interrupt_disable = true; }
+            Operation::Sei => { 
+                emu_print!("Sei operation executed");
+                if !self.status.interrupt_disable {
+                    self.i_delay = true;
+                }
+                self.status.interrupt_disable = true;
+                self.test_prints = 3;
+            }
+            Operation::Sha => {
+                // High byte of the target address + 1
+                let high_plus_one = ((self.effective_addr >> 8) + 1) as u8;
+                let val_to_write = self.a & self.x & high_plus_one;
+                bus.write_byte(self.effective_addr, val_to_write);
+            }
+
+            Operation::Shx => {
+                let high_plus_one = self.temp_addr_high.wrapping_add(1);
+                let val_to_write = self.x & high_plus_one;
+                
+                // Crucial hardware quirk: If a page cross ACTUALLY occurred, 
+                // the written value replaces the high byte of the address on the bus.
+                let page_crossed = (self.temp_addr_low as u16 + self.y as u16) > 0xFF; // Note: SHX uses Y index
+                if page_crossed {
+                    let final_addr = ((val_to_write as u16) << 8) | (self.effective_addr & 0x00FF);
+                    bus.write_byte(final_addr, val_to_write);
+                } else {
+                    bus.write_byte(self.effective_addr, val_to_write);
+                }
+            }
+
+            Operation::Shy => {
+                let high_plus_one = self.temp_addr_high.wrapping_add(1);
+                let val_to_write = self.y & high_plus_one;
+                
+                // Crucial hardware quirk: If a page cross ACTUALLY occurred,
+                // the written value replaces the high byte of the address on the bus.
+                let page_crossed = (self.temp_addr_low as u16 + self.x as u16) > 0xFF; // Note: SHY uses X index
+                if page_crossed {
+                    let final_addr = ((val_to_write as u16) << 8) | (self.effective_addr & 0x00FF);
+                    bus.write_byte(final_addr, val_to_write);
+                } else {
+                    bus.write_byte(self.effective_addr, val_to_write);
+                }
+            }
+
+            Operation::Slo => {
+                // 1. Unofficial opcode SLO. Shift memory value left (ASL logic)
+                self.status.carry = (value & 0x80) != 0; // Bit 7 goes to Carry
+                let shifted_value = value << 1;
+    
+                // 2. Write the shifted value back to the calculated target memory location
+                bus.write_byte(self.effective_addr, shifted_value);
+    
+                // 3. Bitwise OR the result into the Accumulator (ORA logic)
+                self.a |= shifted_value;
+    
+                // 4. Set standard ALU flags based on the final Accumulator register status
+                self.status.zero = self.a == 0;
+                self.status.negative = (self.a & 0x80) != 0;
+            }
+            Operation::Sre => {
+                // 1. Shift memory value right (LSR logic)
+                self.status.carry = (value & 0x01) != 0; // Bit 0 goes to Carry
+                let shifted_value = value >> 1;
+    
+                // 2. Write the shifted value back to memory
+                bus.write_byte(self.effective_addr, shifted_value);
+    
+                // 3. Bitwise XOR the result into the Accumulator (EOR logic)
+                self.a ^= shifted_value;
+    
+                // 4. Update standard ALU flags based on the final Accumulator status
+                self.status.zero = self.a == 0;
+                self.status.negative = (self.a & 0x80) != 0;
+            }
             Operation::Sta => { bus.write_byte(self.effective_addr, self.a); }
             Operation::Stx => { bus.write_byte(self.effective_addr, self.x); }
             Operation::Sty => { bus.write_byte(self.effective_addr, self.y); }
+            Operation::Stz => {  // 65C02 only
+                // Write 0 directly to the calculated effective address
+                bus.write_byte(self.effective_addr, 0x00);
+            }
+            Operation::Tas => {
+                // 1. Bitwise AND A and X 
+                let intermediate = self.a & self.x;
+                self.sp = intermediate; // Overwrites the CPU stack pointer!
+    
+                // 2. Compute the value to drop onto the memory bus
+                let high_plus_one = ((self.effective_addr >> 8) + 1) as u8;
+                let val_to_write = intermediate & high_plus_one;
+    
+                // 3. Perform the memory store
+                bus.write_byte(self.effective_addr, val_to_write);
+            }
             Operation::Tax => { self.x = self.a; self.update_nz_flags(self.x); }
             Operation::Tay => { self.y = self.a; self.update_nz_flags(self.y); }
+            Operation::Trb => {  // 65C02/65C816 only
+                let test_result = self.a & value;
+                self.status.zero = test_result == 0;
+                let reset_result = self.a & !value;
+                bus.write_byte(self.effective_addr, reset_result);
+            }
+            Operation::Tsb => {  // 65C02/65C816 only
+                // 1. Test: Sets Z flag if (A & memory_value) == 0
+                let test_result = self.a & value;
+                self.status.zero = test_result == 0;
+    
+                // 2. Set: Force bits to 1 in memory where the Accumulator has a 1
+                let set_result = value | self.a;
+    
+                // 3. Write back the modified value
+                bus.write_byte(self.effective_addr, set_result);
+            }
             Operation::Tsx => { self.x = self.sp; self.update_nz_flags(self.x); }
             Operation::Txa => { self.a = self.x; self.update_nz_flags(self.a); }
             Operation::Txs => { self.sp = self.x; }

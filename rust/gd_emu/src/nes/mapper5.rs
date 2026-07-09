@@ -1,34 +1,9 @@
 use crate::nes::mappers::{Mapper, Mirroring};
 use std::cell::Cell;
 
-// Mapper 5 (MMC5) - Castlevania 3 (US) subset.
-//
-// Ported against a known-working GDScript reference implementation rather
-// than re-derived from the wiki tables alone, since several details here
-// (PRG bank math per mode, $5105 quadrant routing, bg/sprite CHR set
-// selection) are easy to get subtly wrong from the docs alone.
-//
-// Confirmed NOT needed for Castlevania 3 (US), based on its actual boot
-// trace ($5104 only ever writes 0x00):
-//   - Extended attribute mode (ExRAM mode 1). CV3 uses ExRAM mode 0
-//     ("extra nametable" - ExRAM holds raw nametable bytes, not per-tile
-//     attribute+bank data), which this file implements.
-//   - Expansion audio - exclusive to the Japanese Akumajou Densetsu release.
-//   - Vertical split-screen ($5200-$5202) - registers accepted, not acted on.
-//
-// Still approximate / worth revisiting if something looks wrong later:
-//   - ExRAM write-gating during rendering (real hardware drops writes
-//     outside specific PPU timing windows; we always allow them).
-//   - $5130 (CHR upper bits) is wired up but CV3's 128KB CHR-ROM doesn't
-//     strictly need it (128 1KB banks fits in 8 bits already).
-//   - clock_scanline can still be invoked spuriously by other mappers'
-//     A12-edge IRQ heuristic (see nes_ppu.rs lines ~690/705), since that
-//     hook fires for ANY active mapper during non-rendering CPU writes,
-//     not just MMC3. clock_scanline now ignores calls while !in_frame as
-//     a partial mitigation, but a stray call during a real in-frame
-//     window could still nudge the counter early. Low risk for CV3 in
-//     practice, but worth knowing about if IRQ timing ever looks off by a
-//     few scanlines.
+// Mapper 5 (MMC5)
+// Used in games like Castlevania 3 and Romance of the 3 Kingdoms 2.
+
 pub struct Mapper5 {
     prg_rom: Vec<u8>,
     prg_ram: Vec<u8>,
@@ -55,6 +30,10 @@ pub struct Mapper5 {
     chr_regs_a: [u16; 8],
     chr_regs_b: [u16; 4],
     chr_upper_bits: u16,
+
+    split_ctrl: u8,    // $5200
+    split_scroll: u8,  // $5201
+    split_chr_page: u8,// $5202
 
     latched_exram_byte: Cell<u8>,
 
@@ -109,6 +88,7 @@ impl Mapper5 {
             chr_regs_b: [0; 4],
             chr_upper_bits: 0,
             latched_exram_byte: Cell::new(0),
+            split_ctrl: 0, split_scroll: 0, split_chr_page: 0,
             irq_target: 0,
             irq_enabled: false,
             irq_pending: Cell::new(false),
@@ -396,11 +376,6 @@ impl Mapper for Mapper5 {
     }
 
     fn clock_scanline(&mut self) {
-        // Saturating, not wrapping: if this is ever called more times than
-        // there are real scanlines in a frame (e.g. from another mapper's
-        // A12-edge heuristic accidentally reaching this code path), we
-        // clamp rather than panic. See notify_frame_start for the real
-        // fix to in_frame's lifecycle - this is just a safety net.
         if !self.in_frame.get() {
             return; // clock_scanline calls before the frame has started are spurious; ignore them
         }
@@ -412,13 +387,35 @@ impl Mapper for Mapper5 {
     }
 
     fn notify_frame_start(&mut self) {
-        // Called by the PPU exactly once per real frame (scanline 261 -> 0
-        // wrap), independent of rendering state or any mapper-specific
-        // scanline-counting heuristic. This is what actually resets
-        // in_frame now; clock_scanline no longer infers frame boundaries
-        // itself, since it can be called spuriously by other mappers'
-        // A12-edge logic during non-rendering CPU writes.
         self.in_frame.set(true);
         self.irq_counter.set(0);
+    }
+
+    fn split_config(&self) -> Option<(bool, u8)> {
+        // returns (side: false=left/true=right, tile_count) if split is enabled
+        if (self.split_ctrl & 0x80) != 0 {
+            Some(((self.split_ctrl & 0x40) != 0, self.split_ctrl & 0x1F))
+        } else {
+            None
+        }
+    }
+
+    fn read_split_tile(&self, screen_x: usize, scanline: usize) -> (u8, u8, u8) {
+        // returns (bg_low, bg_high, palette_idx) for one pixel column of the split region
+        let effective_row = (scanline + self.split_scroll as usize) & 0xFF;
+        let tile_row = effective_row / 8;
+        let fine_y = effective_row % 8;
+        let tile_col = screen_x / 8;
+
+        let tile_id = self.ex_ram[tile_row * 32 + tile_col];
+        let attr_byte = self.ex_ram[0x3C0 + (tile_row / 4) * 8 + (tile_col / 4)];
+        let shift = (((tile_row >> 1) & 1) << 2) | (((tile_col >> 1) & 1) << 1);
+        let palette_idx = (attr_byte >> shift) & 0x03;
+
+        let pattern_addr = (self.split_chr_page as usize * 0x1000) + (tile_id as usize * 16) + fine_y;
+        let bg_low = self.chr_fetch(pattern_addr as u16, pattern_addr, false);
+        let bg_high = self.chr_fetch(pattern_addr as u16, pattern_addr + 8, false);
+
+        (bg_low, bg_high, palette_idx)
     }
 }

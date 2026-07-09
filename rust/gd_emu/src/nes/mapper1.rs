@@ -67,6 +67,8 @@ impl Mapper for Mapper1 {
         self.current_cycle += cycles as i64;
     }
 
+    fn total_cycles(&self) -> u64 { self.current_cycle as u64 }
+
     fn get_sram(&self) -> Option<&[u8]> {
         Some(&self.prg_ram)
     }

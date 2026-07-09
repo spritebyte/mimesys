@@ -14,6 +14,7 @@ pub trait Mapper {
     }
     fn is_irq_asserted(&self) -> bool { false }
     fn step_cycles(&mut self, _cycles: u64) {}
+    fn total_cycles(&self) -> u64 { 0 }
     fn get_sram(&self) -> Option<&[u8]> { None }
     fn load_sram(&mut self, _data: &[u8]) {}
     fn is_sram_dirty(&self) -> bool { false }
@@ -21,6 +22,8 @@ pub trait Mapper {
     fn check_a12(&self, _addr: u16) {}
     fn clock_scanline(&mut self) {}
     fn notify_frame_start(&mut self) {}
+    fn split_config(&self) -> Option<(bool,u8)> { None }
+    fn read_split_tile(&self, _screen_x: usize, _scanline: usize) -> (u8,u8,u8) { (0,0,0) }
 }
 
 #[derive(Clone, Copy, PartialEq)]

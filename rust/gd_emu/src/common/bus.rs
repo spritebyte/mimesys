@@ -10,5 +10,6 @@ pub trait AddressBus {
 
     fn is_nmi_line_asserted(&mut self) -> bool;
     fn is_irq_line_asserted(&mut self) -> bool;
-    fn step_cycles(&mut self, _cycles: u64) {}
+    fn is_nmi_enabled(&mut self) -> bool;
+    fn step_cycles(&mut self, _cycles: u64);
 }

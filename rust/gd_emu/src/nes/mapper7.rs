@@ -60,6 +60,10 @@ impl Mapper for Mapper7 {
         self.current_cycle += cycles as i64;
     }
 
+    fn total_cycles(&self) -> u64 {
+        self.current_cycle as u64
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         if addr < 0x8000 { return 0; }
         let bank = self.prg_bank as usize % self.prg_bank_count;

@@ -48,6 +48,7 @@ pub struct NesAPU {
     p1_volume: u8,
     pulse1_enabled: bool,
     p1_halt: bool,
+    p1_constant_volume: bool,
     // Pulse 1 Sweep Unit
     p1_sweep_enabled: bool,
     p1_sweep_period: u8,
@@ -129,6 +130,7 @@ pub struct NesAPU {
     sample_rate_ratio: f32,
     p1_output: f32,
     p2_output: f32,
+    total_apu_cycles: u64,
 }
 
 impl NesAPU {
@@ -148,6 +150,7 @@ impl NesAPU {
             p1_duty_index: 0,
             p1_volume: 0,
             pulse1_enabled: false,
+            p1_constant_volume: false,
             p1_halt: false,
             p1_output: 0.0,
             p1_sweep_enabled: false,
@@ -214,9 +217,11 @@ impl NesAPU {
             n_env_volume: 0,
             n_env_divider: 0,
             n_env_start: false,
+            total_apu_cycles: 0,
         }
     }
 
+    pub fn total_cycles(&self) -> u64 { self.total_apu_cycles }
     // Returns (target_period, is_muted)
     fn calculate_sweep_target(&self, is_pulse_1: bool) -> (u16, bool) {
         let current_period = if is_pulse_1 { self.p1_timer_reload } else { self.p2_timer_reload };
@@ -255,14 +260,16 @@ impl NesAPU {
             0x4000 => { 
                 self.p1_duty_index = (data >> 6) & 0x03; 
                 self.p1_halt = (data & 0x20) > 0;
+                self.p1_constant_volume = (data & 0x10) != 0;
                 self.p1_volume = data & 0x0F;
+                self.p1_env_start = true;
             }
             0x4001 => {
                 self.p1_sweep_enabled = (data & 0x80) > 0;
                 self.p1_sweep_period = (data >> 4) & 0x07;
                 self.p1_sweep_negate = (data & 0x08) > 0;
                 self.p1_sweep_shift = data & 0x07;
-                self.p1_sweep_reload = true;               
+                self.p1_sweep_reload = true;            
             }
             0x4002 => { 
                 self.p1_timer_reload = (self.p1_timer_reload & 0x0700) | (data as u16);
@@ -280,6 +287,7 @@ impl NesAPU {
                 self.p2_duty_index = (data >> 6) & 0x03;
                 self.p2_halt = (data & 0x20) > 0;
                 self.p2_volume = data & 0x0F;
+                self.p2_env_start = true;
             }
             0x4005 => {
                 self.p2_sweep_enabled = (data & 0x80) > 0;
@@ -309,6 +317,7 @@ impl NesAPU {
                 self.n_halt = (data & 0x20) > 0;
                 self.n_constant_volume = (data & 0x10) > 0;
                 self.n_volume = data & 0x0F;
+                self.n_env_start = true;
             }
             0x400E => {
                 self.n_mode = (data & 0x80) > 0;
@@ -377,8 +386,8 @@ impl NesAPU {
 
             // Frame Counter Mode
             0x4017 => {
-                self.mode_5_step = (data & 0x80) > 0;
-                self.irq_inhibit = (data & 0x40) > 0;
+                self.mode_5_step = (data & 0x80) != 0;
+                self.irq_inhibit = (data & 0x40) != 0;
                 if self.irq_inhibit {
                     self.frame_irq_flag = false;
                 }
@@ -448,6 +457,7 @@ impl NesAPU {
     /// around it) - it just needs to implement 'DmcMemoryReader::dmc_read'.
     pub fn step<M: DmcMemoryReader>(&mut self, cycles: u64, mem: &M) {
         for _ in 0..cycles {
+            self.total_apu_cycles += 1;
             if self.p1_timer > self.p1_timer_reload {
                 self.p1_timer = self.p1_timer_reload;
             }
@@ -595,16 +605,35 @@ impl NesAPU {
             let mut len_clock = false;
 
             if !self.mode_5_step {
-                if self.frame_counter == 7457 || self.frame_counter == 22371 {
-                    env_clock = true;
-                } else if self.frame_counter == 14913 {
-                    env_clock = true;
-                    len_clock = true;
-                } else if self.frame_counter >= 29830 {
-                    env_clock = true;
-                    len_clock = true;
-                    if !self.irq_inhibit { self.frame_irq_flag = true; }
-                    self.frame_counter = 0;
+                match self.frame_counter {
+                    7457 | 22371 => {
+                        env_clock = true;
+                    }
+                    14913 => {
+                        env_clock = true;
+                        len_clock = true;
+                    }
+                    29828 => {
+                        // CRITICAL: The Frame IRQ flag is first raised here!
+                        if !self.irq_inhibit { 
+                            self.frame_irq_flag = true; 
+                        }
+                    }
+                    29829 => {
+                        env_clock = true;
+                        len_clock = true;
+                        if !self.irq_inhibit { 
+                            self.frame_irq_flag = true; 
+                        }
+                    }
+                    _ => {
+                        if self.frame_counter >= 29830 {
+                            if !self.irq_inhibit { 
+                                self.frame_irq_flag = true; 
+                            }
+                            self.frame_counter = 0; // Wrap around to 0
+                        }
+                    }
                 }
             } else {
                 if self.frame_counter == 7457 || self.frame_counter == 22371 {

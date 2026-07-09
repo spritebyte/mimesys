@@ -1,6 +1,8 @@
 use crate::nes::mappers::{Mapper, Mirroring};
 
 // Mapper 3 (CNROM)
+// Implements Bus Conflicts
+
 pub struct Mapper3 {
     prg_banks: usize,
     chr_bank: u8,
@@ -59,7 +61,7 @@ impl Mapper for Mapper3 {
             let final_value = value & rom_value;
             
             if self.chr_banks > 0 {
-                self.chr_bank = final_value % (self.chr_banks as u8);
+                self.chr_bank = final_value & 0x03;
             }
         }
     }

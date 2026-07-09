@@ -128,6 +128,8 @@ impl Mapper for Mapper4 {
         self.current_cycle += cycles as i64;
     }
 
+    fn total_cycles(&self) -> u64 { self.current_cycle as u64 }
+
     fn is_irq_asserted(&self) -> bool {
         self.irq_active.get()
     }
@@ -200,9 +202,9 @@ impl Mapper for Mapper4 {
     }
 
     fn clock_scanline(&mut self) {
-        godot_print!("clock_scanline: counter={} latch={} enabled={} active={}", 
-            self.irq_counter.get(), self.irq_latch.get(), 
-            self.irq_enabled.get(), self.irq_active.get());
+//        godot_print!("clock_scanline: counter={} latch={} enabled={} active={}", 
+//            self.irq_counter.get(), self.irq_latch.get(), 
+//            self.irq_enabled.get(), self.irq_active.get());
         let current_counter = self.irq_counter.get();
         let is_reload = current_counter == 0 || self.irq_reload_flag.get();
 
