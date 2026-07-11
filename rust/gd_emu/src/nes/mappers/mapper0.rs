@@ -1,22 +1,35 @@
 use crate::nes::mappers::{Mapper,Mirroring};
+use serde::{Serialize, Deserialize};
 
 // Mapper 0 (NROM) - Standard flat cartridge, no bank switching
 pub struct Mapper0 {
-    prg_banks: usize,
+    prg_banks: u8,
     mirroring_mode: Mirroring,
     prg_rom: Vec<u8>,
     chr_rom: Vec<u8>,
     prg_ram: Vec<u8>,
+    chr_ram: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Mapper0StateVariables {
+    prg_banks: u8,
+    mirroring_mode: Mirroring,
+    prg_ram: Vec<u8>, 
+    chr_ram: Vec<u8>,
 }
 
 impl Mapper0 {
     pub fn new(prg_banks: usize, chr_banks: usize, prg_rom: Vec<u8>, chr_rom: Vec<u8>, initial_mirroring: Mirroring) -> Self {
+        let chr_ram = if chr_banks == 0 { vec![0; 8192] } else { vec![] };
+        let num_prg_banks = prg_banks as u8;
         Self {
-            prg_banks,
+            prg_banks: num_prg_banks,
             mirroring_mode: initial_mirroring,
             prg_rom,
             chr_rom,
             prg_ram: vec![0; 8192],
+            chr_ram,
         }
     }
 }
@@ -51,10 +64,15 @@ impl Mapper for Mapper0 {
             let masked_addr = (addr & 0x1FFF) as usize;
             return self.chr_rom[masked_addr % self.chr_rom.len()];
         }
+        else {
+            if addr < 0x2000 {
+                return self.chr_ram[addr as usize % self.chr_ram.len()];
+            }
+        }
         0
     }
 
-    fn ppu_write(&mut self, addr: u16, value: u8) {
+    fn ppu_write(&mut self, _addr: u16, _value: u8) {
         // handle chr_ram writes or modifications if needed
     }
 
@@ -74,6 +92,26 @@ impl Mapper for Mapper0 {
                 normalized % 0x800
             }
             _ => normalized % 2048,
+        }
+    }
+    fn save_state(&self) -> Vec<u8> {
+        let variables = Mapper0StateVariables {
+            prg_banks: self.prg_banks,
+            mirroring_mode: self.mirroring_mode,
+            prg_ram: self.prg_ram.clone(),
+            chr_ram: self.chr_ram.clone(),
+        };
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        bincode::serde::encode_to_vec(&variables, config).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, state_bytes: &[u8]) {
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        if let Ok((variables, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper0StateVariables, _>(state_bytes, config) {
+            self.prg_banks = variables.prg_banks;
+            self.mirroring_mode = variables.mirroring_mode;
+            self.prg_ram = variables.prg_ram;
+            self.chr_ram = variables.chr_ram;
         }
     }
 }

@@ -1,4 +1,5 @@
 use crate::nes::mappers::{Mapper, Mirroring};
+use serde::{Serialize, Deserialize};
 use std::cell::Cell;
 
 // Mapper 5 (MMC5)
@@ -49,6 +50,37 @@ pub struct Mapper5 {
     has_four_screen: bool,
     current_cycle: i64,
     sram_dirty: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Mapper5StateVariables {
+    prg_mode: u8,
+    chr_mode: u8,
+    ram_protect_1: u8,
+    ram_protect_2: u8,
+    exram_mode: u8,
+    nt_map: [u8; 4],
+    fill_tile: u8,
+    fill_attr: u8,
+    prg_regs: [u8; 5],
+    chr_regs_a: [u16; 8],
+    chr_regs_b: [u16; 4],
+    chr_upper_bits: u16,
+    latched_exram_byte: u8,
+    irq_target: u8,
+    irq_enabled: bool,
+    irq_pending: bool,
+    in_frame: bool,
+    irq_counter: u16,
+    mult_a: u8,
+    mult_b: u8,
+    current_cycle: i64,
+    prg_ram: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    ex_ram: [u8; 1024],
+    split_ctrl: u8,
+    split_scroll: u8,
+    split_chr_page: u8,
 }
 
 impl Mapper5 {
@@ -417,5 +449,71 @@ impl Mapper for Mapper5 {
         let bg_high = self.chr_fetch(pattern_addr as u16, pattern_addr + 8, false);
 
         (bg_low, bg_high, palette_idx)
+    }
+    fn save_state(&self) -> Vec<u8> {
+        let variables = Mapper5StateVariables {
+            prg_mode: self.prg_mode,
+            chr_mode: self.chr_mode,
+            ram_protect_1: self.ram_protect_1,
+            ram_protect_2: self.ram_protect_2,
+            exram_mode: self.exram_mode,
+            nt_map: self.nt_map,
+            fill_tile: self.fill_tile,
+            fill_attr: self.fill_attr,
+            prg_regs: self.prg_regs,
+            chr_regs_a: self.chr_regs_a,
+            chr_regs_b: self.chr_regs_b,
+            chr_upper_bits: self.chr_upper_bits,
+            latched_exram_byte: self.latched_exram_byte.get(),
+            irq_target: self.irq_target,
+            irq_enabled: self.irq_enabled,
+            irq_pending: self.irq_pending.get(),
+            in_frame: self.in_frame.get(),
+            irq_counter: self.irq_counter.get(),
+            mult_a: self.mult_a,
+            mult_b: self.mult_b,
+            current_cycle: self.current_cycle,
+            prg_ram: self.prg_ram.clone(),
+            ex_ram: self.ex_ram,
+            split_ctrl: self.split_ctrl,
+            split_scroll: self.split_scroll,
+            split_chr_page: self.split_chr_page,
+        };
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        bincode::serde::encode_to_vec(&variables, config).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, state_bytes: &[u8]) {
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        if let Ok((state, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper5StateVariables, _>(state_bytes, config) {
+            self.prg_mode = state.prg_mode;
+            self.chr_mode = state.chr_mode;
+            self.ram_protect_1 = state.ram_protect_1;
+            self.ram_protect_2 = state.ram_protect_2;
+            self.exram_mode = state.exram_mode;
+            self.nt_map = state.nt_map;
+            self.fill_tile = state.fill_tile;
+            self.fill_attr = state.fill_attr;
+            self.prg_regs = state.prg_regs;
+            self.chr_regs_a = state.chr_regs_a;
+            self.chr_regs_b = state.chr_regs_b;
+            self.chr_upper_bits = state.chr_upper_bits;
+            self.latched_exram_byte.set(state.latched_exram_byte);
+            self.irq_target = state.irq_target;
+            self.irq_enabled = state.irq_enabled;
+            self.irq_pending.set(state.irq_pending);
+            self.in_frame.set(state.in_frame);
+            self.irq_counter.set(state.irq_counter);
+            self.mult_a = state.mult_a;
+            self.mult_b = state.mult_b;
+            self.current_cycle = state.current_cycle;
+            if state.prg_ram.len() == self.prg_ram.len() {
+                self.prg_ram = state.prg_ram;
+            }
+            self.ex_ram = state.ex_ram;
+            self.split_ctrl = state.split_ctrl;
+            self.split_scroll = state.split_scroll;
+            self.split_chr_page = state.split_chr_page;
+        }
     }
 }

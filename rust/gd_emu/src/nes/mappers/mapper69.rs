@@ -1,5 +1,5 @@
-use crate::nes::mappers::Mapper;
-use crate::nes::mappers::Mirroring;
+use crate::nes::mappers::{Mapper, Mirroring};
+use serde::{Serialize, Deserialize};
 use std::cell::Cell;
 
 pub struct Mapper69 {
@@ -23,14 +23,20 @@ pub struct Mapper69 {
     irq_pending: Cell<bool>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct Mapper69StateVariables {
+    mirroring_mode: u8,
+    prg_ram: Vec<u8>, 
+}
+
 impl Mapper69 {
     pub fn new(_prg_banks: usize,
         _chr_banks: usize,
         prg_rom: Vec<u8>,
         chr_rom: Vec<u8>,
         _initial_mirroring: Mirroring,
-        four_screen_bit: bool,submapper: u8) -> Self {
-        let mut mapper = Self {
+        four_screen_bit: bool,_submapper: u8) -> Self {
+        let mapper = Self {
             prg_rom,
             chr_rom,
             prg_ram: [0; 8192],
@@ -166,7 +172,7 @@ impl Mapper for Mapper69 {
         }
     }
 
-    fn ppu_write(&mut self, addr: u16, value: u8) {
+    fn ppu_write(&mut self, _addr: u16, _value: u8) {
 
     }
 
@@ -178,7 +184,7 @@ impl Mapper for Mapper69 {
         }
     }
 
-    fn read_nametable_byte(&self, addr: u16, ppu_vram: &[u8; 4096], is_attribute_byte: bool) -> u8 {
+    fn read_nametable_byte(&self, addr: u16, ppu_vram: &[u8; 4096], _is_attribute_byte: bool) -> u8 {
         let offset = (addr & 0x03FF) as usize;
         let nt_index = match self.mirroring_mode {
             0 => ((addr - 0x2000) / 0x0400) as usize % 2, // Vertical
@@ -217,5 +223,22 @@ impl Mapper for Mapper69 {
             return normalized;
         }
         normalized
+    }
+    fn save_state(&self) -> Vec<u8> {
+        let variables = Mapper69StateVariables {
+            mirroring_mode: self.mirroring_mode,
+            prg_ram: self.prg_ram.to_vec(),
+        };
+        
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        bincode::serde::encode_to_vec(&variables, config).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, state_bytes: &[u8]) {
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        if let Ok((variables, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper69StateVariables, _>(state_bytes, config) {
+            self.mirroring_mode = variables.mirroring_mode;
+            self.prg_ram.copy_from_slice(&variables.prg_ram);
+        }
     }
 }

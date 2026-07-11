@@ -1,4 +1,6 @@
 use crate::nes::mappers::{Mapper, Mirroring};
+use serde::{Serialize, Deserialize};
+
 use std::cell::Cell; // Import Cell for interior mutability on latches
 
 // Mapper 9 (MMC2)
@@ -26,6 +28,14 @@ pub struct Mapper9 {
     chr_ram: Vec<u8>,
     current_cycle: i64,
     sram_dirty: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Mapper9StateVariables {
+    prg_banks: u8,
+    mirroring_mode: Mirroring,
+    prg_ram: Vec<u8>, 
+    chr_ram: Vec<u8>,
 }
 
 impl Mapper9 {
@@ -180,6 +190,27 @@ impl Mapper for Mapper9 {
             Mirroring::SingleLower => normalized % 0x400,
             Mirroring::SingleUpper => 0x400 + (normalized % 0x400),
             _ => normalized,
+        }
+    }
+    fn save_state(&self) -> Vec<u8> {
+        let variables = Mapper9StateVariables {
+            prg_banks: self.prg_banks as u8,
+            mirroring_mode: self.mirroring_mode,
+            prg_ram: self.prg_ram.clone(),
+            chr_ram: self.chr_ram.clone(),
+        };
+        
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        bincode::serde::encode_to_vec(&variables, config).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, state_bytes: &[u8]) {
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        if let Ok((variables, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper9StateVariables, _>(state_bytes, config) {
+            self.prg_banks = variables.prg_banks as usize;
+            self.mirroring_mode = variables.mirroring_mode;
+            self.prg_ram = variables.prg_ram;
+            self.chr_ram = variables.chr_ram;
         }
     }
 }

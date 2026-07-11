@@ -1,6 +1,7 @@
 use crate::nes::mappers::{Mapper, Mirroring};
+use serde::{Serialize, Deserialize};
 use std::cell::Cell;
-use godot::global::godot_print;
+//use godot::global::godot_print;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mmc3Revision {
@@ -40,8 +41,27 @@ pub struct Mapper4 {
     sram_dirty: bool,
 }
 
+#[derive(Serialize, Deserialize)]
+struct Mapper4StateVariables {
+    bank_registers: [usize; 8],
+    bank_select: u8,
+    prg_mode: u8,
+    chr_mode: u8,
+    last_a12: u8,
+    a12_low_counter: u32,
+    irq_counter: u8,
+    irq_latch: u8,
+    irq_reload_flag: bool,
+    irq_enabled: bool,
+    irq_active: bool,
+    last_clock_cycle: i64,
+    mirroring_mode: Mirroring,
+    current_cycle: i64,
+    prg_ram: Vec<u8>,
+}
+
 impl Mapper4 {
-    pub fn new(prg_banks: usize, chr_banks: usize, prg_rom: Vec<u8>, chr_rom: Vec<u8>, initial_mirroring: Mirroring, four_screen_bit: bool, submapper: u8) -> Self {
+    pub fn new(_prg_banks: usize, chr_banks: usize, prg_rom: Vec<u8>, chr_rom: Vec<u8>, initial_mirroring: Mirroring, four_screen_bit: bool, _submapper: u8) -> Self {
         let prg_ram = vec![0; 8192];
         let chr_ram = if chr_banks == 0 { vec![0; 8192] } else { vec![] };
 
@@ -275,6 +295,52 @@ impl Mapper for Mapper4 {
             return v & 0x07FF;
         } else {
             return ((v >> 1) & 0x0400) | (v & 0x03FF);
+        }
+    }
+    fn save_state(&self) -> Vec<u8> {
+        let variables = Mapper4StateVariables {
+            bank_registers: self.bank_registers,
+            bank_select: self.bank_select,
+            prg_mode: self.prg_mode,
+            chr_mode: self.chr_mode,
+            last_a12: self.last_a12.get(),
+            a12_low_counter: self.a12_low_counter.get(),
+            irq_counter: self.irq_counter.get(),
+            irq_latch: self.irq_latch.get(),
+            irq_reload_flag: self.irq_reload_flag.get(),
+            irq_enabled: self.irq_enabled.get(),
+            irq_active: self.irq_active.get(),
+            last_clock_cycle: self.last_clock_cycle.get(),
+            mirroring_mode: self.mirroring_mode,
+            current_cycle: self.current_cycle,
+            prg_ram: self.prg_ram.clone(),
+        };
+        
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        bincode::serde::encode_to_vec(&variables, config).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, state_bytes: &[u8]) {
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        if let Ok((state, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper4StateVariables, _>(state_bytes, config) {
+            self.bank_registers = state.bank_registers;
+            self.bank_select = state.bank_select;
+            self.prg_mode = state.prg_mode;
+            self.chr_mode = state.chr_mode;
+            self.last_a12.set(state.last_a12);
+            self.a12_low_counter.set(state.a12_low_counter);
+            self.irq_counter.set(state.irq_counter);
+            self.irq_latch.set(state.irq_latch);
+            self.irq_reload_flag.set(state.irq_reload_flag);
+            self.irq_enabled.set(state.irq_enabled);
+            self.irq_active.set(state.irq_active);
+            self.last_clock_cycle.set(state.last_clock_cycle);
+            self.mirroring_mode = state.mirroring_mode;
+            self.current_cycle = state.current_cycle;
+            if state.prg_ram.len() == self.prg_ram.len() {
+                self.prg_ram = state.prg_ram;
+            }
+            self.update_offsets(); // rebuild derived prg_offsets/chr_offsets from restored registers
         }
     }
 }

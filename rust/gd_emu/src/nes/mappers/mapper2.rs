@@ -1,10 +1,11 @@
 use crate::nes::mappers::{Mapper,Mirroring};
+use serde::{Serialize, Deserialize};
 
 // Mapper 2 (UxROM)
 pub struct Mapper2 {
-    prg_banks: usize,
+    prg_banks: u8,
     prg_bank: u8,
-    chr_banks: usize,
+    chr_banks: u8,
     mirroring_mode: Mirroring,
     has_four_screen: bool,
 //    submapper: u8,
@@ -17,16 +18,25 @@ pub struct Mapper2 {
     sram_dirty: bool,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct Mapper2StateVariables {
+    prg_banks: u8,
+    mirroring_mode: Mirroring,
+    prg_ram: Vec<u8>, 
+    chr_ram: Vec<u8>,
+}
+
 impl Mapper2 {
     pub fn new(prg_banks: usize, chr_banks: usize, prg_rom: Vec<u8>, chr_rom: Vec<u8>, initial_mirroring: Mirroring, four_screen_bit: bool, submapper: u8) -> Self {
         let prg_ram = vec![0; 8192];
         let chr_ram = if chr_banks == 0 { vec![0; 8192] } else { vec![] };
         let has_bus_conflicts = if submapper == 0 || submapper == 2 { true } else { false };
-
+        let num_banks = prg_banks as u8;
+        let num_chr_banks = chr_banks as u8;
         Self {
-            prg_banks,
+            prg_banks: num_banks,
             prg_bank: 0,
-            chr_banks,
+            chr_banks: num_chr_banks,
             mirroring_mode: initial_mirroring,
             has_four_screen: four_screen_bit,
             has_bus_conflicts,
@@ -54,7 +64,7 @@ impl Mapper2 {
             // Note: offset here is 0x4000–0x7FFF relative to $8000, 
             // so we subtract 0x4000 to get the local offset (0–0x3FFF)
             let local_offset = offset - 0x4000;
-            ((self.prg_banks - 1) * 0x4000) as usize + local_offset
+            ((self.prg_banks - 1) as usize * 0x4000) as usize + local_offset
         }
     }
 }
@@ -73,16 +83,16 @@ impl Mapper for Mapper2 {
         }
         else if addr >= 0x8000 && addr <= 0xBFFF {
             // Switchable bank
-            let bank = self.prg_bank as usize % self.prg_banks;
+            let bank = (self.prg_bank % self.prg_banks) as usize;
             let offset = (addr - 0x8000) as usize;
-            let target = (bank * 0x4000) + offset;
+            let target = (bank * 0x4000) as usize + offset;
             return self.prg_rom[target];
         }
         else if addr >= 0xC000 && addr <= 0xFFFF {
             // FIXED bank (always the last bank)
-            let bank = self.prg_banks - 1;
+            let bank = (self.prg_banks - 1) as usize;
             let offset = (addr - 0xC000) as usize;
-            let target = (bank * 0x4000) + offset;
+            let target = (bank * 0x4000) as usize + offset;
             return self.prg_rom[target]
         }
         0
@@ -148,6 +158,27 @@ impl Mapper for Mapper2 {
             Mirroring::SingleLower => normalized % 0x400,
             Mirroring::SingleUpper => 0x400 + (normalized % 0x400),
             _ => normalized,
+        }
+    }
+    fn save_state(&self) -> Vec<u8> {
+        let variables = Mapper2StateVariables {
+            prg_banks: self.prg_banks,
+            mirroring_mode: self.mirroring_mode,
+            prg_ram: self.prg_ram.clone(),
+            chr_ram: self.chr_ram.clone(),
+        };
+        
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        bincode::serde::encode_to_vec(&variables, config).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, state_bytes: &[u8]) {
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        if let Ok((variables, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper2StateVariables, _>(state_bytes, config) {
+            self.prg_banks = variables.prg_banks;
+            self.mirroring_mode = variables.mirroring_mode;
+            self.prg_ram = variables.prg_ram;
+            self.chr_ram = variables.chr_ram;
         }
     }
 }

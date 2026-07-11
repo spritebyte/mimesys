@@ -1,5 +1,6 @@
 use crate::nes::mappers::{Mapper, Mirroring};
-use std::cell::Cell;
+use serde::{Serialize, Deserialize};
+//use std::cell::Cell;
 
 // Mapper 206 (DxROM)
 pub struct Mapper206 {
@@ -20,6 +21,14 @@ pub struct Mapper206 {
     chr_ram: Vec<u8>,
     current_cycle: i64,
     sram_dirty: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Mapper206StateVariables {
+    prg_banks: u8,
+    mirroring_mode: Mirroring,
+    prg_ram: Vec<u8>, 
+    chr_ram: Vec<u8>,
 }
 
 impl Mapper206 {
@@ -180,6 +189,27 @@ impl Mapper for Mapper206 {
             return v & 0x07FF;
         } else {
             return ((v >> 1) & 0x0400) | (v & 0x03FF);
+        }
+    }
+    fn save_state(&self) -> Vec<u8> {
+        let variables = Mapper206StateVariables {
+            prg_banks: self.prg_banks as u8,
+            mirroring_mode: self.mirroring_mode,
+            prg_ram: self.prg_ram.clone(),
+            chr_ram: self.chr_ram.clone(),
+        };
+        
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        bincode::serde::encode_to_vec(&variables, config).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, state_bytes: &[u8]) {
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        if let Ok((variables, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper206StateVariables, _>(state_bytes, config) {
+            self.prg_banks = variables.prg_banks as usize;
+            self.mirroring_mode = variables.mirroring_mode;
+            self.prg_ram = variables.prg_ram;
+            self.chr_ram = variables.chr_ram;
         }
     }
 }

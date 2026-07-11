@@ -1,5 +1,6 @@
 use crate::nes::mappers::{Mapper,Mirroring};
-use godot::global::godot_print;
+use serde::{Serialize, Deserialize};
+//use godot::global::godot_print;
 
 // Mapper 1 (MMC1) 
 pub struct Mapper1 {
@@ -51,7 +52,7 @@ impl Mapper1 {
     }
 
     fn update_mirroring(&mut self) {
-        let old_mirroring_mode = self.mirroring_mode;
+        let _old_mirroring_mode = self.mirroring_mode;
         match self.control & 0x03 {
             0 => self.mirroring_mode = Mirroring::SingleLower,
             1 => self.mirroring_mode = Mirroring::SingleUpper,
@@ -60,6 +61,22 @@ impl Mapper1 {
             _ => unreachable!(),
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Mapper1StateVariables {
+    mirroring_mode: Mirroring,
+    shift_reg: u8,
+    write_count: u8,
+    control: u8,
+    chr_bank_0: u8,
+    chr_bank_1: u8,
+    prg_bank: u8,
+    last_write_cycle: i64,
+    #[serde(with = "serde_bytes")]
+    prg_ram: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    chr_ram: Vec<u8>,
 }
 
 impl Mapper for Mapper1 {
@@ -106,7 +123,7 @@ impl Mapper for Mapper1 {
         if addr >= 0x8000 && addr <= 0xFFFF {
             let prg_mode = (self.control >> 2) & 0x03;
 //            godot_print!("prg_mode={:02X}, control={:02X}", prg_mode, self.control);
-            let bank_size: usize = 16384;
+            let _bank_size: usize = 16384;
 
             let mut surom_bank_ext = 0;
             if self.prg_rom.len() == 524288 {
@@ -300,6 +317,38 @@ impl Mapper for Mapper1 {
             Mirroring::SingleLower => normalized % 0x400,
             Mirroring::SingleUpper => 0x400 + (normalized % 0x400),
             _ => normalized,
+        }
+    }
+    fn save_state(&self) -> Vec<u8> {
+        let variables = Mapper1StateVariables {
+            mirroring_mode: self.mirroring_mode,
+            shift_reg: self.shift_reg,
+            write_count: self.write_count,
+            control: self.control,
+            chr_bank_0: self.chr_bank_0,
+            chr_bank_1: self.chr_bank_1,
+            prg_bank: self.prg_bank,
+            last_write_cycle: self.last_write_cycle,
+            prg_ram: self.prg_ram.clone(),
+            chr_ram: self.chr_ram.clone(),
+        };
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        bincode::serde::encode_to_vec(&variables, config).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, state_bytes: &[u8]) {
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        if let Ok((variables, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper1StateVariables, _>(state_bytes, config){
+            self.mirroring_mode = variables.mirroring_mode;
+            self.shift_reg = variables.shift_reg;
+            self.write_count = variables.write_count;
+            self.control = variables.control;
+            self.chr_bank_0 = variables.chr_bank_0;
+            self.chr_bank_1 = variables.chr_bank_1;
+            self.prg_bank = variables.prg_bank;
+            self.last_write_cycle = variables.last_write_cycle;
+            self.prg_ram = variables.prg_ram;
+            self.chr_ram = variables.chr_ram;
         }
     }
 }
