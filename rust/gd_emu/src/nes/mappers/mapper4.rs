@@ -96,7 +96,7 @@ impl Mapper4 {
             sram_dirty: false,
         };
         
-        mapper.update_offsets();
+        mapper.recalculate_banks();
         mapper
     }
 
@@ -105,7 +105,7 @@ impl Mapper4 {
         self.revision = revision;
     }
     
-    fn update_offsets(&mut self) {
+    fn recalculate_banks(&mut self) {
         let last = self.prg_banks - 1;
         let second_last = self.prg_banks - 2;
 
@@ -178,11 +178,11 @@ impl Mapper for Mapper4 {
                 self.bank_select = value & 0x07;
                 self.prg_mode = (value >> 6) & 1;
                 self.chr_mode = (value >> 7) & 1;
-                self.update_offsets();
+                self.recalculate_banks();
             } else {
                 // $8001: Bank Register Data write
                 self.bank_registers[self.bank_select as usize] = value as usize;
-                self.update_offsets();
+                self.recalculate_banks();
             }
         }
         else if addr >= 0xA000 && addr <= 0xBFFF {
@@ -340,7 +340,7 @@ impl Mapper for Mapper4 {
             if state.prg_ram.len() == self.prg_ram.len() {
                 self.prg_ram = state.prg_ram;
             }
-            self.update_offsets(); // rebuild derived prg_offsets/chr_offsets from restored registers
+            self.recalculate_banks(); // rebuild derived prg_offsets/chr_offsets from restored registers
         }
     }
 }
