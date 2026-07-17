@@ -3,7 +3,7 @@ use serde::{Serialize, Deserialize};
 
 //use std::cell::Cell;
 
-// Mapper 7 (AxROM)
+// Mapper 7 (AxROM) - Nightmare on Elm Street, Battletoads, Wizards and Warriors
 pub struct Mapper7 {
     prg_banks: usize,
     prg_bank_count: usize,
@@ -11,7 +11,6 @@ pub struct Mapper7 {
     chr_banks: usize,
     chr_rom_size: usize,
 
-    
     mirroring_mode: Mirroring,
     has_four_screen: bool,
 

@@ -2,16 +2,15 @@ use crate::nes::mappers::{Mapper, Mirroring};
 use serde::{Serialize, Deserialize};
 use std::cell::Cell;
 //use godot::global::godot_print;
-
+/*
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mmc3Revision {
     RevA,
     RevB,
-    Tlsrom,
 }
-
-// Mapper 4 (MMC3)
-pub struct Mapper4 {
+*/
+// Mapper 64 (Rambo-1)
+pub struct Mapper64 {
     prg_banks: usize, // Stored as count of 8KB banks
     chr_banks: usize,
     bank_registers: [usize; 8],
@@ -22,9 +21,8 @@ pub struct Mapper4 {
     chr_offsets: [usize; 8],
     
     // Scanline IRQ counter fields wrapped in Cell for interior mutability
+    last_a12: Cell<u8>,
     a12_low_counter: Cell<u32>,
-    last_a12_low_cycle: i64,
-    last_a12_state: bool,   
     irq_counter: Cell<u8>,
     irq_latch: Cell<u8>,
     irq_reload_flag: Cell<bool>,
@@ -32,7 +30,6 @@ pub struct Mapper4 {
     irq_active: Cell<bool>,
     last_clock_cycle: Cell<i64>,
     
-    revision: Mmc3Revision,
     mirroring_mode: Mirroring,
     has_four_screen: bool,
     prg_rom: Vec<u8>,
@@ -44,12 +41,12 @@ pub struct Mapper4 {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Mapper4StateVariables {
+struct Mapper64StateVariables {
     bank_registers: [usize; 8],
     bank_select: u8,
     prg_mode: u8,
     chr_mode: u8,
-    last_a12_state: bool,
+    last_a12: u8,
     a12_low_counter: u32,
     irq_counter: u8,
     irq_latch: u8,
@@ -62,11 +59,11 @@ struct Mapper4StateVariables {
     prg_ram: Vec<u8>,
 }
 
-impl Mapper4 {
-    pub fn new(_prg_banks: usize, chr_banks: usize, prg_rom: Vec<u8>, chr_rom: Vec<u8>, initial_mirroring: Mirroring, four_screen_bit: bool, mapper_id: u8, _submapper: u8) -> Self {
+impl Mapper64 {
+    pub fn new(_prg_banks: usize, chr_banks: usize, prg_rom: Vec<u8>, chr_rom: Vec<u8>, initial_mirroring: Mirroring, four_screen_bit: bool, _submapper: u8) -> Self {
         let prg_ram = vec![0; 8192];
         let chr_ram = if chr_banks == 0 { vec![0; 8192] } else { vec![] };
-        let variant = if mapper_id == 118 { Mmc3Revision::Tlsrom } else { Mmc3Revision::RevB };
+
         // Robustly determine the actual number of 8KB PRG banks from the ROM size.
         let prg_banks_8kb = prg_rom.len() / 8192;
 
@@ -85,10 +82,8 @@ impl Mapper4 {
             irq_reload_flag: Cell::new(false),
             irq_enabled: Cell::new(false),
             irq_active: Cell::new(false),
-            last_a12_state: false,
+            last_a12: Cell::new(0),
             last_clock_cycle: Cell::new(0),
-            last_a12_low_cycle: 0,
-            revision: variant,
             mirroring_mode: initial_mirroring,
             has_four_screen: four_screen_bit,
             prg_rom,
@@ -103,10 +98,10 @@ impl Mapper4 {
         mapper
     }
 
-    /// Set the specific MMC3 hardware revision (useful for passing specific test ROMs)
+    /*
     pub fn set_revision(&mut self, revision: Mmc3Revision) {
         self.revision = revision;
-    }
+    } */
     
     fn recalculate_banks(&mut self) {
         let last = self.prg_banks - 1;
@@ -144,80 +139,9 @@ impl Mapper4 {
             self.chr_offsets[3] = self.bank_registers[5] * 0x0400;  
         }
     }
-    /// Maps a PPU nametable address ($2000-$2FFF) to its corresponding MMC3 CHR register index (0-5).
-    /// This mirrors the CHR register lookup that determines the status of CHR A17 (acting as CIRAM A10).
-    pub fn get_nametable_chr_register(&self, ppu_addr: u16) -> usize {
-        // Standardize nametable address space down to a single pattern-table offset ($0000 - $0FFF)
-        let offset = ppu_addr & 0x0FFF; 
-    
-        // Check MMC3 CHR inversion bit ($8000 bit 7)
-        let chr_inversion = (self.bank_select & 0x80) != 0;
-
-        if !chr_inversion {
-        // --- Normal CHR Layout ---
-        // $0000-$07FF: 2KB bank 0 (maps both $2000-$23FF and $2400-$27FF to Register 0)
-        // $0800-$0FFF: 2KB bank 1 (maps both $2800-$2BFF and $2C00-$2FFF to Register 1)
-            if offset < 0x0800 {
-                0
-            } else {
-                1
-            }
-        } else {
-            // --- Inverted CHR Layout ---
-            // $0000-$0FFF: Divided into four 1KB pages mapping directly to registers 2, 3, 4, and 5
-            // $2000-$23FF corresponds to offset $0000-$03FF (Register 2)
-            // $2400-$27FF corresponds to offset $0400-$07FF (Register 3)
-            // $2800-$2BFF corresponds to offset $0800-$0BFF (Register 4)
-            // $2C00-$2FFF corresponds to offset $0C00-$0FFF (Register 5)
-            match offset {
-                0x0000..=0x03FF => 2,
-                0x0400..=0x07FF => 3,
-                0x0800..=0x0BFF => 4,
-                0x0C00..=0x0FFF => 5,
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    fn clock_irq_counter(&mut self) {
-//        godot_print!("clock_scanline: counter={} latch={} enabled={} active={}", 
-//            self.irq_counter.get(), self.irq_latch.get(), 
-//            self.irq_enabled.get(), self.irq_active.get());
-        let current_counter = self.irq_counter.get();
-        let is_reload = current_counter == 0 || self.irq_reload_flag.get();
-
-        if is_reload {
-            self.irq_counter.set(self.irq_latch.get());
-            self.irq_reload_flag.set(false);
-        } else {
-            self.irq_counter.set(current_counter.saturating_sub(1));
-        }
-//        godot_print!(
-//            "MMC3_DIAG: clock_scanline counter={} reload={} enabled={} active={}",
-//            self.irq_counter.get(), is_reload, self.irq_enabled.get(), self.irq_active.get()
-//        );
-
-        // --- REVISION SENSITIVE IRQ LOGIC ---
-        match self.revision {
-            Mmc3Revision::RevA => {
-                // Rev A: Only trigger IRQ if we decremented to 0. Reloading with 0 does NOT trigger IRQ.
-                if !is_reload && self.irq_counter.get() == 0 && self.irq_enabled.get() {
-                    self.irq_active.set(true);
-//                    godot_print!("MMC3_DIAG: *** IRQ FIRED (RevA) ***");
-                }
-            }
-            Mmc3Revision::RevB | Mmc3Revision::Tlsrom => {
-                // Rev B/C: Trigger IRQ if the counter is exactly 0 after the step (even on reload).
-                if self.irq_counter.get() == 0 && self.irq_enabled.get() {
-                    self.irq_active.set(true);
-//                    godot_print!("MMC3_DIAG: *** IRQ FIRED (RevB) ***");
-                }
-            }
-        }
-    }
 }
 
-impl Mapper for Mapper4 {
+impl Mapper for Mapper64 {
     fn step_cycles(&mut self, cycles: u64) {
         self.current_cycle += cycles as i64;
     }
@@ -295,6 +219,43 @@ impl Mapper for Mapper4 {
         }
     }
 
+    fn clock_scanline(&mut self) {
+//        godot_print!("clock_scanline: counter={} latch={} enabled={} active={}", 
+//            self.irq_counter.get(), self.irq_latch.get(), 
+//            self.irq_enabled.get(), self.irq_active.get());
+        let current_counter = self.irq_counter.get();
+        let is_reload = current_counter == 0 || self.irq_reload_flag.get();
+
+        if is_reload {
+            self.irq_counter.set(self.irq_latch.get());
+            self.irq_reload_flag.set(false);
+        } else {
+            self.irq_counter.set(current_counter.saturating_sub(1));
+        }
+//        godot_print!(
+//            "MMC3_DIAG: clock_scanline counter={} reload={} enabled={} active={}",
+//            self.irq_counter.get(), is_reload, self.irq_enabled.get(), self.irq_active.get()
+//        );
+/*
+        match self.revision {
+            Mmc3Revision::RevA => {
+                // Rev A: Only trigger IRQ if we decremented to 0. Reloading with 0 does NOT trigger IRQ.
+                if !is_reload && self.irq_counter.get() == 0 && self.irq_enabled.get() {
+                    self.irq_active.set(true);
+//                    godot_print!("MMC3_DIAG: *** IRQ FIRED (RevA) ***");
+                }
+            }
+            Mmc3Revision::RevB => {
+                // Rev B/C: Trigger IRQ if the counter is exactly 0 after the step (even on reload).
+        */
+                if self.irq_counter.get() == 0 && self.irq_enabled.get() {
+                    self.irq_active.set(true);
+//                    godot_print!("MMC3_DIAG: *** IRQ FIRED (RevB) ***");
+                }
+//            }
+    //    }
+    }
+
     fn ppu_read(&self, p_addr: u16) -> u8 {
         let addr = p_addr & 0x3FFF;
 
@@ -324,46 +285,23 @@ impl Mapper for Mapper4 {
     }
 
     fn mirror_vram_address(&self, addr: u16) -> usize {
-        if self.revision == Mmc3Revision::Tlsrom {
-            let ppu_addr = addr & 0x2FFF;
-    
-            if ppu_addr >= 0x2000 {
-                // --- MAPPER 118 DYNAMIC ROUTING ---
-                // Determine which CHR register is mapped to this nametable window
-                // based on standard MMC3 layout config ($8000 bit 7)
-                let chr_register = self.get_nametable_chr_register(ppu_addr);
-        
-                // Extract Bit 7 (A17) from that bank register to feed directly to CIRAM A10
-                let a10 = (self.chr_offsets[chr_register] & 0x80) != 0;
-        
-                // Calculate nametable offset
-                let base = if a10 { 0x400 } else { 0x000 };
-                let offset = ppu_addr & 0x03FF;
-        
-                (base + offset) as usize
-            } else {
-                ppu_addr as usize
-            }
+        let v = (addr - 0x2000) as usize & 0x0FFF; 
+        if self.has_four_screen {
+            return v;
+        }
+        if self.mirroring_mode == Mirroring::Vertical {
+            return v & 0x07FF;
         } else {
-            let v = (addr - 0x2000) as usize & 0x0FFF; 
-            if self.has_four_screen {
-                return v;
-            }
-            if self.mirroring_mode == Mirroring::Vertical {
-                return v & 0x07FF;
-            }   else {
-                return ((v >> 1) & 0x0400) | (v & 0x03FF);
-            }
+            return ((v >> 1) & 0x0400) | (v & 0x03FF);
         }
     }
-
     fn save_state(&self) -> Vec<u8> {
-        let variables = Mapper4StateVariables {
+        let variables = Mapper64StateVariables {
             bank_registers: self.bank_registers,
             bank_select: self.bank_select,
             prg_mode: self.prg_mode,
             chr_mode: self.chr_mode,
-            last_a12_state: self.last_a12_state,
+            last_a12: self.last_a12.get(),
             a12_low_counter: self.a12_low_counter.get(),
             irq_counter: self.irq_counter.get(),
             irq_latch: self.irq_latch.get(),
@@ -382,12 +320,12 @@ impl Mapper for Mapper4 {
 
     fn load_state(&mut self, state_bytes: &[u8]) {
         let config = bincode::config::standard().with_fixed_int_encoding();
-        if let Ok((state, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper4StateVariables, _>(state_bytes, config) {
+        if let Ok((state, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper64StateVariables, _>(state_bytes, config) {
             self.bank_registers = state.bank_registers;
             self.bank_select = state.bank_select;
             self.prg_mode = state.prg_mode;
             self.chr_mode = state.chr_mode;
-            self.last_a12_state = state.last_a12_state;
+            self.last_a12.set(state.last_a12);
             self.a12_low_counter.set(state.a12_low_counter);
             self.irq_counter.set(state.irq_counter);
             self.irq_latch.set(state.irq_latch);
@@ -402,25 +340,5 @@ impl Mapper for Mapper4 {
             }
             self.recalculate_banks(); // rebuild derived prg_offsets/chr_offsets from restored registers
         }
-    }
-
-    fn update_a12(&mut self, addr: u16) {
-        let current_a12 = (addr & 0x1000) != 0;
-
-        if !current_a12 {
-            // Note when A12 went low
-            if self.last_a12_state {
-                self.last_a12_low_cycle = self.current_cycle;
-            }
-        } else {
-            // A12 transitioned from 0 -> 1 (Rising Edge)
-            if !self.last_a12_state {
-                // Only clock the counter if A12 has been low for at least 3 CPU cycles
-                if self.current_cycle - self.last_a12_low_cycle >= 3 {
-                    self.clock_irq_counter();
-                }
-            }
-        }
-        self.last_a12_state = current_a12;
     }
 }

@@ -197,6 +197,8 @@ impl Mapper for Mapper1 {
         if addr < 0x8000 { return }
 
         let mut suppressed:bool = false;
+        // Had to revert this back from earlier change that I wasn't sure why I had made.
+        // It had broken Bill and Ted. So any change here needs to be sure to not break that game.
         if self.last_write_cycle >= 0 && (self.current_cycle - self.last_write_cycle) <= 1 {
 //        if self.last_write_cycle < 0 || self.last_write_cycle >= 0 && (self.current_cycle - self.last_write_cycle) <= 1 {
 //            if self.last_write_cycle < 0 { self.last_write_cycle = 0; }

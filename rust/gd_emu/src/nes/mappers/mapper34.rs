@@ -9,7 +9,7 @@ use serde::{Serialize, Deserialize};
 //     register at fixed $7FFD, two 4KB CHR bank registers at $7FFE/$7FFF.
 //     These overlap PRG-RAM, so writes also land in PRG-RAM underneath.
 //     Mirroring is hardwired vertical, ignoring the header.
-pub struct Mapper34 {
+pub struct Mapper34 {      // Deadly Towers and Impossible Mission II
     prg_banks: usize,
     prg_bank_count: usize, // number of 32KB PRG banks (BNROM uses this)
     prg_bank: u8,

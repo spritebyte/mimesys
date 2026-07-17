@@ -1,7 +1,7 @@
 use crate::nes::mappers::{Mapper, Mirroring};
 use serde::{Serialize, Deserialize};
 use std::cell::Cell;
-
+use godot::global::godot_print;
 // Mapper 5 (MMC5)
 // Used in games like Castlevania 3 and Romance of the 3 Kingdoms 2.
 
@@ -124,12 +124,7 @@ impl Mapper5 {
             irq_target: 0,
             irq_enabled: false,
             irq_pending: Cell::new(false),
-            // Starts true: the PPU's scanline counter begins at 0 already
-            // (not 261), so the very first frame never produces a
-            // notify_frame_start wrap event. Treating "construction" as
-            // already being in-frame avoids silently dropping every
-            // clock_scanline call until the second frame.
-            in_frame: Cell::new(true),
+            in_frame: Cell::new(false),
             irq_counter: Cell::new(0),
             mult_a: 0,
             mult_b: 0,
@@ -260,12 +255,32 @@ impl Mapper5 {
         }
     }
 
-    fn maybe_latch_exram(&self, addr: u16) {
-        if self.exram_mode == 1 {
+fn maybe_latch_exram(&self, addr: u16) {
+    if self.exram_mode == 1 {
+        // 1. Find which nametable (0 to 3) the address belongs to
+        let nt_index = ((addr - 0x2000) / 0x0400) as usize % 4;
+        
+        // 2. Check the MMC5's current nametable mapping mode
+        let mode = self.nt_map[nt_index];
+        
+        // 3. We ONLY latch if the current nametable is mapped to ExRAM (mode 2)
+        if mode == 2 {
             let offset = (addr & 0x03FF) as usize;
             if offset < 0x03C0 {
                 self.latched_exram_byte.set(self.ex_ram[offset]);
             }
+        }
+    }
+}
+
+    fn clock_irq_counter(&mut self) {
+        if !self.in_frame.get() {
+            return;
+        }
+        let next = self.irq_counter.get().saturating_add(1);
+        self.irq_counter.set(next);
+        if next == self.irq_target as u16 && self.irq_enabled {
+            self.irq_pending.set(true);
         }
     }
 }
@@ -320,12 +335,16 @@ impl Mapper for Mapper5 {
             0x5101 => self.chr_mode = value & 0x03,
             0x5102 => self.ram_protect_1 = value & 0x03,
             0x5103 => self.ram_protect_2 = value & 0x03,
-            0x5104 => self.exram_mode = value & 0x03,
+            0x5104 => {
+                self.exram_mode = value & 0x03;
+                godot_print!("ExRAM mode write: value={:02X} -> mode={}", value, self.exram_mode);
+            }
             0x5105 => {
                 self.nt_map[0] = value & 0x03;
                 self.nt_map[1] = (value >> 2) & 0x03;
                 self.nt_map[2] = (value >> 4) & 0x03;
                 self.nt_map[3] = (value >> 6) & 0x03;
+                godot_print!("Nametable map write: value={:02X} -> nt_map={:?}", value, self.nt_map);
             }
             0x5106 => self.fill_tile = value,
             0x5107 => {
@@ -336,9 +355,11 @@ impl Mapper for Mapper5 {
                 self.prg_regs[(addr - 0x5113) as usize] = value;
             }
             0x5120..=0x5127 => {
+                godot_print!("CHR reg a write: addr={:04X} value={:02X}", addr, value);
                 self.chr_regs_a[(addr - 0x5120) as usize] = value as u16;
             }
             0x5128..=0x512B => {
+                godot_print!("CHR reg b write: addr={:04X} value={:02X}", addr, value);
                 self.chr_regs_b[(addr - 0x5128) as usize] = value as u16;
             }
             0x5130 => self.chr_upper_bits = (value & 0x03) as u16,
@@ -395,6 +416,20 @@ impl Mapper for Mapper5 {
         self.nametable_byte(addr, ppu_vram, is_attribute_byte)
     }
 
+    fn write_nametable_byte(&mut self, addr: u16, value: u8, vram: &mut [u8; 4096]) {
+        let nt_index = ((addr - 0x2000) / 0x0400) as usize % 4;
+        let mode = self.nt_map[nt_index];
+        let offset = (addr & 0x03FF) as usize;
+
+        match mode {
+            0 => vram[offset & 0x0FFF] = value,
+            1 => vram[(0x0400 + offset) & 0x0FFF] = value,
+            2 => self.ex_ram[offset & 0x03FF] = value,
+            3 => { /* fill-mode nametable: real hardware ignores writes here */ }
+            _ => unreachable!(),
+        }
+    }
+
     fn mirror_vram_address(&self, addr: u16) -> usize {
         let normalized = (addr & 0x0FFF) as usize;
         if self.has_four_screen {
@@ -404,17 +439,6 @@ impl Mapper for Mapper5 {
         match self.nt_map[nt_index] {
             1 => 0x0400 + (normalized % 0x0400),
             _ => normalized % 0x0400,
-        }
-    }
-
-    fn clock_scanline(&mut self) {
-        if !self.in_frame.get() {
-            return; // clock_scanline calls before the frame has started are spurious; ignore them
-        }
-        let next = self.irq_counter.get().saturating_add(1);
-        self.irq_counter.set(next);
-        if next == self.irq_target as u16 && self.irq_enabled {
-            self.irq_pending.set(true);
         }
     }
 
