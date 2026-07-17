@@ -72,8 +72,11 @@ impl Mapper for Mapper0 {
         0
     }
 
-    fn ppu_write(&mut self, _addr: u16, _value: u8) {
-        // handle chr_ram writes or modifications if needed
+    fn ppu_write(&mut self, addr: u16, value: u8) {
+        if addr < 0x2000 && !self.chr_ram.is_empty() {
+            let len = self.chr_ram.len();
+            self.chr_ram[addr as usize % len] = value;
+        }
     }
 
     fn mirror_vram_address(&self, addr: u16) -> usize {

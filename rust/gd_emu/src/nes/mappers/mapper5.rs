@@ -442,6 +442,10 @@ impl Mapper for Mapper5 {
         }
     }
 
+    fn notify_scanline(&mut self) {
+       self.clock_irq_counter();
+    }
+
     fn notify_frame_start(&mut self) {
         self.in_frame.set(true);
         self.irq_counter.set(0);

@@ -11,6 +11,7 @@ pub enum Mmc3Revision {
 }
 
 // Mapper 4 (MMC3)
+// Mapper 118 (Tlsrom)
 pub struct Mapper4 {
     prg_banks: usize, // Stored as count of 8KB banks
     chr_banks: usize,
