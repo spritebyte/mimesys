@@ -1,6 +1,7 @@
 /target/
 **/*.rs.bk
 .godot/
+godot/*.log
 *.translation
 .DS_Store
 Thumbs.db
