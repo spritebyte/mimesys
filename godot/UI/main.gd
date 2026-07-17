@@ -7,6 +7,8 @@ var emu_system: Variant
 @onready var file_menu = $MainVerticalStack/TopMenuBar/FileMenu
 @onready var emu_menu = $MainVerticalStack/TopMenuBar/EmulationMenu
 @onready var debug_menu = $MainVerticalStack/TopMenuBar/DebugMenu
+@onready var frame_control = $MainVerticalStack/FrameControl
+@onready var debug_window = %DebugWindow
 
 var _real_fps: int = 0
 var _virtual_fps: int = 0
@@ -43,6 +45,8 @@ func _ready() -> void:
 	init_menus()
 	emu_mutex = Mutex.new()
 	cpu_thread = Thread.new()
+	frame_control.main_ui = self
+	debug_window.main_ui = self
 
 	audio_gen = AudioStreamGenerator.new()
 	audio_gen.mix_rate = 44100
@@ -90,10 +94,10 @@ func _on_file_menu(id):
 #			pass
 
 		FileMenuID.SAVE_STATE:
-			if emu_system: emu_system.save_state()
+			if emu_system: emu_system.save_state_to_file(0)
 
 		FileMenuID.LOAD_STATE:
-			if emu_system: emu_system.load_state()
+			if emu_system: emu_system.load_state_from_file(0)
 
 		FileMenuID.QUIT:
 			get_tree().root.propagate_notification(NOTIFICATION_WM_CLOSE_REQUEST)
@@ -189,7 +193,9 @@ func _thread_loop():
 			continue
 
 		var input_mask = _get_serialized_input()
+		emu_mutex.lock()
 		emu_system.run_slice(input_mask)
+		emu_mutex.unlock()
 		_virtual_frame_count += 1
 		next_frame_time += FRAME_TIME_USEC
 		var now := Time.get_ticks_usec()
@@ -273,3 +279,31 @@ func setup_screen(display_info: SystemDisplayInfo):
 	
 	# 2. Tell the container what shape the game is supposed to be
 	ScreenContainer.ratio = display_info.target_aspect_ratio
+
+func request_rewind_to_frame(target_frame: int) -> bool:
+	if not emu_system:
+		return false
+	emu_mutex.lock()
+	var result = emu_system.request_rewind_to_frame(target_frame)
+	emu_mutex.unlock()
+	return result
+
+func get_current_frame() -> int:
+	if not emu_system:
+		return 0
+	emu_mutex.lock()
+	var frame = emu_system.get_current_frame()
+	emu_mutex.unlock()
+	return frame
+
+func get_oldest_rewindable_frame() -> int:
+	if not emu_system:
+		return 0
+	emu_mutex.lock()
+	var frame = emu_system.get_oldest_rewindable_frame()
+	emu_mutex.unlock()
+	return frame
+
+
+func _on_debug_window_close_requested() -> void:
+	debug_window.hide()

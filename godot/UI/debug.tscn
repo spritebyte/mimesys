@@ -1,0 +1,88 @@
+[gd_scene format=3 uid="uid://brrr00aq7vgcg"]
+
+[ext_resource type="Script" uid="uid://cw2ketu0dyxn1" path="res://UI/debug.gd" id="1_a3woa"]
+
+[node name="DebugWindow" type="Window" unique_id=983059263]
+oversampling_override = 1.0
+title = "Debug"
+initial_position = 1
+size = Vector2i(400, 300)
+transient = true
+popup_window = true
+script = ExtResource("1_a3woa")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="." unique_id=1979455521]
+offset_right = 40.0
+offset_bottom = 40.0
+
+[node name="lblCPUInfo" type="Label" parent="VBoxContainer" unique_id=951810841]
+layout_mode = 2
+text = "CPU info"
+
+[node name="CPUInfo" type="GridContainer" parent="VBoxContainer" unique_id=1155785639]
+layout_mode = 2
+columns = 4
+
+[node name="lblPC" type="Label" parent="VBoxContainer/CPUInfo" unique_id=1444706581]
+layout_mode = 2
+text = "PC"
+
+[node name="lblPCValue" type="Label" parent="VBoxContainer/CPUInfo" unique_id=1506432865]
+unique_name_in_owner = true
+layout_mode = 2
+text = "0"
+
+[node name="lblSP" type="Label" parent="VBoxContainer/CPUInfo" unique_id=1553096369]
+layout_mode = 2
+text = "SP"
+
+[node name="lblSPValue" type="Label" parent="VBoxContainer/CPUInfo" unique_id=1396758164]
+unique_name_in_owner = true
+layout_mode = 2
+text = "0"
+
+[node name="SplitContainer" type="SplitContainer" parent="VBoxContainer" unique_id=349367926]
+layout_mode = 2
+
+[node name="lblPPUInfo" type="Label" parent="VBoxContainer" unique_id=1066669793]
+layout_mode = 2
+text = "PPU info"
+
+[node name="PPUInfo" type="GridContainer" parent="VBoxContainer" unique_id=2100506318]
+layout_mode = 2
+columns = 4
+
+[node name="lblScanline" type="Label" parent="VBoxContainer/PPUInfo" unique_id=717052353]
+layout_mode = 2
+text = "Scanline:"
+
+[node name="lblScanlineValue" type="Label" parent="VBoxContainer/PPUInfo" unique_id=2110347381]
+unique_name_in_owner = true
+layout_mode = 2
+text = "0"
+
+[node name="lblCycle" type="Label" parent="VBoxContainer/PPUInfo" unique_id=131621390]
+layout_mode = 2
+text = "Cycle:"
+
+[node name="lblCycleValue" type="Label" parent="VBoxContainer/PPUInfo" unique_id=1070338628]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="lblSprite0Hit" type="Label" parent="VBoxContainer/PPUInfo" unique_id=1459496070]
+layout_mode = 2
+text = "Sprite 0 Hit:"
+
+[node name="chkSprite0Hit" type="CheckBox" parent="VBoxContainer/PPUInfo" unique_id=14198382]
+unique_name_in_owner = true
+layout_mode = 2
+focus_mode = 0
+
+[node name="btnRefresh" type="Button" parent="." unique_id=430221397]
+offset_right = 8.0
+offset_bottom = 8.0
+focus_mode = 0
+text = "Refresh"
+
+[connection signal="visibility_changed" from="." to="." method="_on_visibility_changed"]
+[connection signal="button_up" from="btnRefresh" to="." method="_on_btn_refresh_button_up"]

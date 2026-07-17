@@ -1,0 +1,44 @@
+[gd_scene format=3 uid="uid://dyaexwn1jr3ym"]
+
+[ext_resource type="Script" uid="uid://do86c1rocflrq" path="res://UI/rewind.gd" id="1_s54d4"]
+[ext_resource type="Texture2D" uid="uid://b8q2p1nva52ja" path="res://Assets/button UI.png" id="2_od15e"]
+
+[sub_resource type="AtlasTexture" id="AtlasTexture_od15e"]
+atlas = ExtResource("2_od15e")
+region = Rect2(80.576584, 144.57378, 13.950867, 14.880936)
+
+[node name="FrameControl" type="HBoxContainer" unique_id=1672217986]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_s54d4")
+
+[node name="Rewind" type="Button" parent="." unique_id=252905880]
+unique_name_in_owner = true
+layout_mode = 2
+focus_mode = 0
+
+[node name="Play" type="TextureButton" parent="." unique_id=52823298]
+unique_name_in_owner = true
+layout_mode = 2
+focus_mode = 0
+texture_normal = SubResource("AtlasTexture_od15e")
+
+[node name="Forward" type="TextureButton" parent="." unique_id=525291]
+unique_name_in_owner = true
+layout_mode = 2
+focus_mode = 0
+
+[node name="FrameLabel" type="Label" parent="." unique_id=257973892]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="btnDebug" type="Button" parent="." unique_id=535190199]
+layout_mode = 2
+focus_mode = 0
+text = "Debug Window"
+
+[connection signal="button_up" from="Play" to="." method="_on_play_button_up"]
+[connection signal="button_up" from="btnDebug" to="." method="_on_btn_debug_button_up"]

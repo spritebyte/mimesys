@@ -1,6 +1,8 @@
 [gd_scene format=3 uid="uid://dmqrip33lf7oq"]
 
 [ext_resource type="Script" uid="uid://c5qy27hh664xf" path="res://UI/main.gd" id="1_vnck2"]
+[ext_resource type="PackedScene" uid="uid://dyaexwn1jr3ym" path="res://UI/rewind.tscn" id="2_emhnf"]
+[ext_resource type="PackedScene" uid="uid://brrr00aq7vgcg" path="res://UI/debug.tscn" id="3_uw6j2"]
 
 [node name="MainUI" type="PanelContainer" unique_id=880421609]
 anchors_preset = 15
@@ -47,6 +49,9 @@ texture_filter = 1
 layout_mode = 2
 expand_mode = 1
 
+[node name="FrameControl" parent="MainVerticalStack" unique_id=1514795349 instance=ExtResource("2_emhnf")]
+layout_mode = 2
+
 [node name="RomDialog" type="FileDialog" parent="." unique_id=828783176]
 oversampling_override = 1.0
 title = "Open a File"
@@ -62,5 +67,10 @@ hidden_files_toggle_enabled = false
 offset_right = 40.0
 offset_bottom = 40.0
 
+[node name="DebugWindow" parent="." unique_id=983059263 instance=ExtResource("3_uw6j2")]
+unique_name_in_owner = true
+visible = false
+
 [connection signal="confirmed" from="RomDialog" to="." method="_on_rom_selection_dialog_confirmed"]
 [connection signal="file_selected" from="RomDialog" to="." method="_on_rom_dialog_file_selected"]
+[connection signal="close_requested" from="DebugWindow" to="." method="_on_debug_window_close_requested"]

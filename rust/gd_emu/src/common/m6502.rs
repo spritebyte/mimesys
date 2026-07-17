@@ -67,7 +67,7 @@ pub enum InterruptType {
     Nmi,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Operation {
     Adc, And, Asl, Bcc, Bcs, Beq, Bit, Bmi, Bne, Bpl, Brk, Bvc, Bvs, Clc, Cld, Cli, Clv, Cmp,
     Cpx, Cpy, Dec, Dex, Dey, Eor, Inc, Inx, Iny, Irq, Jmp, Jsr, Lda, Ldx, Ldy, Lsr, Nmi, Nop,
@@ -89,13 +89,14 @@ impl Operation {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CpuConfig {
     has_bcd: bool,
     has_jmp_bug: bool,
     is_c02: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CpuVariant {
     NMOS6502,
     Ricoh2A03,
@@ -103,15 +104,23 @@ pub enum CpuVariant {
 }
 
 pub struct M6502Cpu {
+    // registers
     pub pc: u16,
     pub sp: u8,
     pub a: u8,
     pub x: u8,
     pub y: u8,
     pub status: StatusFlags,
+
+    // interrupt handling
     nmi_pending: bool,
+    nmi_pending_shadow: bool,
     prev_nmi_line: bool,
+    nmi_polled: bool,
+    irq_polled: bool,
+    irq_line_shadow: bool,
     i_delay: bool,
+
     bus_available: bool,  // false during dma transfer
     last_cycles: u8,
     last_opcode: u8, // Save most recent instruction for debugging
@@ -119,7 +128,6 @@ pub struct M6502Cpu {
     pub total_cycles: u64,
     pub is_running: bool,
     pub config: CpuConfig,
-    stall_cycles: u16,
     temp_addr_low: u8,
     temp_addr_high: u8,
     temp_value: u8,
@@ -132,7 +140,7 @@ pub struct M6502Cpu {
     test_prints: u8,
 }
 
-#[derive(Clone, Serialize, Deserialize)] 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CpuState {
     pub a: u8,
     pub x: u8,
@@ -140,18 +148,33 @@ pub struct CpuState {
     pub pc: u16,
     pub sp: u8,
     pub status: StatusFlags,
+    pub config: CpuConfig,
     
-    // Crucial for your cycle accuracy and debugging:
+    pub nmi_pending: bool,
+    pub nmi_pending_shadow: bool,
+    pub prev_nmi_line: bool,
+    pub irq_polled: bool,
+    pub irq_line_shadow: bool,
+    pub nmi_polled: bool,
+    pub total_cycles: u64,
+    pub i_delay: bool,
+    pub bus_available: bool,
+    pub is_running: bool,
+
+    pub operand_address_crossed_page: bool,
     pub cycles_remaining: u32,
     pub instruction_step: u32,
     pub current_opcode: u8,
-    pub nmi_pending: bool,
-    pub prev_nmi_line: bool,
-    pub total_cycles: u64,
+    pub current_mode: AddressingMode,
+    pub current_op: Operation,
+    pub temp_addr_low: u8,
+    pub temp_addr_high: u8,
+    pub temp_value: u8,
+    pub effective_addr: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum AddressingMode {
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AddressingMode {
     Immediate,
     Indirect,
     Relative,
@@ -198,7 +221,8 @@ impl M6502Cpu {
             status: StatusFlags { negative: false, overflow: false, decimal: false, interrupt_disable: false, zero: false, carry: false},
             nmi_pending: false,
             prev_nmi_line: false,
-            i_delay: false,
+            i_delay: false, irq_polled: false, nmi_polled: false,
+            irq_line_shadow: false, nmi_pending_shadow: false,
             test_prints: 0,
             last_cycles: 0,
             last_opcode: 0,
@@ -207,7 +231,6 @@ impl M6502Cpu {
             is_running: false,
             bus_available: true,
             config,
-            stall_cycles: 0,
             temp_addr_low: 0,
             temp_addr_high: 0,
             temp_value: 0,
@@ -220,39 +243,68 @@ impl M6502Cpu {
         }
     }
 
+    pub fn total_cycles(&self) -> u64 { self.total_cycles }
+
     pub fn get_state(&self) -> CpuState {
         CpuState {
-            a: self.a,
-            x: self.x,
-            y: self.y,
-            pc: self.pc,
-            sp: self.sp,
-            status: self.status,
-            cycles_remaining: self.cycles_remaining,
+            a: self.a, x: self.x, y: self.y,
+            pc: self.pc, sp: self.sp,
+            status: self.status.clone(),
+            config: self.config.clone(),
+
+            nmi_pending: self.nmi_pending,
+            nmi_pending_shadow: self.nmi_pending_shadow,
+            irq_line_shadow: self.irq_line_shadow,
+            prev_nmi_line: self.prev_nmi_line,
+            i_delay: self.i_delay,
+            nmi_polled: self.nmi_polled,
+            irq_polled: self.irq_polled,
+            total_cycles: self.total_cycles,
+            is_running: self.is_running,
+            bus_available: self.bus_available,
+            operand_address_crossed_page: self.operand_address_crossed_page,
+            temp_addr_low: self.temp_addr_low,
+            temp_addr_high: self.temp_addr_high,
+            temp_value: self.temp_value,
+            effective_addr: self.effective_addr,
+
+            current_op: self.current_op.clone(),
+            current_mode: self.current_mode.clone(),
+
             instruction_step: self.instruction_step,
             current_opcode: self.current_opcode,
-            nmi_pending: self.nmi_pending,
-            prev_nmi_line: self.prev_nmi_line,
-            total_cycles: self.total_cycles,
+            cycles_remaining: self.cycles_remaining,
         }
     }
 
-    pub fn total_cycles(&self) -> u64 { self.total_cycles }
+    pub fn load_state(&mut self, state: &CpuState) {
+        self.a = state.a; self.x = state.x; self.y = state.y;
+        self.pc = state.pc; self.sp = state.sp;
+        self.status = state.status.clone();
+        self.config = state.config.clone();
 
-    // 2. Load the CPU state back in (Used for loading a save state or rewinding the debugger)
-    pub fn set_state(&mut self, state: CpuState) {
-        self.a = state.a;
-        self.x = state.x;
-        self.y = state.y;
-        self.pc = state.pc;
-        self.sp = state.sp;
-        self.status = state.status;
+        self.nmi_pending = state.nmi_pending;
+        self.prev_nmi_line = state.prev_nmi_line;
+        self.nmi_pending_shadow = state.nmi_pending_shadow;
+        self.irq_line_shadow = state.irq_line_shadow;
+        self.i_delay = state.i_delay;
+        self.nmi_polled = state.nmi_polled;
+        self.irq_polled = state.irq_polled;
+        self.total_cycles = state.total_cycles;
+
+        self.temp_addr_low = state.temp_addr_low;
+        self.temp_addr_high = state.temp_addr_high;
+        self.temp_value = state.temp_value;
+        self.effective_addr = state.effective_addr;
+        self.bus_available = state.bus_available;
+        self.is_running = state.is_running;
+        self.operand_address_crossed_page = state.operand_address_crossed_page;
+        self.current_op = state.current_op.clone();
+        self.current_mode = state.current_mode.clone();
+
         self.cycles_remaining = state.cycles_remaining;
         self.instruction_step = state.instruction_step;
         self.current_opcode = state.current_opcode;
-        self.nmi_pending = state.nmi_pending;
-        self.prev_nmi_line = state.prev_nmi_line;
-        self.total_cycles = state.total_cycles;
     }
 
     pub fn is_interrupt_disabled(&self) -> bool {
@@ -267,6 +319,8 @@ impl M6502Cpu {
         self.nmi_pending = false;
         self.i_delay = false;
         self.prev_nmi_line = false;
+        self.nmi_pending_shadow = false;
+        self.irq_line_shadow = false;
         self.last_cycles = 0;
         self.last_opcode = 0;
         for _ in 0..5 {
@@ -280,7 +334,7 @@ impl M6502Cpu {
         bus.step_cycles(1);
         self.pc = (hi << 8) | lo;
         self.total_cycles = 7;
-        emu_print!("total cycles {} bus cycles {}", self.total_cycles, bus.total_cycles());
+//        emu_print!("total cycles {} bus cycles {}", self.total_cycles, bus.total_cycles());
     }
 
     pub fn reset(&mut self, bus: &mut dyn AddressBus) {
@@ -289,6 +343,8 @@ impl M6502Cpu {
         self.nmi_pending = false;
         self.i_delay = false;
         self.prev_nmi_line = false;
+        self.nmi_pending_shadow = false;
+        self.irq_line_shadow = false;
         self.last_cycles = 0;
         self.last_opcode = 0;
         self.total_cycles = 0;
@@ -299,12 +355,24 @@ impl M6502Cpu {
         self.pc = (hi << 8) | lo;
     }
 
-    pub fn step_one_cycle(&mut self, bus: &mut dyn AddressBus) {
-        let current_nmi_line = bus.is_nmi_line_asserted();
-        if !self.prev_nmi_line && current_nmi_line {
+    pub fn sample_interrupt_lines(&mut self, bus: &mut dyn AddressBus) {
+        let line = bus.is_nmi_line_asserted();
+        if !self.prev_nmi_line && line {
             self.nmi_pending = true;
         }
-        self.prev_nmi_line = current_nmi_line;
+        self.prev_nmi_line = line;
+
+        self.nmi_pending_shadow = self.nmi_pending;
+        self.irq_line_shadow = bus.is_irq_line_asserted();
+    }
+
+    pub fn step_one_cycle(&mut self, bus: &mut dyn AddressBus) {
+        let in_interrupt_sequence = matches!(self.current_op,
+            Operation::Nmi | Operation::Irq | Operation::Brk);
+        if self.cycles_remaining == 1 {
+            self.nmi_polled = self.nmi_pending_shadow;
+            self.irq_polled = self.irq_line_shadow && !self.status.interrupt_disable;
+        }
 
         if self.cycles_remaining == 0 {
             self.instruction_step = 1;
@@ -1069,18 +1137,21 @@ impl M6502Cpu {
     }
 
     fn check_interrupts(&mut self, bus: &mut dyn AddressBus) -> bool {
-        if bus.is_irq_line_asserted() && self.test_prints > 0 {
+/*        if bus.is_irq_line_asserted() && self.test_prints > 0 {
                 emu_print!("IRQ Check - line=low, I_flag={}, i_delay={}", 
               self.status.interrupt_disable, self.i_delay);
-        }
+        } */
 
-        if self.nmi_pending {
+        if self.nmi_polled {
             self.nmi_pending = false; // Clear edge trigger flag
-            emu_print!("Setup NMI Interrupt");
+            self.nmi_pending_shadow = false;
+            self.nmi_polled = false;
+            //            emu_print!("Setup NMI Interrupt");
             self.setup_hardware_interrupt(Operation::Nmi, bus);
             return true;
         }
 
+        /*
         let interrupts_disabled = if self.i_delay {
             if self.status.interrupt_disable {
                 false
@@ -1090,9 +1161,12 @@ impl M6502Cpu {
         } else {
             self.status.interrupt_disable
         };
+        */
         
-        if bus.is_irq_line_asserted() && !interrupts_disabled {
-            emu_print!("******Setup IRQ Interrupt. I_DELAY={}", self.i_delay);
+//        if bus.is_irq_line_asserted() && !interrupts_disabled {
+        if self.irq_polled {
+            self.irq_polled = false;
+            //            emu_print!("******Setup IRQ Interrupt. I_DELAY={}", self.i_delay);
             self.setup_hardware_interrupt(Operation::Irq, bus);
             return true;
         }
@@ -1105,7 +1179,9 @@ impl M6502Cpu {
         self.current_mode = AddressingMode::Interrupt;
         self.cycles_remaining = 7;
         self.instruction_step = 2;
-    
+        self.irq_polled = false;
+        self.nmi_polled = false;
+
         // Cycle 1 Hardware Reality: Read from current PC and discard the byte
         let _dummy = bus.read_byte(self.pc);
         self.i_delay = false;
@@ -1625,7 +1701,7 @@ impl M6502Cpu {
                     (Operation::Rti, 5) => { self.temp_addr_low = bus.read_byte(STACK_BASE + self.sp as u16); self.sp = self.sp.wrapping_add(1); }
                     (Operation::Rti, 6) => { self.temp_addr_high = bus.read_byte(STACK_BASE + self.sp as u16);
                                              self.pc = ((self.temp_addr_high as u16) << 8) | (self.temp_addr_low as u16);
-                                                emu_print!("{} ***RTI*** returning to PC={:04X}. SP now={:04X}. I={}|I_DELAY={}", bus.total_cycles(), self.pc, self.sp, self.status.interrupt_disable, self.i_delay);
+ //                                               emu_print!("{} ***RTI*** returning to PC={:04X}. SP now={:04X}. I={}|I_DELAY={}", bus.total_cycles(), self.pc, self.sp, self.status.interrupt_disable, self.i_delay);
                                             }
                     // RTS
                     (Operation::Rts, 2) => { let _dummy = bus.read_byte(self.pc);
@@ -1648,7 +1724,7 @@ impl M6502Cpu {
             }
 
             AddressingMode::Interrupt => {
-                let vector_base_addr = match self.current_op {
+                let mut vector_base_addr = match self.current_op {
                     Operation::Nmi => 0xFFFA,
                     Operation::Brk | Operation::Irq => 0xFFFE,
                     _ => 0xFFFE,
@@ -1663,12 +1739,12 @@ impl M6502Cpu {
                             // Software BRK is a 2-byte instruction frame, so it advances PC here.
                             // Hardware interrupts do NOT advance PC.
                             self.pc = self.pc.wrapping_add(1);
-                            emu_print!("Operation is BRK. Cycle 2 done and PC advanced to {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
+//                            emu_print!("Operation is BRK. Cycle 2 done and PC advanced to {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
                         }
                         if self.current_op == Operation::Nmi {
-                            emu_print!("{} NMI cycle 2: PC: {:04X}| SP: {:04X}", bus.total_cycles(), self.pc, self.sp);
+//                            emu_print!("{} NMI cycle 2: PC: {:04X}| SP: {:04X}", bus.total_cycles(), self.pc, self.sp);
                         } else if self.current_op == Operation::Irq {
-                            emu_print!("{} IRQ cycle 2: PC: {:04X}| SP: {:04X}", bus.total_cycles(), self.pc, self.sp);
+//                            emu_print!("{} IRQ cycle 2: PC: {:04X}| SP: {:04X}", bus.total_cycles(), self.pc, self.sp);
 //                        self.test_print = true;
                         }
                     }
@@ -1679,7 +1755,7 @@ impl M6502Cpu {
                         self.sp = self.sp.wrapping_sub(1);
 //                            emu_print!("Interrupt cycle 3 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
                         if self.current_op == Operation::Brk {
-                            emu_print!("Operation is BRK. Cycle 3 done and PC still {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
+//                            emu_print!("Operation is BRK. Cycle 3 done and PC still {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
 
                         }
                     }
@@ -1689,11 +1765,8 @@ impl M6502Cpu {
                         bus.write_byte(STACK_BASE + (self.sp as u16), pc_low);
                         self.sp = self.sp.wrapping_sub(1);
                         if self.current_op == Operation::Brk {
-                            emu_print!("Operation is BRK. Cycle 4 done and PC still {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
-
+//                            emu_print!("Operation is BRK. Cycle 4 done and PC still {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
                         }
-
-                        //                        emu_print!("Interrupt cycle 4 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
                     }
                     5 => {
                         // Cycle 5: Push Status Flags to Stack
@@ -1702,37 +1775,37 @@ impl M6502Cpu {
             
                         bus.write_byte(STACK_BASE + (self.sp as u16), status_byte);
                         self.sp = self.sp.wrapping_sub(1);
-                        if self.current_op == Operation::Brk {
-                            emu_print!("Operation is BRK. Cycle 5 done and PC still {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
-
+                        self.status.interrupt_disable = true;
+                        // NMI hijack: hardware's window is an NMI arriving during the first
+                        // four cycles of the sequence. The shadow read here IS "state as of
+                        // the end of cycle 4" — exactly that window.
+                        if self.current_op != Operation::Nmi && self.nmi_pending_shadow {
+                            self.nmi_pending = false;
+                            self.nmi_pending_shadow = false;
+                            self.current_op = Operation::Nmi;
                         }
-
-                        //                        emu_print!("Interrupt cycle 5 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles()); 
                     }
                     6 => {
                         // Cycle 6: Fetch Vector Low Byte
                         self.temp_addr_low = bus.read_byte(vector_base_addr);
                         if self.current_op == Operation::Brk {
-                            emu_print!("Operation is BRK. Cycle 6 done and PC still {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
-
+//                            emu_print!("Operation is BRK. Cycle 6 done and PC still {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
                         }
-
-                        //                        emu_print!("Interrupt cycle 6 at PC={:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
                     }
                     7 => {
                         // Cycle 7: Fetch Vector High Byte and perform the actual vector jump!
-                        self.status.interrupt_disable = true;
+                        
                         let high_byte = bus.read_byte(vector_base_addr + 1);
                         self.pc = ((high_byte as u16) << 8) | (self.temp_addr_low as u16);
                         if self.current_op == Operation::Nmi {
-                            emu_print!("{} NMI cycle 7: Vector Addr: {:04X}|PC: {:04X}|Vector high byte: {:02X} | low byte: {:02X}", bus.total_cycles(), vector_base_addr, self.pc, high_byte, self.temp_addr_low);
+//                            emu_print!("{} NMI cycle 7: Vector Addr: {:04X}|PC: {:04X}|Vector high byte: {:02X} | low byte: {:02X}", bus.total_cycles(), vector_base_addr, self.pc, high_byte, self.temp_addr_low);
                         } else if self.current_op == Operation::Irq {
-                            emu_print!("{} IRQ cycle 7: Vector Addr: {:04X}|PC: {:04X}|Vector high byte: {:02X} | low byte: {:02X}", bus.total_cycles(), vector_base_addr, self.pc, high_byte, self.temp_addr_low);
+//                            emu_print!("{} IRQ cycle 7: Vector Addr: {:04X}|PC: {:04X}|Vector high byte: {:02X} | low byte: {:02X}", bus.total_cycles(), vector_base_addr, self.pc, high_byte, self.temp_addr_low);
 //                        self.test_print = true;
                         }
                         if self.current_op == Operation::Brk {
-                            emu_print!("Operation is BRK. Cycle 7 done and PC now {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
-
+                            self.nmi_polled = false;
+//                            emu_print!("Operation is BRK. Cycle 7 done and PC now {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
                         }
                     }
                     _ => { emu_print!("INTERRUPT step {}: Vector Addr: {:04X}|PC: {:04X}|", self.instruction_step, vector_base_addr, self.pc); }
@@ -1825,9 +1898,8 @@ impl M6502Cpu {
                     self.i_delay = true;
                 }
                 self.status.interrupt_disable = false;
-
-                emu_print!("CLI operation executed");
-                self.test_prints = 3;
+//                emu_print!("CLI operation executed");
+//                self.test_prints = 3;
             }
             Operation::Clv => { self.status.overflow = false; }
             Operation::Cmp => { 
@@ -1994,12 +2066,12 @@ impl M6502Cpu {
             Operation::Sec => { self.status.carry = true; }
             Operation::Sed => { self.status.decimal = true; }
             Operation::Sei => { 
-                emu_print!("Sei operation executed");
+//                emu_print!("Sei operation executed");
                 if !self.status.interrupt_disable {
                     self.i_delay = true;
                 }
                 self.status.interrupt_disable = true;
-                self.test_prints = 3;
+//                self.test_prints = 3;
             }
             Operation::Sha => {
                 // High byte of the target address + 1
