@@ -1,11 +1,11 @@
-use crate::nes::mappers::Mapper;
-use std::cell::{UnsafeCell, Cell};
+use crate::nes::mappers::{Mapper};
+use std::cell::{UnsafeCell};
 
 pub struct Cartridge {
     pub prg_rom: Vec<u8>,
     pub chr_rom: Vec<u8>,
     pub mapper: UnsafeCell<Box<dyn Mapper>>, // Dynamic trait object
-    pub mapper_id: u8,
+    pub mapper_id: u16,
     pub base_filename: String,
     pub has_battery: bool,
 }
@@ -21,6 +21,11 @@ impl Cartridge {
             has_battery: false,
         }
     }
+
+    pub fn mapper_number(&self) -> u16 {
+        self.mapper_id
+    }
+
     pub fn mapper(&self) -> &dyn Mapper {
         unsafe { &**self.mapper.get() }
     }

@@ -98,10 +98,27 @@ impl Mapper64 {
         mapper
     }
 
-    /*
-    pub fn set_revision(&mut self, revision: Mmc3Revision) {
-        self.revision = revision;
-    } */
+   pub fn write_register(&mut self, address: u16, data: u8) {
+        match address {
+            0xC000..=0xDFFE if address % 2 == 0 => {
+                self.irq_latch = data;
+            }
+            0xC001..=0xDFFF if address % 2 != 0 => {
+                self.irq_mode = data & 0x01;
+                self.reload_flag = true;
+                self.cpu_cycle_prescaler = 0; // Reset cycle mode prescaler
+            }
+            0xE000..=0xFFFE if address % 2 == 0 => {
+                self.irq_enabled = false;
+                self.irq_pending = false;
+                self.irq_delay_cycles = -1;
+            }
+            0xE001..=0xFFFF if address % 2 != 0 => {
+                self.irq_enabled = true;
+            }
+            _ => {}
+        }
+    }
     
     fn recalculate_banks(&mut self) {
         let last = self.prg_banks - 1;
@@ -219,7 +236,7 @@ impl Mapper for Mapper64 {
         }
     }
 
-    fn clock_scanline(&mut self) {
+    fn notify_scanline(&mut self) {
 //        godot_print!("clock_scanline: counter={} latch={} enabled={} active={}", 
 //            self.irq_counter.get(), self.irq_latch.get(), 
 //            self.irq_enabled.get(), self.irq_active.get());

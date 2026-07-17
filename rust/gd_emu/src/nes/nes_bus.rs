@@ -1,11 +1,12 @@
 use godot::global::godot_print;
 use crate::common::bus::AddressBus;
-use crate::nes::mappers::Mapper;
+//use crate::nes::mappers::Mapper;
 use crate::nes::cartridge::Cartridge;
 use crate::nes::nes_ppu::NesPPU;
 use crate::nes::nes_apu::NesAPU;
 use crate::common::m6502::M6502Cpu;
 use crate::nes::nes_apu::DmcMemoryReader;
+//use serde::{Serialize, Deserialize};
 use std::cell::{UnsafeCell, Cell};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -87,7 +88,7 @@ impl NesBus {
     pub fn step_one_cycle(&mut self) {
         self.cartridge.mapper_mut().step_cycles(1);
         let apu_ptr = self.apu.get();
-        unsafe { (*apu_ptr).step(1, self); }
+        unsafe { (*apu_ptr).step_one_cycle(self); }
         self.total_cpu_cycles += 1;
         let mapper = self.cartridge.mapper_mut();
         self.ppu.get_mut().step_one_cycle(mapper);
@@ -179,7 +180,16 @@ impl AddressBus for NesBus {
             0x4000..=0x401F => { 
                 self.apu.get_mut().write_reg(addr, value);
              }
-            0x4020..=0xFFFF => { self.cartridge.mapper_mut().cpu_write(addr, value); }
+            0x4020..=0xFFFF => {
+                if addr == 0x5104 {
+                    let ppu = self.ppu.get_mut();
+                    godot_print!("Scanline={}, cycle={}", ppu.scanline, ppu.cycle);
+                }
+                if addr == 0x5104 || (addr >= 0x5126 && addr <= 0x512A) {
+                    let ppu = self.ppu.get_mut();
+                    godot_print!("Current scanline={} cycle={}", ppu.scanline, ppu.cycle);
+                } 
+                self.cartridge.mapper_mut().cpu_write(addr, value); }
         }
     }
 

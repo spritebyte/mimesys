@@ -1,8 +1,9 @@
-use godot::prelude::*;
+//use godot::prelude::*;
+//use godot::classes::ImageTexture;
 use godot::global::godot_print;
-use godot::classes::ImageTexture;
 use crate::nes::mappers::Mapper;
 use std::sync::atomic::{AtomicBool, Ordering};
+use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 
 // The standard 64-color original NES system hardware color palette
@@ -26,23 +27,23 @@ struct SpritePixelInfo {
 
 pub struct NesPPU {
     // --- Hardware Registers ---
-    ctrl: u8,       // $2000
-    mask: u8,       // $2001
-    status: u8,     // $2002
-    oam_addr: u8,   // $2003
-    scroll: u16,    // $2005 internal latches
-    addr: u16,      // $2006 internal latches
+    pub ctrl: u8,       // $2000
+    pub mask: u8,       // $2001
+    pub status: u8,     // $2002
+    pub oam_addr: u8,   // $2003
+    pub scroll: u16,    // $2005 internal latches
+    pub addr: u16,      // $2006 internal latches
     scanline_bg: [(u8, u8, u8); 33],   // (low_byte, high_byte, palette_idx) per tile, this scanline
     scanline_sprites: Vec<(usize, u8, u8, u8, u8, bool)>, // (oam_index, sprite_x, low_byte, high_byte, attr, is_sprite_zero)
     mid_scanline_write: bool,
     // Addresses and internal latches
-    base_nametable_address: u16,
-    vram_increment:u8,
+    pub base_nametable_address: u16,
+    pub vram_increment:u8,
     sprite_pattern_table:u16,
     background_pattern_table: u16,
     sprite_size:u8,
-    fine_x:u8,
-    w_latch:bool,
+    pub fine_x:u8,
+    pub w_latch:bool,
     pub v_addr: u16,  // Current VRAM read/write pointer address (15 bits)
     pub t_addr: u16,  // Temporary internal address latch
     is_odd_frame: bool,
@@ -59,8 +60,8 @@ pub struct NesPPU {
     pub frame_ready: bool,
     vbl_suppressed: bool,
     nmi_suppressed: bool,
-    scanline: i16,   // -1 to 261
-    cycle: i16,      // 0 to 340
+    pub scanline: u16,   // 0 to 262
+    pub cycle: u16,      // 0 to 340
     // --- Video Buffers ---
     // Double buffering prevents the UI thread from reading half-rendered frames!
     back_buffer: Vec<u8>,       // The frame currently being drawn (Width * Height * 4 bytes RGBA)
@@ -69,7 +70,63 @@ pub struct NesPPU {
     // Direct shared reference to the system's atomic sync flag
     system_frame_ready: Arc<AtomicBool>,
     pub total_ppu_cycles: u64,
+    ppu_open_bus: u8,
+    decay_timer_upper: i64,
+    decay_timer_lower: i64,
+    pub sprite_0_hit: bool,
+    pub debug_trace_bg: bool,
+    pub frame_number: u64,
 }
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PpuState {
+    // Registers exposed via $2000-$2007
+    pub ctrl: u8,
+    pub mask: u8,
+    pub status: u8,
+    pub oam_addr: u8,
+
+    // Internal scroll/address registers (the real "hidden" state that
+    // makes precise resume possible mid-scanline, mid-scroll)
+    pub v_addr: u16,
+    pub t_addr: u16,
+    pub fine_x: u8,
+    pub w_latch: bool,
+
+    // Background pipeline — shift registers must be saved exactly as-is,
+    // since they hold pre-fetched tile data mid-flight between loads
+    pub bg_shift_low: u16,
+    pub bg_shift_high: u16,
+    pub attr_shift_low: u16,
+    pub attr_shift_high: u16,
+
+    // Timing position
+    pub scanline: u16,
+    pub cycle: u16,
+    pub total_ppu_cycles: u64,
+    pub is_odd_frame: bool,
+
+    pub vbl_suppressed: bool,
+    pub nmi_suppressed: bool,
+
+    pub background_pattern_table: u16,
+    pub data_buffer: u8,
+    // Memory
+    #[serde(with = "serde_bytes")]
+    pub oam: Vec<u8>,           // 256 bytes
+    #[serde(with = "serde_bytes")]
+    pub vram: Vec<u8>,          // 4096 bytes (nametables)
+    #[serde(with = "serde_bytes")]
+    pub palette_ram: Vec<u8>,   // 32 bytes
+
+    pub scanline_sprites: Vec<(usize, u8, u8, u8, u8, bool)>,
+    // Deliberately NOT saved:
+    // - front_buffer/back_buffer: the framebuffer will simply repopulate
+    //   as rendering resumes; May want to save front_buffer separately if
+    //   I want to have thumbnail preview
+}
+
+const TARGET_SCANLINE: u16 = 174;
 
 impl NesPPU {
     pub fn new(system_frame_ready: Arc<AtomicBool>) -> Self {
@@ -79,8 +136,8 @@ impl NesPPU {
             base_nametable_address: 0x2000, vram_increment: 1,
             sprite_pattern_table: 0x0, background_pattern_table: 0x0, sprite_size: 8,
             mid_scanline_write: false, vbl_suppressed: false, nmi_suppressed: false,
-            is_odd_frame: false,
-            frame_ready: false, scanline: 0, cycle: 0, w_latch: false, fine_x: 0,
+            is_odd_frame: false, ppu_open_bus: 0, decay_timer_upper: 0, decay_timer_lower: 0,
+            frame_ready: false, scanline: 261, cycle: 0, w_latch: false, fine_x: 0,
             bg_shift_low: 0, bg_shift_high: 0, attr_shift_low: 0, attr_shift_high: 0,
             v_addr: 0, t_addr: 0, data_buffer: 0,
             vram: [0;4096], palette_ram: [0;32], oam: [0;256],
@@ -88,14 +145,84 @@ impl NesPPU {
             back_buffer: vec![0; buffer_size],
             front_buffer: Arc::new(vec![0; buffer_size]),
             system_frame_ready,
-            total_ppu_cycles:0,
+            total_ppu_cycles:0, frame_number: 0,
+            sprite_0_hit: false, debug_trace_bg: false,
         }
+    }
+
+    pub fn get_state(&self) -> PpuState {
+        PpuState {
+            ctrl: self.ctrl,
+            mask: self.mask,
+            status: self.status,
+            oam_addr: self.oam_addr,
+            v_addr: self.v_addr,
+            t_addr: self.t_addr,
+            fine_x: self.fine_x,
+            w_latch: self.w_latch,
+            bg_shift_low: self.bg_shift_low,
+            bg_shift_high: self.bg_shift_high,
+            attr_shift_low: self.attr_shift_low,
+            attr_shift_high: self.attr_shift_high,
+            scanline: self.scanline,
+            cycle: self.cycle,
+            total_ppu_cycles: self.total_ppu_cycles,
+            is_odd_frame: self.is_odd_frame,
+
+            vbl_suppressed: self.vbl_suppressed,
+            nmi_suppressed: self.nmi_suppressed,
+            data_buffer: self.data_buffer,
+            background_pattern_table: self.background_pattern_table,
+            oam: self.oam.to_vec(),
+            vram: self.vram.to_vec(),
+            palette_ram: self.palette_ram.to_vec(),
+            scanline_sprites: self.scanline_sprites.clone(),
+        }
+    }
+
+    pub fn load_state(&mut self, state: &PpuState) {
+        self.ctrl = state.ctrl;
+        self.mask = state.mask;
+        self.status = state.status;
+        self.oam_addr = state.oam_addr;
+        self.v_addr = state.v_addr;
+        self.t_addr = state.t_addr;
+        self.fine_x = state.fine_x;
+        self.w_latch = state.w_latch;
+        self.bg_shift_low = state.bg_shift_low;
+        self.bg_shift_high = state.bg_shift_high;
+        self.attr_shift_low = state.attr_shift_low;
+        self.attr_shift_high = state.attr_shift_high;
+        self.scanline = state.scanline;
+        self.cycle = state.cycle;
+        self.total_ppu_cycles = state.total_ppu_cycles;
+        self.is_odd_frame = state.is_odd_frame;
+
+        self.vbl_suppressed = state.vbl_suppressed;
+        self.nmi_suppressed = state.nmi_suppressed;
+        self.data_buffer = state.data_buffer;
+        self.scanline_sprites = state.scanline_sprites.clone();
+        self.background_pattern_table = state.background_pattern_table;
+        self.oam.copy_from_slice(&state.oam);
+        self.vram.copy_from_slice(&state.vram);
+        self.palette_ram.copy_from_slice(&state.palette_ram);
     }
 
     pub fn reset(&mut self) {
         self.ctrl = 0; self.mask = 0; self.status = 0;
-        self.scanline = 0; self.cycle = 0; self.frame_ready = false;
+        self.scanline = 261; self.cycle = 0; self.frame_ready = false;
         self.w_latch = false; self.v_addr = 0; self.t_addr = 0;
+        self.frame_number = 0;
+    }
+
+    pub fn is_sprite_0_hit(&self) -> bool {
+        let val = self.sprite_0_hit;
+        return val
+    }
+
+    pub fn toggle_debug_trace(&mut self) {
+        self.debug_trace_bg = !self.debug_trace_bg;
+        godot_print!("DEBUG_TRACE={}", self.debug_trace_bg);
     }
 
     pub fn is_frame_complete(&self) -> bool {
@@ -110,93 +237,127 @@ impl NesPPU {
 
     pub fn step_one_cycle(&mut self, mapper: &mut dyn Mapper) {
         let rendering_enabled = self.rendering_enabled();
-        let is_prefetch = self.scanline == 261;
-
-        if !is_prefetch && self.cycle == 0 {
-        // Evaluate and cache sprites for the current line before cycle 1 starts rendering
-            self.evaluate_sprites_for_scanline(mapper);
-        }
-
-        // 1. Handle VBlank and Idle Scanlines instantly (Massive Speedup)
-        if self.scanline >= 240 && self.scanline <= 260 {
-            if self.scanline == 240 && self.cycle == 0 {
-                // End of frame: swap buffers safely
-                let completed_buffer = std::mem::replace(&mut self.back_buffer, vec![0; 256 * 240 * 4]);
-                self.front_buffer = Arc::new(completed_buffer);
-                self.system_frame_ready.store(true, Ordering::Release);
-            } else if self.scanline == 241 && self.cycle == 1 {
-                if !self.vbl_suppressed {
-                    self.status |= 0x80; // Set VBlank flag
-//                godot_print!("vblank flag set at scanline {} cycle {}. Total cycles={} ", self.scanline, self.cycle, self.total_ppu_cycles);
-                }
-                self.vbl_suppressed = false;
+        if self.decay_timer_upper > 0 {
+            self.decay_timer_upper -= 1;
+            if self.decay_timer_upper == 0 {
+                self.ppu_open_bus &= 0x1F; // Clear upper 3 bits to 0
             }
-            self.advance_cycle(mapper);
-            return;
         }
-
-        // 2. ---- ACTIVE RENDERING TIMELINE (Scanlines 0..=239 & 261) ----
-        let is_prefetch = self.scanline == 261;
-
-        // Clear VBlank flag at the start of the prefetch line
-        if is_prefetch && self.cycle == 1 {
-            self.status &= 0x3F; 
+        if self.decay_timer_lower > 0 {
+            self.decay_timer_lower -= 1;
+            if self.decay_timer_lower == 0 {
+                self.ppu_open_bus &= 0xE0; // Clear lower 5 bits to 0
+            }
         }
+        match self.scanline {
+            // ---- VISIBLE SCANLINES (0..=239) & PREFETCH SCANLINE (261) ----
+            0..=239 | 261 => {
+                let is_prefetch = self.scanline == 261;
 
-        // Render individual pixel-by-pixel if on a visible scanline
-        if !is_prefetch && self.cycle >= 1 && self.cycle <= 256 {
-            self.render_pixel(mapper, (self.cycle - 1) as usize); 
-        }
+                // 1. Visible Screen Rendering (Skip during prefetch line)
+                if !is_prefetch && (1..=256).contains(&self.cycle) {
+                    self.render_pixel(mapper, (self.cycle - 1) as usize);
+                }
 
-        // PPU Internal Scroll Register State Machine
-        if rendering_enabled {
-            match self.cycle {
-                // Background shifts and tile fetches happen every 8 dots
-                8 | 16 | 24 | 32 | 40 | 48 | 56 | 64 | 72 | 80 | 88 | 96 | 104 | 112 | 120 | 128 
-                | 136 | 144 | 152 | 160 | 168 | 176 | 184 | 192 | 200 | 208 | 216 | 224 | 232 | 240 | 248 => {
-                    self.increment_coarse_x();
-                }
-                251 => {
-                    // Real hardware fetches the last background tile parameters here
-                }
-                256 => {
-                    self.increment_coarse_x();
-                    self.increment_fine_y();
-                }
-                257 => {
-                    self.copy_horizontal(); // Update active X scroll from temporary X scroll
-                }
-                304 => {
-                    if is_prefetch {
-                        self.copy_vertical(); // CRITICAL: Reset active Y scroll for next frame!
+                if rendering_enabled {
+                    match self.cycle {
+                        0 => {
+                            if !is_prefetch {
+                                self.evaluate_sprites_for_scanline(mapper);
+                            }
+                        }
+                        // Background coarse X increments every 8 dots
+                        c if (9..=249).contains(&c) && c % 8 == 1 => {
+                            self.load_background_shifters(mapper);
+                            self.increment_coarse_x();
+                        }
+                        256 => {
+                            self.increment_coarse_x();
+                            self.increment_fine_y();
+                        }
+                        257 => {
+                            self.copy_horizontal(); // Update active X from temporary X
+                        }
+                        260 => {
+                            mapper.notify_scanline();
+                        }
+                        304 => {
+                            if is_prefetch {
+                                self.copy_vertical(); // Reset active Y for next frame
+                            }
+                        }
+                        328 => {
+                            self.load_background_shifters_high(mapper);
+                            self.increment_coarse_x();
+                        }
+                        336 => {
+                            self.load_background_shifters(mapper);
+                            self.increment_coarse_x();
+                        }
+                        _ => {}
+                    }
+
+                    let cycle_type = self.cycle % 8;
+                    let is_pattern_phase = cycle_type == 5 || cycle_type == 6 || cycle_type == 7 || cycle_type == 0;
+
+                    if (1..=256).contains(&self.cycle) || (321..=336).contains(&self.cycle) {
+                        // Background Fetches
+                        let bus_addr = if is_pattern_phase {
+                            self.background_pattern_table
+                        } else {
+                            0x2000 // Nametable/Attribute reads (A12 = 0)
+                        };
+                        mapper.update_a12(bus_addr);
+                    } else if (257..=320).contains(&self.cycle) {
+                        // Sprite Fetches
+                        let bus_addr = if is_pattern_phase {
+                            // In 8x16 mode, sprite patterns can come from either page, but
+                            // standard MMC3 IRQ timing maps reliably using the sprite pattern base setup:
+                            self.sprite_pattern_table
+                        } else {
+                            0x2000
+                        };
+                        mapper.update_a12(bus_addr);
                     }
                 }
-                328 => {
-                    // Prefetching the first two tiles for the next scanline
-                    self.load_background_shifters_high(mapper);
-                    self.increment_coarse_x();
-                }
-                336 => {
-                    self.load_background_shifters(mapper);
-                    self.increment_coarse_x();
-                }
-                _ => {}
             }
+
+            // ---- POST-RENDER / IDLE SCANLINE ----
+            240 => {
+                if self.cycle == 0 {
+                    // End of frame: swap buffers safely
+                    let completed_buffer = std::mem::replace(&mut self.back_buffer, vec![0; 256 * 240 * 4]);
+                    self.front_buffer = Arc::new(completed_buffer);
+                    self.system_frame_ready.store(true, Ordering::Release);
+                }
+            }
+
+            // ---- VBLANK PERIOD (241..=260) ----
+            241..=260 => {
+                if self.scanline == 241 && self.cycle == 1 {
+                    if !self.vbl_suppressed {
+                        self.status |= 0x80; // Set VBlank flag
+                    }
+                    self.vbl_suppressed = false;
+                }
+                if self.scanline == 260 && self.cycle == 340 {
+                    self.status &= 0x1F;
+                    self.nmi_suppressed = false;
+                }
+            }
+
+            _ => unreachable!(),
         }
 
-        // 3. ---- MMC3 SCANLINE COUNTER HOOK ----
-        if rendering_enabled && (self.scanline < 240 || is_prefetch) {
-            // Evaluate the clock line depending on your tile configuration
-            let target_clock_cycle = if self.background_pattern_table == 0x1000 { 4 } else { 260 };
-            if self.cycle == target_clock_cycle {
-                mapper.clock_scanline();
-            }
+//        if rendering_enabled && ((1..=256).contains(&self.cycle) || (321..=335).contains(&self.cycle)) {
+        if rendering_enabled && ((1..=256).contains(&self.cycle)) {
+//            godot_print!("{} shifting registers for next cycle. Scanline={}, cycle={}", self.frame_number, self.scanline, self.cycle);
+            self.bg_shift_low <<= 1;
+            self.bg_shift_high <<= 1;
+            self.attr_shift_low <<= 1;
+            self.attr_shift_high <<= 1;
         }
-        if self.scanline == 261 && self.cycle == 0 {
-            self.status &= 0x1F; // Clear VBlank flag at end of VBlank
-            self.nmi_suppressed = false;
-        }
-        // 4. ---- ADVANCE TIMING DATA ----
+        // 5. Always advance the cycle counters at the very end
         self.advance_cycle(mapper);
     }
 
@@ -210,7 +371,7 @@ impl NesPPU {
         let should_skip = rendering_enabled && self.scanline == 261 && self.cycle == 339 && self.is_odd_frame;
 
         if should_skip {
-            self.cycle = 341; // Artificially skip directly to cycle 340, which wraps next
+            self.cycle = 340; // Artificially skip directly to cycle 340, which wraps next
         }
 
         if self.cycle >= 341 {
@@ -222,6 +383,7 @@ impl NesPPU {
                 self.is_odd_frame = !self.is_odd_frame;
                 self.frame_ready = true;
                 mapper.notify_frame_start();
+                self.frame_number += 1;
             }
         }
     }
@@ -263,21 +425,30 @@ impl NesPPU {
         }
     }
 
-fn rendering_enabled(&self) -> bool {
+    fn rendering_enabled(&self) -> bool {
         // Checks PPUMASK ($2001) Bit 3 (Background visibility) or Bit 4 (Sprite visibility)
         (self.mask & 0x18) != 0
     }
 
     fn increment_coarse_x(&mut self) {
+        let before_nt_x = (self.v_addr >> 10) & 1;
         if (self.v_addr & 0x001F) == 31 {
             self.v_addr &= !0x001F;       // Coarse X = 0
             self.v_addr ^= 0x0400;        // Switch horizontal nametable bit
         } else {
             self.v_addr += 1;             // Increment coarse X
         }
+        let after_nt_x = (self.v_addr >> 10) & 1;
+/*        if before_nt_x != after_nt_x {
+            godot_print!(
+                "[nt-x flip] scanline={} cycle={} v_addr={:04X} coarse_x={}",
+                self.scanline, self.cycle, self.v_addr, self.v_addr & 0x1F
+            );
+        } */
     }
 
     fn increment_fine_y(&mut self) {
+        let before_nt_y = (self.v_addr >> 11) & 1;
         if (self.v_addr & 0x7000) != 0x7000 {
             self.v_addr += 0x1000;        // Increment fine Y
         } else {
@@ -293,12 +464,21 @@ fn rendering_enabled(&self) -> bool {
             }
             self.v_addr = (self.v_addr & !0x03E0) | (y << 5);
         }
+        let after_nt_y = (self.v_addr >> 11) & 1;
+/*        if before_nt_y != after_nt_y {
+            godot_print!(
+                "[nt-y flip] scanline={} cycle={} v_addr={:04X} coarse_y={} fine_y={}",
+                self.scanline, self.cycle, self.v_addr, (self.v_addr >> 5) & 0x1F, (self.v_addr >> 12) & 7
+            );
+        } */
     }
 
     fn copy_horizontal(&mut self) {
         // Copy coarse X (bits 0-4) and horizontal nametable (bit 10)
         // Mask: 0x041F
+        let old_v_addr = self.v_addr;
         self.v_addr = (self.v_addr & !0x041F) | (self.t_addr & 0x041F);
+//        godot_print!("{} copy_horizontal: v_addr={}, was {}. t_addr={}", self.frame_number, self.v_addr, old_v_addr, self.t_addr);
     }
 
     fn copy_vertical(&mut self) {
@@ -307,113 +487,118 @@ fn rendering_enabled(&self) -> bool {
         self.v_addr = (self.v_addr & !0x7BE0) | (self.t_addr & 0x7BE0);
     }
 
-fn render_pixel(&mut self, mapper: &dyn Mapper, x: usize) {
-    let mut bg_show = (self.mask & 0x08) != 0;
-    let mut spr_show = (self.mask & 0x10) != 0;
-
-    if x < 8 {
-        if (self.mask & 0x02) == 0 { bg_show = false; } // Hide left 8px BG
-        if (self.mask & 0x04) == 0 { spr_show = false; } // Hide left 8px Sprites
-    }
-
-    // ---- 1. CYCLE-ACCURATE BACKGROUND FETCH ----
-    // Every 8 cycles, we load the next tile's data into the shift registers' high bytes.
-    // The real PPU starts fetching tiles for the next line at cycle 321 of the previous line,
-    // but fetching exactly on boundaries (x % 8 == 0) matches the live state perfectly.
-    if self.rendering_enabled() && (x % 8 == 7) {
-        self.load_background_shifters(mapper);
-    }
-
-    let mut bg_pixel = 0u8;
-    let mut bg_palette_idx = 0u8;
-
-    if bg_show {
-        let finex = if self.fine_x < 16 { self.fine_x } else { self.fine_x - 1 };
-        let bit_shift = 15 - (finex as u32);
-        let bg_color_bit0 = ((self.bg_shift_low >> bit_shift) & 1) as u8;
-        let bg_color_bit1 = ((self.bg_shift_high >> bit_shift) & 1) as u8;
-        bg_pixel = (bg_color_bit1 << 1) | bg_color_bit0;
-
-        let attr_bit0 = ((self.attr_shift_low >> bit_shift) & 1) as u8;
-        let attr_bit1 = ((self.attr_shift_high >> bit_shift) & 1) as u8;
-        bg_palette_idx = (attr_bit1 << 1) | attr_bit0;
-
-        if let Some((side, tile_count)) = mapper.split_config() {
-            let split_width = tile_count as usize * 8;
-            let in_split = if side { x >= 256 - split_width } else { x < split_width };
-            if in_split {
-                let (lo, hi, pal) = mapper.read_split_tile(x % 8 + (x / 8) * 8, self.scanline as usize);
-                let bit = 7 - (x % 8);
-                bg_pixel = (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1);
-                bg_palette_idx = pal;
-            }
+    fn render_pixel(&mut self, mapper: &dyn Mapper, x: usize) {
+        let mut bg_show = (self.mask & 0x08) != 0;
+        let mut spr_show = (self.mask & 0x10) != 0;
+        let y = (self.v_addr & 0x03E0) >> 5;
+        if x < 8 {
+            if (self.mask & 0x02) == 0 { bg_show = false; } // Hide left 8px BG
+            if (self.mask & 0x04) == 0 { spr_show = false; } // Hide left 8px Sprites
         }
-    }
 
-    // ---- 2. EXTRACT SPRITE PIXEL ----
-    let mut sprite_pixel = 0u8;
-    let mut sprite_palette_idx = 0u8;
-    let mut sprite_priority = 0u8; 
-    let mut is_sprite_zero = false;
+//    if self.rendering_enabled() && (x % 8 == 7) {
+//        self.load_background_shifters(mapper);
+//    }
 
-    if spr_show {
-        for sprite in &self.scanline_sprites {
-            let (_, s_x, s_low, s_high, s_attr, s_is_zero) = *sprite;
-            let s_x = s_x as usize;
+        let mut bg_pixel = 0u8;
+        let mut bg_palette_idx = 0u8;
 
-            if x +1 >= s_x && x + 1 < s_x + 8 {
-                let mut s_bit_shift = 7 - ((x+1) - s_x);
-                if (s_attr & 0x40) != 0 { s_bit_shift = (x+1) - s_x; } // Horizontal flip
+        if bg_show {
+            let bit_shift = 15 - (self.fine_x as u32);
+            let bg_color_bit0 = ((self.bg_shift_low >> bit_shift) & 1) as u8;
+            let bg_color_bit1 = ((self.bg_shift_high >> bit_shift) & 1) as u8;
+            bg_pixel = (bg_color_bit1 << 1) | bg_color_bit0;
 
-                let s_color_bit0 = (s_low >> s_bit_shift) & 1;
-                let s_color_bit1 = (s_high >> s_bit_shift) & 1;
-                let p_pixel = (s_color_bit1 << 1) | s_color_bit0;
+            let attr_bit0 = ((self.attr_shift_low >> bit_shift) & 1) as u8;
+            let attr_bit1 = ((self.attr_shift_high >> bit_shift) & 1) as u8;
+            bg_palette_idx = (attr_bit1 << 1) | attr_bit0;
 
-                if p_pixel != 0 {
-                    sprite_pixel = p_pixel;
-                    sprite_palette_idx = s_attr & 0x03;
-                    sprite_priority = (s_attr >> 5) & 1;
-                    is_sprite_zero = s_is_zero;
-                    break; 
+            if let Some((side, tile_count)) = mapper.split_config() {
+                let split_width = tile_count as usize * 8;
+                let in_split = if side { x >= 256 - split_width } else { x < split_width };
+                if in_split {
+                    let (lo, hi, pal) = mapper.read_split_tile(x % 8 + (x / 8) * 8, self.scanline as usize);
+                    let bit = 7 - (x % 8);
+                    bg_pixel = (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1);
+                    bg_palette_idx = pal;
                 }
             }
         }
-    }
 
-    // ---- 3. MULTIPLEXER / PRIORITY & SPRITE 0 HIT ----
-    let bg_opaque = bg_pixel != 0;
-    let spr_opaque = sprite_pixel != 0;
+        // ---- 2. EXTRACT SPRITE PIXEL ----
+        let mut sprite_pixel = 0u8;
+        let mut sprite_palette_idx = 0u8;
+        let mut sprite_priority = 0u8; 
+        let mut is_sprite_zero = false;
 
-    if is_sprite_zero && bg_opaque && spr_opaque && bg_show && spr_show {
-        // Sprite 0 cannot hit at x=255 or if either side is clipped in the left 8 pixels
-        if x < 255 {
-            self.status |= 0x40;
+        if spr_show {
+            for sprite in &self.scanline_sprites {
+                let (_, s_x, s_low, s_high, s_attr, s_is_zero) = *sprite;
+                let s_x = s_x as usize;
+
+                if x >= s_x && x < s_x + 8 {
+                    let mut s_bit_shift = 7 - (x - s_x);
+                    if (s_attr & 0x40) != 0 { s_bit_shift = x - s_x; } // Horizontal flip
+
+                    let s_color_bit0 = (s_low >> s_bit_shift) & 1;
+                    let s_color_bit1 = (s_high >> s_bit_shift) & 1;
+                    let p_pixel = (s_color_bit1 << 1) | s_color_bit0;
+
+                    if p_pixel != 0 {
+                        sprite_pixel = p_pixel;
+                        sprite_palette_idx = s_attr & 0x03;
+                        sprite_priority = (s_attr >> 5) & 1;
+                        is_sprite_zero = s_is_zero;
+                        break; 
+                    }
+                }
+            }
         }
-    }
 
-    let final_palette_offset = if spr_opaque && (!bg_show || !bg_opaque || sprite_priority == 0) {
-        // If the background layer is hidden entirely (bg_show == false) but sprite has priority 1, 
-        // real hardware drops back to the universal background color (0x00) instead of bleeding through.
-        if !bg_show && sprite_priority == 1 {
-            0x00
+        // ---- 3. MULTIPLEXER / PRIORITY & SPRITE 0 HIT ----
+        let bg_opaque = bg_pixel != 0;
+        let spr_opaque = sprite_pixel != 0;
+
+        if is_sprite_zero && bg_opaque && spr_opaque && bg_show && spr_show {
+            // Sprite 0 cannot hit at x=255 or if either side is clipped in the left 8 pixels
+            if x < 255 {
+                if self.status & 0x40 == 0 { 
+//                  godot_print!("[{}] Sprite 0 hit detected", self.total_ppu_cycles);
+//                  godot_print!("->Position: x={}. y={} Scanline={}, PPU cycle={}. V={}, T={}, Fine_X={}", x, y, self.scanline, self.cycle, self.v_addr, self.t_addr, self.fine_x);
+                }
+                self.status |= 0x40;
+            }
+        }
+
+        let final_palette_offset = if spr_opaque && (!bg_show || !bg_opaque || sprite_priority == 0) {
+            // If the background layer is hidden entirely (bg_show == false) but sprite has priority 1, 
+            // real hardware drops back to the universal background color (0x00) instead of bleeding through.
+            if !bg_show && sprite_priority == 1 {
+                0x00
+            } else {
+                0x10 + (sprite_palette_idx as usize * 4) + sprite_pixel as usize
+            }
+        } else if bg_opaque {
+            (bg_palette_idx as usize * 4) + bg_pixel as usize
         } else {
-            0x10 + (sprite_palette_idx as usize * 4) + sprite_pixel as usize
-        }
-    } else if bg_opaque {
-        (bg_palette_idx as usize * 4) + bg_pixel as usize
-    } else {
-        0x00
-    };
+            0x00
+        };
 
-    // ---- 4. WRITE PIXEL TO BACK BUFFER ----
-    let color_idx = self.palette_ram[final_palette_offset] & 0x3F;
-    let (r, g, b) = NES_PALETTE[color_idx as usize];
-    let pixel_index = (self.scanline as usize * 256 + x) * 4;
-    self.back_buffer[pixel_index] = r;
-    self.back_buffer[pixel_index + 1] = g;
-    self.back_buffer[pixel_index + 2] = b;
-    self.back_buffer[pixel_index + 3] = 255;
-
+        // ---- 4. WRITE PIXEL TO BACK BUFFER ----
+        let color_idx = self.palette_ram[final_palette_offset] & 0x3F;
+        let (r, g, b) = NES_PALETTE[color_idx as usize];
+        let pixel_index = (self.scanline as usize * 256 + x) * 4;
+        self.back_buffer[pixel_index] = r;
+        self.back_buffer[pixel_index + 1] = g;
+        self.back_buffer[pixel_index + 2] = b;
+        self.back_buffer[pixel_index + 3] = 255;
+/*
+        if self.debug_trace_bg && self.scanline == TARGET_SCANLINE && x >= 232 {
+            godot_print!(
+                "({}) [pixel] x={} bg_shift_low={:04X} bg_shift_high={:04X} bg_pixel={} bg_palette={}",
+                self.frame_number, x, self.bg_shift_low, self.bg_shift_high, bg_pixel, bg_palette_idx); 
+        } */
+/*
     // ---- 5. SHIFT REGISTERS FOR THE NEXT CYCLE ----
     if (self.cycle >= 1 && self.cycle <= 256) || (self.cycle >= 321 && self.cycle <= 336) {
         if (self.mask & 0x18) != 0 {
@@ -423,13 +608,32 @@ fn render_pixel(&mut self, mapper: &dyn Mapper, x: usize) {
             self.attr_shift_high <<= 1;
         }
     }
-}
+*/
+    }
+
+    pub fn is_bg_fetch(&self) -> bool {
+        if !self.rendering_enabled() {
+            return false;
+        }
+        
+        let is_visible_line = (0..=239).contains(&self.scanline) || self.scanline == 261;
+        let is_bg_cycle = (1..=256).contains(&self.cycle) || (321..=336).contains(&self.cycle);
+        
+        is_visible_line && is_bg_cycle
+    }
 
 fn load_background_shifters(&mut self, mapper: &dyn Mapper) {
     // 1. Fetch Tile ID from the PPU's internal VRAM (Not the mapper!)
     let nt_addr = 0x2000 | (self.v_addr & 0x0FFF);
     let tile_id = mapper.read_nametable_byte(nt_addr, &self.vram, false);
-
+/*
+    if self.debug_trace_bg && self.scanline == TARGET_SCANLINE && self.cycle == 240 {
+        godot_print!(
+            "({}) [last-tile fetch] scanline={} cycle={} v_addr={:04X} coarse_x={} nt_select_x={} tile_id={:02X}",
+            self.frame_number, self.scanline, self.cycle, self.v_addr, self.v_addr & 0x1F, (self.v_addr >> 10) & 1, tile_id
+        );
+    }
+*/
     // 2. Fetch Attribute Byte from the PPU's internal VRAM
     let attr_addr = 0x23C0 | (self.v_addr & 0x0C00) | ((self.v_addr >> 4) & 0x38) | ((self.v_addr >> 2) & 0x07);
 //    let attr_vram_index = mapper.mirror_vram_address(attr_addr) as u16;
@@ -447,10 +651,10 @@ fn load_background_shifters(&mut self, mapper: &dyn Mapper) {
     let fine_y = (self.v_addr >> 12) & 0x07;
     let bg_table_base = self.background_pattern_table; 
     let pattern_addr_low = bg_table_base + ((tile_id as u16) << 4) + fine_y;
-    
+
     // Pattern table addresses are < 0x2000, so the mapper safely processes them
-    let bg_low = mapper.ppu_read_ctx(pattern_addr_low, true);
-    let bg_high = mapper.ppu_read_ctx(pattern_addr_low + 8, true);
+    let bg_low = mapper.ppu_read_ctx(pattern_addr_low, self.is_bg_fetch());
+    let bg_high = mapper.ppu_read_ctx(pattern_addr_low + 8, self.is_bg_fetch());
 
     // Load the lower 8 bits of our 16-bit shifters with the fresh data
     self.bg_shift_low = (self.bg_shift_low & 0xFF00) | (bg_low as u16);
@@ -482,8 +686,8 @@ fn load_background_shifters_high(&mut self, mapper: &dyn Mapper) {
 
     let fine_y = (self.v_addr >> 12) & 0x07;
     let pattern_addr_low = self.background_pattern_table + ((tile_id as u16) << 4) + fine_y;
-    let bg_low = mapper.ppu_read_ctx(pattern_addr_low, true);
-    let bg_high = mapper.ppu_read_ctx(pattern_addr_low + 8, true);
+    let bg_low = mapper.ppu_read_ctx(pattern_addr_low, self.is_bg_fetch());
+    let bg_high = mapper.ppu_read_ctx(pattern_addr_low + 8, self.is_bg_fetch());
 
     self.bg_shift_low  = (self.bg_shift_low  & 0x00FF) | ((bg_low  as u16) << 8);
     self.bg_shift_high = (self.bg_shift_high & 0x00FF) | ((bg_high as u16) << 8);
@@ -528,7 +732,7 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
             let is_sprite_zero = i == 0;
 
             // Handle vertical flipping
-            let mut flip_y = (attr & 0x80) != 0;
+            let flip_y = (attr & 0x80) != 0;
             let mut sprite_row = row;
             if flip_y {
                 sprite_row = (sprite_height - 1) - row;
@@ -549,10 +753,9 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
             };
 
             // Fetch the 2 bitplanes for this sprite row using the mapper
-            let s_low = mapper.ppu_read_ctx(pattern_addr_low, false);
-            let s_high = mapper.ppu_read_ctx(pattern_addr_low + 8, false);
+            let s_low = mapper.ppu_read_ctx(pattern_addr_low, self.is_bg_fetch());
+            let s_high = mapper.ppu_read_ctx(pattern_addr_low + 8, self.is_bg_fetch());
 
-            // Push into your existing tuple structure: 
             // (index, x_coord, low_byte, high_byte, attributes, is_sprite_zero)
             self.scanline_sprites.push((i, x, s_low, s_high, attr, is_sprite_zero));
         }
@@ -600,8 +803,9 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
                 mapper.ppu_write(addr, value);
             }
             0x2000..=0x3EFF => {
-                let mirrored_addr = mapper.mirror_vram_address(addr);
-                self.vram[(mirrored_addr as usize) & 0x0FFF] = value;
+                mapper.write_nametable_byte(addr, value, &mut self.vram);
+//                let mirrored_addr = mapper.mirror_vram_address(addr);
+//                self.vram[(mirrored_addr as usize) & 0x0FFF] = value;
             }
             0x3F00..=0x3FFF => {
                 let mut palette_addr = (addr & 0x001F) as usize;
@@ -618,7 +822,7 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
         match reg {
             2 => { // $2002 - PPUSTATUS
                 let _is_currently_vblank = self.scanline >= 241 && self.scanline <= 260;
-                let res = self.status;
+                let res = self.status | (self.ppu_open_bus & 0x1F);
                 if self.scanline == 241 && self.cycle == 0 {
                     self.vbl_suppressed = true;
                 }
@@ -627,6 +831,8 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
                 }
                 self.status &= 0x7F; // Reading status clears V-Blank bit
                 self.w_latch = false;    // And resets scroll/address double-write latch
+                self.ppu_open_bus = res;
+                self.decay_timer_upper = 89342;
                 res
             }
             4 => {
@@ -634,27 +840,35 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
                 if (self.oam_addr & 0x03) == 2 {
                     value &= 0xE3; // Keeps bits 7, 6, 5, 1, 0
                 }
+                self.ppu_open_bus = value;
+                self.decay_timer_lower = 89342;
                 value
             }
             7 => { // $2007 - PPUDATA
                 let current_vram_addr = self.v_addr & 0x3FFF;
-                let mut data = self.ppu_read(mapper, current_vram_addr, false);
+                let mut data = self.ppu_read(mapper, current_vram_addr, self.is_bg_fetch());
 
                 if current_vram_addr < 0x3F00 {
                     let buffered_data = self.data_buffer;
                     self.data_buffer = data;
                     data = buffered_data;
                 } else {
-                    self.data_buffer = self.ppu_read(mapper, self.v_addr - 0x1000, false);
+                    self.data_buffer = self.ppu_read(mapper, current_vram_addr - 0x1000, self.is_bg_fetch());
+                    data = (data & 0x3F) | (self.ppu_open_bus & 0xC0);
                 }
                 self.v_addr = self.v_addr.wrapping_add(self.vram_increment as u16) & 0x3FFF;
+                self.ppu_open_bus = data;
+                self.decay_timer_lower = 89342;
                 data
             }
-            _ => 0
+            _ => self.ppu_open_bus
         }
     }
 
     pub fn cpu_write_reg(&mut self, mapper: &mut dyn crate::nes::mappers::Mapper, reg: u16, value: u8) {
+        self.ppu_open_bus = value;
+        self.decay_timer_upper = 89342;
+        self.decay_timer_lower = 89342;
         if self.scanline >= 0 && self.scanline < 240 && self.cycle > 0 && self.cycle < 256 {
             if reg == 0 || reg == 1 || reg == 5 || reg == 6 {
                 self.mid_scanline_write = true;
@@ -667,13 +881,13 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
                 //                godot_print!("PPUCTRL write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
                 self.ctrl = value;
                 let new_nmi_enabled = (self.ctrl & 0x80) != 0;
-                if !old_nmi_enabled && new_nmi_enabled && vblank_flag_active {
+/*                if !old_nmi_enabled && new_nmi_enabled && vblank_flag_active {
                     godot_print!("nmi_enabled. Trigger NMI");
 
                 }
                 if old_nmi_enabled && !new_nmi_enabled {
                     godot_print!("nmi_disabled");
-                }
+                } */
                 // Extract bits to configure scrolling targets
                 self.t_addr = (self.t_addr & 0xF3FF) | (((value & 0x03) as u16) << 10);
                 self.vram_increment = if (value & 0x04) == 0x04 { 32 } else { 1 };
@@ -722,13 +936,7 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
                     self.v_addr = self.t_addr; // Latch copies address into current VRAM target
                     self.w_latch = false;
 
-                    // If Bit 12 transitioned from 0 to 1, and the PPU isn't actively rendering:
-                    let old_a12 = (old_v & 0x1000) != 0;
-                    let new_a12 = (self.v_addr & 0x1000) != 0;
-
-                    if !old_a12 && new_a12 && !self.rendering_enabled() {
-                        mapper.clock_scanline();
-                    }
+                    mapper.update_a12(self.v_addr);
                 }
             }
             7 => { // $2007 - PPUDATA
@@ -737,13 +945,7 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
                 self.ppu_write(mapper, old_v, value);
                 // Automatically step forward the target address based on $2000 setup configurations
                 self.v_addr = self.v_addr.wrapping_add(self.vram_increment as u16) & 0x3FFF;
-
-                let old_a12 = (old_v & 0x1000) != 0;
-                let new_a12 = (self.v_addr & 0x1000) != 0;
-
-                if !old_a12 && new_a12 && !self.rendering_enabled() {
-                    mapper.clock_scanline();
-                }
+                mapper.update_a12(self.v_addr);
             }
             _ => {}
         }

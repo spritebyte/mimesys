@@ -1,27 +1,20 @@
 use crate::common::m6502::{M6502Cpu, CpuVariant};
-use crate::common::bus::AddressBus;
+//use crate::common::bus::AddressBus;
 use crate::nes::nes_bus::NesBus;
-use crate::nes::mappers::{Mapper, Mapper0, Mirroring};
 use crate::nes::cartridge::Cartridge;
-use crate::nes::mapper1::Mapper1;
-use crate::nes::mapper2::Mapper2;
-use crate::nes::mapper3::Mapper3;
-use crate::nes::mapper4::Mapper4;
-use crate::nes::mapper5::Mapper5;
-use crate::nes::mapper7::Mapper7;
-use crate::nes::mapper9::Mapper9;
-use crate::nes::mapper34::Mapper34;
-use crate::nes::mapper69::Mapper69;
-use crate::nes::mapper206::Mapper206;
+use crate::nes::mappers::{self, Mirroring};
+use crate::nes::nes_state::NesSaveState;
+use crate::nes::nes_rewind::RewindBuffer;
 
 use godot::prelude::*;
-use serde::{Serialize, Deserialize};
-use godot::classes::{Node, AudioStreamGeneratorPlayback};
+//use serde::{Serialize, Deserialize};
+use godot::classes::{AudioStreamGeneratorPlayback};
 use godot::global::godot_print;
 use godot::classes::{AudioStreamPlayer,Image,ImageTexture,Texture2D};
 use godot::classes::image::Format;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
+use std::path::PathBuf;
 
 const PRG_ROM_COUNT_IDX: u8 = 0x04;
 const CHR_ROM_COUNT_IDX: u8 = 0x05;
@@ -40,11 +33,16 @@ pub struct NesSystem {
     frame_ready: Arc<AtomicBool>,
     is_running: Arc<AtomicBool>,
     save_battery_path: String,
+    save_state_path: String,
     save_filename: String,
     sys_display: Gd<SystemDisplayInfo>,
     playback: Option<Gd<AudioStreamGeneratorPlayback>>,
     cached_image: Option<Gd<Image>>,
     cached_texture: Option<Gd<ImageTexture>>,
+    pending_save_request: Option<PathBuf>,
+    pending_load_request: Option<Vec<u8>>,
+    rewind_buffer: RewindBuffer,
+    current_frame: u64,
 }
 
 #[derive(godot::prelude::GodotClass)]
@@ -99,27 +97,6 @@ impl SystemDisplayInfo {
 #[godot_api]
 impl NesSystem {
     #[func]
-    pub fn get_display_info(&self) -> Gd<SystemDisplayInfo> {
-        self.sys_display.clone()
-    }
-/*
-    fn get_cpu_debug_info(&self) -> GodotDictionary {
-        let state = self.cpu.get_state();
-        let mut dict = GodotDictionary::new();
-        
-        dict.insert("pc", state.pc);
-        dict.insert("a", state.a);
-        dict.insert("x", state.x);
-        dict.insert("y", state.y);
-        dict.insert("sp", state.sp);
-        dict.insert("cycles_remaining", state.cycles_remaining);
-        dict.insert("instruction_step", state.instruction_step);
-        dict.insert("opcode", format!("0x{:02X}", state.current_opcode));
-        
-        dict
-    }
-*/
-    #[func]
     pub fn create_from_bytes(rom_bytes: PackedByteArray, base_name: String) -> Option<Gd<Self>> {
         // Validate header and get sizes
         let bytes = rom_bytes.as_slice();
@@ -130,17 +107,23 @@ impl NesSystem {
         let chr_rom_size = bytes_chr * CHR_ROM_PAGE_SIZE as usize;
 
         // extract mapper id
-        let mapper_id_low = bytes[6] >> 4;
-        let mapper_id_high = bytes[7] & 0xF0;
-        let mapper_id = mapper_id_high | mapper_id_low;
+        let mapper_byte = bytes[INES2_MAPPER_BYTE as usize];
 
+        let mapper_low = bytes[CONTROL_BYTE_1_IDX as usize] >> 4;
+        let mapper_mid = bytes[CONTROL_BYTE_2_IDX as usize] & 0xF0;
+        let mapper_high = ((mapper_byte & 0x0F) as u16) << 8;
+        let mapper_id: u16;
         // slice ROM bytes
         let has_trainer:bool = (bytes[CONTROL_BYTE_1_IDX as usize] & 0b100) != 0;
         let ines2: bool = (bytes[CONTROL_BYTE_2_IDX as usize] & 0b1100) == 0x08;
-        let mapper_byte = bytes[CONTROL_BYTE_2_IDX as usize];
         let submapper = (mapper_byte & 0xF0) >> 4;
-        if ines2 { godot_print!("iNES 2 header found. Submapper={:02X} ", submapper); }
-        else { godot_print!("iNES header byte found. {:02X}", mapper_byte)}
+        if ines2 {
+            mapper_id = mapper_high | mapper_mid as u16 | mapper_low as u16;
+            godot_print!("iNES 2 header found. Mapper={} Submapper={} ", mapper_id, submapper); 
+        } else {
+            mapper_id = (mapper_mid | mapper_low) as u16;
+            godot_print!("iNES 1.0 header found. Mapper={}", mapper_id);
+        }
         let prg_start = 16;
         let prg_end = prg_start + prg_rom_size;
         let chr_end = prg_end + (bytes[5] as usize * 8192);
@@ -150,11 +133,27 @@ impl NesSystem {
         let header = bytes[0..15].to_vec();
 
         // initialize the mapper
+        let mirroring_bit = (header[6] & 0x01) != 0;
+        let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
+        let prg_bank_size = match mapper_id {
+            4|206 => 8192,   // MMC3, DxROM: 8KB banks
+            _ => 16384,      // MMC, UxROM: 16KB banks
+        };
+        let chr_bank_size = match mapper_id {
+            4|206 => 1024,  // MMC3, DxROM: 1KB banks
+            _ => 8192,      // MMC, UxROM: 8KB banks
+        };
+        let prg_banks = prg_rom.len() / prg_bank_size;
+        let chr_banks = chr_rom.len() / chr_bank_size;
+
+        let four_screen_bit = (header[6] & 0x08) != 0;
+        let mapper = mappers::make_mapper(mapper_id, submapper, prg_banks, chr_banks, prg_rom.clone(), chr_rom.clone(), initial_mirroring, four_screen_bit).ok()?;
+        /*
         let mapper = match Self::instantiate_mapper(mapper_id, prg_rom.clone(), chr_rom.clone(), header.clone()) {
             Some(m) => m,
             None => { godot_print!("Mapper not supported yet: {mapper_id}"); return None }
         };
-
+*/
         // --- instantiate the atomic sync flag early ---
         let frame_ready = Arc::new(AtomicBool::new(false));
 
@@ -162,6 +161,7 @@ impl NesSystem {
         let cartridge = Cartridge::new(prg_rom, chr_rom, mapper, base_name.clone());
         godot_print!("Cartridge created: {0}", cartridge.base_filename);
         let bus = NesBus::new(cartridge, Arc::clone(&frame_ready));
+        let rewind_buffer = RewindBuffer::new(60, 60);
         godot_print!("prg_rom size: {prg_rom_size} ");
         godot_print!("chr_rom size: {chr_rom_size} ");
 
@@ -174,12 +174,22 @@ impl NesSystem {
                 frame_ready,
                 is_running: Arc::new(AtomicBool::new(false)),
                 save_battery_path: "user://GD_EMU/NES/Save".to_string(),
+                save_state_path: "user://GD_EMU/NES/State".to_string(),
                 playback: None,
                 sys_display: Gd::from_object(SystemDisplayInfo::new()),
                 cached_image: None,
                 cached_texture: None,
+                pending_load_request: None,
+                pending_save_request: None,
+                rewind_buffer,
+                current_frame: 0,
             }
         }))
+    }
+
+    #[func]
+    pub fn get_display_info(&self) -> Gd<SystemDisplayInfo> {
+        self.sys_display.clone()
     }
 
     #[func]
@@ -208,10 +218,12 @@ impl NesSystem {
                 self.bus.step_one_cycle();
                 self.bus.step_dma_one_cycle(&mut self.cpu);
                 self.bus.step_remaining_ppu_cycles();
+                self.cpu.sample_interrupt_lines(&mut self.bus);
             } else {
-                self.bus.step_one_cycle();
+                self.bus.step_one_cycle();                
                 self.cpu.step_one_cycle(&mut self.bus);
                 self.bus.step_remaining_ppu_cycles();
+                self.cpu.sample_interrupt_lines(&mut self.bus);
             }
             cpu_cycles_run += 1;
 //            for _ in 0..3 {
@@ -230,6 +242,11 @@ impl NesSystem {
             }
         }
 
+        self.current_frame += 1;
+        let mut buffer = std::mem::take(&mut self.rewind_buffer);
+        buffer.record_frame(self.current_frame, input_mask, self);
+        self.rewind_buffer = buffer;
+
         self.bus.ppu.get_mut().clear_frame_complete_flag();
         
         let samples = self.bus.apu.get_mut().take_audio_samples();
@@ -245,7 +262,29 @@ impl NesSystem {
     }
 
     #[func]
-    pub fn power_on(&mut self, mut audio_player: Gd<AudioStreamPlayer>) {
+    pub fn request_rewind_to_frame(&mut self, target_frame: i64) -> bool {
+        let mut buffer = std::mem::take(&mut self.rewind_buffer);
+        let result = buffer.rewind_to(target_frame as u64, self);
+        self.rewind_buffer = buffer;
+        result.is_ok()
+    }
+
+    #[func]
+    pub fn get_current_frame(&self) -> i64 {
+        self.current_frame as i64
+    }
+
+    pub fn set_current_frame(&mut self, frame: u64) {
+        self.current_frame = frame;
+    }
+
+    #[func]
+    pub fn get_oldest_rewindable_frame(&self) -> i64 {
+        self.rewind_buffer.oldest_available_frame().unwrap_or(0) as i64
+    }
+
+    #[func]
+    pub fn power_on(&mut self, audio_player: Gd<AudioStreamPlayer>) {
         self.cpu.power_on(&mut self.bus);
         self.is_running.store(true, Ordering::SeqCst);
         let _playback = audio_player.get_stream_playback();
@@ -285,6 +324,103 @@ impl NesSystem {
         self.bus.ppu.get_mut().reset();
         self.cpu.reset(&mut self.bus);
             // self.bus.reset_ram();
+    }
+
+    pub fn build_save_state(&self) -> NesSaveState {
+        NesSaveState {
+            version: 0.1,
+            cpu: self.cpu.get_state(),
+            ppu: unsafe { (*self.bus.ppu.get()).get_state() },
+            apu: unsafe { (*self.bus.apu.get()).get_state() },
+            ram: self.bus.ram,
+            pad1_state: self.bus.pad1_state,
+            pad1_shift_reg: self.bus.pad1_shift_reg.get(),
+            pad_strobe: self.bus.pad_strobe,
+            dma_cycles_remaining: self.bus.dma_cycles_remaining,
+            dma_base_address: self.bus.dma_base_address,
+            dma_temp_buffer: self.bus.dma_temp_buffer,
+            bus_available: self.bus.bus_available,
+            total_cpu_cycles: self.bus.total_cpu_cycles,
+            mapper_number: self.bus.cartridge.mapper_number(),
+            mapper_data: self.bus.cartridge.mapper().save_state(),
+        }
+    }
+
+    pub fn apply_save_state(&mut self, state: &NesSaveState) -> Result<(), String> {
+        if state.mapper_number != self.bus.cartridge.mapper_number() {
+            return Err(format!(
+                "Save state mapper ({}) doesn't match loaded ROM's mapper ({})",
+                state.mapper_number, self.bus.cartridge.mapper_number()
+            ));
+        }
+
+        unsafe { (*self.bus.ppu.get()).load_state(&state.ppu); }
+        unsafe { (*self.bus.apu.get()).load_state(&state.apu); }
+        self.bus.ram = state.ram;
+        self.bus.pad1_state = state.pad1_state;
+        self.bus.pad1_shift_reg.set(state.pad1_shift_reg);
+        self.bus.pad_strobe = state.pad_strobe;
+        self.bus.dma_cycles_remaining = state.dma_cycles_remaining;
+        self.bus.dma_base_address = state.dma_base_address;
+        self.bus.dma_temp_buffer = state.dma_temp_buffer;
+        self.bus.bus_available = state.bus_available;
+        self.bus.total_cpu_cycles = state.total_cpu_cycles;
+        self.bus.cartridge.mapper_mut().load_state(&state.mapper_data);
+        self.cpu.load_state(&state.cpu);
+
+        Ok(())
+    }
+
+    pub fn save_state_to_bytes(&self) -> Result<Vec<u8>, String> {
+        let nes_state = self.build_save_state();
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        bincode::serde::encode_to_vec(&nes_state, config).map_err(|e| format!("{:?}", e))
+    }
+
+    pub fn load_state_from_bytes(&mut self, data: &[u8]) -> Result<(), String> {
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        match bincode::serde::decode_from_slice::<NesSaveState, _>(data, config) {
+            Ok((state, _)) => { self.apply_save_state(&state); Ok(()) }
+            Err(e) => Err(format!("Failed to decode save state: {:?}", e)),
+        }
+    }
+
+    #[func]
+    pub fn save_state_to_file(&mut self, slot: u32) {
+        match self.save_state_to_bytes() {
+            Ok(state_bytes) => {
+                if !godot::classes::DirAccess::dir_exists_absolute(&self.save_state_path) {
+                    godot::classes::DirAccess::make_dir_recursive_absolute(&self.save_state_path);
+                }
+            
+
+                let save_path = format!("{}/{}_slot{}.state", self.save_state_path, self.save_filename, slot);
+            
+                if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::WRITE) {
+                    let packed_array = PackedByteArray::from(&state_bytes[..]);
+                    file.store_buffer(&packed_array);
+                    godot_print!("Save state slot {} saved successfully.", slot);
+                } else {
+                    godot_print!("Error: Couldn't open file for save state at {}", save_path);
+                }
+            }
+            Err(e) => godot_print!("Error serializing save state: {}", e),
+        }
+    }
+
+    #[func]
+    pub fn load_state_from_file(&mut self, slot: u32) {
+        let save_path = format!("{}/{}_slot{}.state", self.save_state_path, self.save_filename, slot);
+
+        if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::READ) {
+            let file_length = file.get_length() as i64;
+            let packed_array = file.get_buffer(file_length);
+            let state_bytes = packed_array.to_vec();
+
+            let _ = self.load_state_from_bytes(&state_bytes);
+        } else {
+            godot_print!("No save state found at {}", save_path);
+        }
     }
 
     #[func]
@@ -327,6 +463,48 @@ impl NesSystem {
     }
 
     #[func]
+    pub fn get_cpu_debug_dict(&self) -> godot::builtin::VarDictionary {
+        let state = self.cpu.get_state();
+        let mut dict = godot::builtin::VarDictionary::new();
+        dict.set("pc", state.pc as i64);
+        dict.set("a", state.a as i64);
+        dict.set("x", state.x as i64);
+        dict.set("y", state.y as i64);
+        dict.set("sp", state.sp as i64);
+        dict.set("cycles_remaining", state.cycles_remaining as i64);
+        dict.set("instruction_step", state.instruction_step as i64);
+        dict.set("opcode", format!("0x{:02X}", state.current_opcode));
+        dict.set("flag_carry", state.status.carry);
+        dict.set("flag_zero", state.status.zero);
+        dict.set("flag_interrupt_disable", state.status.interrupt_disable);
+        dict.set("flag_decimal", state.status.decimal);
+        dict.set("flag_overflow", state.status.overflow);
+        dict.set("flag_negative", state.status.negative);
+
+        dict.set("i_flag_delayed", state.i_delay);
+        dict
+    }
+
+    #[func]
+    pub fn get_ppu_debug_dict(&self) -> godot::builtin::VarDictionary {
+        let ppu = unsafe { &*self.bus.ppu.get() };
+        let mut dict = Dictionary::new();
+        dict.set("scanline", ppu.scanline as i64);
+        dict.set("cycle", ppu.cycle as i64);
+        dict.set("sprite0_hit", (ppu.status & 0x40) != 0);
+        dict.set("vblank_active", (ppu.status & 0x80) != 0);
+        dict.set("v_addr", ppu.v_addr as i64);
+        dict.set("fine_x", ppu.fine_x as i64);
+        dict
+    }
+
+    #[func]
+    pub fn toggle_debug_trace(&mut self) {
+        let ppu = self.bus.ppu.get_mut();
+        ppu.toggle_debug_trace();
+    }
+
+    #[func]
     pub fn get_frame_texture(&mut self) -> Gd<Texture2D> {
         self.frame_ready.store(false, Ordering::Release);
         let raw_pixels = self.bus.ppu.get_mut().get_front_buffer();
@@ -348,7 +526,21 @@ impl NesSystem {
         }
         self.cached_texture.as_ref().unwrap().clone().upcast()
     }
-
+/*
+    pub fn load_rom(&mut self, bus) {
+        let rom = bus.cartridge;
+        bus.Cartridge.mapper = mappers::make_mapper(
+            rom.mapper_id,
+            rom.prg_banks,
+            rom.chr_banks,
+            rom.prg_rom,
+            rom.chr_rom,
+            rom.mirroring,
+            rom.four_screen,
+        ).unwrap();
+    }
+*/
+/*
     // A factory function that maps an integer ID to a concrete Rust struct
     fn instantiate_mapper(mapper_id: u8, prg_rom: Vec<u8>, chr_rom: Vec<u8>, header:Vec<u8>) -> Option<Box<dyn Mapper>> {
         let prg_bank_size = match mapper_id {
@@ -427,4 +619,5 @@ impl NesSystem {
             }
         }
     }
+    */
 }
