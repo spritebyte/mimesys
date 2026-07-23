@@ -25,6 +25,9 @@ pub struct NesBus {
     pub dma_temp_buffer: u8,
     pub bus_available: bool,
     pub total_cpu_cycles: u64,
+    pub total_ppu_dots: u64,
+    pub accesses_this_cycle: u64,
+    pub open_bus: Cell<u8>,
 }
 
 unsafe impl Send for NesBus {}
@@ -43,6 +46,9 @@ impl NesBus {
             bus_available: true,
             dma_cycles_remaining: 0, dma_base_address: 0, dma_temp_buffer: 0,
             total_cpu_cycles: 0,
+            total_ppu_dots: 0,
+            accesses_this_cycle: 0,
+            open_bus: Cell::new(0),
         }
     }
     pub fn get_sram(&self) -> Option<&[u8]> { self.cartridge.get_sram() }
@@ -54,11 +60,12 @@ impl NesBus {
         if self.dma_cycles_remaining == 0 {
             return;
         }
-
+        self.begin_cpu_cycle();     // mapper, APU, total_cpu_cycles
         cpu.total_cycles += 1;
 
         // 1. Handle the initial initialization/halt cycles (cycles 514 or 513 down to 512)
         if self.dma_cycles_remaining > 512 {
+            self.step_ppu_dots(3);
             self.dma_cycles_remaining -= 1;
             return;
         }
@@ -85,6 +92,7 @@ impl NesBus {
         }
     }
 
+    // deprecated
     pub fn step_one_cycle(&mut self) {
         self.cartridge.mapper_mut().step_cycles(1);
         let apu_ptr = self.apu.get();
@@ -94,17 +102,56 @@ impl NesBus {
         self.ppu.get_mut().step_one_cycle(mapper);
     }
 
+    // deprecated
     pub fn step_remaining_ppu_cycles(&mut self) {
         let mapper = self.cartridge.mapper_mut();
         for _ in 0..2 {
             self.ppu.get_mut().step_one_cycle(mapper);
         }
     }
+
+    fn peek_byte(&self, addr: u16) -> u8 {
+        let value = match addr {
+            0x0000..=0x1FFF => self.ram[(addr % 0x0800) as usize],
+            0x2000..=0x3FFF => {
+                let register = addr % 8;
+                let ppu_mut = unsafe { &mut *self.ppu.get() };
+//                println!("BUS read_byte: {:04X} reg:{ :02X} ", addr, register);
+                let mapper_ref = self.cartridge.mapper_mut();
+                ppu_mut.cpu_read_reg(mapper_ref, register)
+            }
+            0x4015 => {
+                unsafe { (*self.apu.get()).read_4015() } // This returns the flag AND sets frame_irq_flag = false
+            }
+            0x4016 => {
+                let shift_reg = self.pad1_shift_reg.get();
+                let val = (shift_reg & 0x01) | 0x40;
+
+                if !self.pad_strobe {
+                    let next_shift = (shift_reg >> 1) | 0x80;
+                    self.pad1_shift_reg.set(next_shift);
+                }
+                val
+            }
+            0x4020..=0xFFFF => self.cartridge.mapper().cpu_read(addr),
+            _ => self.open_bus.get(),
+        };
+        self.open_bus.set(value);
+        value
+    }
+
+    pub fn step_ppu_dots(&mut self, dots: u32) {
+        let mapper = self.cartridge.mapper_mut();
+        for _ in 0..dots {
+            self.ppu.get_mut().step_one_cycle(mapper);
+            self.total_ppu_dots += 1;
+        }
+    }
 }
 
 impl DmcMemoryReader for NesBus {
     fn dmc_read(&self, addr: u16) -> u8 {
-        self.read_byte(addr) // route through cartridge/mapper as normal
+        self.peek_byte(addr)
     }
 }
 
@@ -125,14 +172,15 @@ impl AddressBus for NesBus {
         self.apu.get_mut().is_irq_asserted() || self.cartridge.mapper_mut().is_irq_asserted()
     }
 
-    fn read_byte(&self, addr: u16) -> u8 {
-        match addr {
+    fn read_byte(&mut self, addr: u16) -> u8 {
+        self.step_ppu_dots(1);
+        let value = match addr {
             0x0000..=0x1FFF => self.ram[(addr % 0x0800) as usize],
             0x2000..=0x3FFF => {
                 let register = addr % 8;
                 let ppu_mut = unsafe { &mut *self.ppu.get() };
 //                println!("BUS read_byte: {:04X} reg:{ :02X} ", addr, register);
-                let mapper_ref = self.cartridge.mapper();
+                let mapper_ref = self.cartridge.mapper_mut();
                 ppu_mut.cpu_read_reg(mapper_ref, register)
             }
             0x4015 => {
@@ -140,21 +188,25 @@ impl AddressBus for NesBus {
             }
             0x4016 => {
                 let shift_reg = self.pad1_shift_reg.get();
-                let value = (shift_reg & 0x01) | 0x40;
+                let val = (shift_reg & 0x01) | 0x40;
 
                 if !self.pad_strobe {
                     let next_shift = (shift_reg >> 1) | 0x80;
                     self.pad1_shift_reg.set(next_shift);
                 }
 //                godot_print!("$4016 READ: Returned {}", value);
-                value
+                val
             }
             0x4020..=0xFFFF => self.cartridge.mapper().cpu_read(addr),
             _ => 0,
-        }
+        };
+        self.step_ppu_dots(2);
+        self.accesses_this_cycle += 1;
+        value
     }
 
     fn write_byte(&mut self, addr: u16, value: u8) {
+        self.step_ppu_dots(2);
         match addr {
             0x0000..=0x1FFF => self.ram[(addr % 0x0800) as usize] = value,
             0x2000..=0x3FFF => {
@@ -191,6 +243,9 @@ impl AddressBus for NesBus {
                 } 
                 self.cartridge.mapper_mut().cpu_write(addr, value); }
         }
+        self.accesses_this_cycle += 1;
+        self.step_ppu_dots(1);
+        self.open_bus.set(value);
     }
 
     fn step_cycles(&mut self, cycles: u64) {
@@ -204,7 +259,16 @@ impl AddressBus for NesBus {
             for _ in 0..3 {
                 let mapper = self.cartridge.mapper_mut();
                 self.ppu.get_mut().step_one_cycle(mapper);
+                self.total_ppu_dots += 1;
             }
         }
+    }
+
+    fn begin_cpu_cycle(&mut self) {
+        self.cartridge.mapper_mut().step_cycles(1);
+        let apu_ptr = self.apu.get();
+        unsafe { (*apu_ptr).step_one_cycle(self); }
+        self.total_cpu_cycles += 1;
+//        godot_print!("begin_cpu_cycle: total cpu now {}", self.total_cpu_cycles);
     }
 }

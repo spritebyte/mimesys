@@ -1,5 +1,5 @@
 use crate::common::m6502::{M6502Cpu, CpuVariant};
-//use crate::common::bus::AddressBus;
+use crate::common::bus::AddressBus;
 use crate::nes::nes_bus::NesBus;
 use crate::nes::cartridge::Cartridge;
 use crate::nes::mappers::{self, Mirroring};
@@ -213,25 +213,40 @@ impl NesSystem {
         self.bus.pad1_state = nes_pad_state;
 //        self.bus.pad1_state = 0x01;
         let mut cpu_cycles_run:u16 = 0;
+        self.bus.accesses_this_cycle = 0;
         while !unsafe { (*self.bus.ppu.get()).is_frame_complete() } {
             if !self.bus.bus_available {
-                self.bus.step_one_cycle();
+//                self.bus.step_one_cycle();
                 self.bus.step_dma_one_cycle(&mut self.cpu);
-                self.bus.step_remaining_ppu_cycles();
+//                self.bus.step_remaining_ppu_cycles();
+                self.bus.accesses_this_cycle = 0;
                 self.cpu.sample_interrupt_lines(&mut self.bus);
             } else {
-                self.bus.step_one_cycle();                
+//                self.bus.step_one_cycle();
+                self.bus.begin_cpu_cycle();
                 self.cpu.step_one_cycle(&mut self.bus);
-                self.bus.step_remaining_ppu_cycles();
+//                self.bus.step_remaining_ppu_cycles();
+                match self.bus.accesses_this_cycle {
+                    1 => {}
+                    0 => {
+        // Internal cycle with no bus access — hardware would do a dummy read.
+                        godot_print!("no-access cycle: opcode={:02X} step={}",
+                        self.cpu.current_opcode, self.cpu.instruction_step);
+                        self.bus.step_ppu_dots(3);
+                    }
+                    n => panic!("{} bus accesses in one CPU cycle (opcode {:02X})",
+                            n, self.cpu.current_opcode),
+                }
                 self.cpu.sample_interrupt_lines(&mut self.bus);
             }
+            self.bus.accesses_this_cycle = 0;
             cpu_cycles_run += 1;
 //            for _ in 0..3 {
 //                let mapper = self.bus.cartridge.mapper_mut();
 //                self.bus.ppu.get_mut().step_one_cycle(mapper);
 //            }
 //            let mapper = self.bus.cartridge.mapper_mut();
-//            godot_print!("CPU cycles: {} | Bus cycles: {} | PPU cycles: { } | APU cycles: {} | Mapper cycles: {}", self.cpu.total_cycles(), self.bus.total_cycles(), unsafe { (*self.bus.ppu.get()).total_cycles() }, self.bus.apu.get_mut().total_cycles(), mapper.total_cycles());
+//            godot_print!("CPU cycles: {} | Bus CPU cycles: {} PPU: {} | PPU cycles: { } | APU cycles: {}| Last opcode={:02X}", self.cpu.total_cycles(), self.bus.total_cpu_cycles, self.bus.total_ppu_dots, unsafe { (*self.bus.ppu.get()).total_cycles() }, self.bus.apu.get_mut().total_cycles(), self.cpu.current_opcode);
 //            if self.bus.total_cpu_cycles >= 100000 && self.bus.total_cpu_cycles <= 120000 {
 //                godot_print!("CYCLE COUNT: cpu: {}, ppu: {}", self.bus.total_cpu_cycles, self.bus.ppu.get_mut().total_ppu_cycles);
 //            }
@@ -241,7 +256,8 @@ impl NesSystem {
                 break;
             }
         }
-
+        debug_assert_eq!(self.bus.total_ppu_dots, self.bus.total_cpu_cycles * 3,
+            "CPU cycle performed no bus access");
         self.current_frame += 1;
         let mut buffer = std::mem::take(&mut self.rewind_buffer);
         buffer.record_frame(self.current_frame, input_mask, self);
@@ -289,10 +305,10 @@ impl NesSystem {
         self.is_running.store(true, Ordering::SeqCst);
         let _playback = audio_player.get_stream_playback();
         /*
-        let lo = self.bus.read_byte(0xFFFC);
-        let hi = self.bus.read_byte(0xFFFD);
-        let lo2 = self.bus.read_byte(0xFFFE);
-        let hi2 = self.bus.read_byte(0xFFFF);
+        let lo = self.bus.peek_byte(0xFFFC);
+        let hi = self.bus.peek_byte(0xFFFD);
+        let lo2 = self.bus.peek_byte(0xFFFE);
+        let hi2 = self.bus.peek_byte(0xFFFF);
         godot_print!(
         "CPU Powering On:\n\
          - Reset Vector Bytes: [$FFFC] = 0x{:02X}, [$FFFD] = 0x{:02X}\n\

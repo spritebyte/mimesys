@@ -1,7 +1,7 @@
 use crate::nes::mappers::{Mapper, Mirroring};
 use serde::{Serialize, Deserialize};
 use std::cell::Cell;
-//use godot::global::godot_print;
+use godot::global::godot_print;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mmc3Revision {
@@ -22,6 +22,9 @@ pub struct Mapper4 {
     prg_offsets: [usize; 4],
     chr_offsets: [usize; 8],
     
+    debug_frame: u64,
+    debug_frame_start_cycle: u64,
+    debug_frame_started: bool,
     // Scanline IRQ counter fields wrapped in Cell for interior mutability
     a12_low_counter: Cell<u32>,
     last_a12_low_cycle: i64,
@@ -98,6 +101,9 @@ impl Mapper4 {
             chr_ram,
             current_cycle: 0,
             sram_dirty: false,
+            debug_frame: 0,
+            debug_frame_start_cycle: 0,
+            debug_frame_started: false,
         };
         
         mapper.recalculate_banks();
@@ -109,42 +115,56 @@ impl Mapper4 {
         self.revision = revision;
     }
     
-    fn recalculate_banks(&mut self) {
-        let last = self.prg_banks - 1;
-        let second_last = self.prg_banks - 2;
+fn recalculate_banks(&mut self) {
+    // --- PRG Banking ---
+    let last = self.prg_banks - 1;
+    let second_last = self.prg_banks - 2;
 
-        if self.prg_mode == 0 {
-            self.prg_offsets[0] = self.bank_registers[6] * 0x2000;
-            self.prg_offsets[1] = self.bank_registers[7] * 0x2000;
-            self.prg_offsets[2] = second_last * 0x2000;
-            self.prg_offsets[3] = last * 0x2000;
-        } else {
-            self.prg_offsets[0] = second_last * 0x2000;
-            self.prg_offsets[1] = self.bank_registers[7] * 0x2000;
-            self.prg_offsets[2] = self.bank_registers[6] * 0x2000;
-            self.prg_offsets[3] = last * 0x2000;
-        }
-
-        if self.chr_mode == 0 {
-            self.chr_offsets[0] = (self.bank_registers[0] & 0xFE) * 0x0400;
-            self.chr_offsets[1] = self.chr_offsets[0] + 0x0400;
-            self.chr_offsets[2] = (self.bank_registers[1] & 0xFE) * 0x0400;
-            self.chr_offsets[3] = self.chr_offsets[2] + 0x0400;
-            self.chr_offsets[4] = self.bank_registers[2] * 0x0400;
-            self.chr_offsets[5] = self.bank_registers[3] * 0x0400;
-            self.chr_offsets[6] = self.bank_registers[4] * 0x0400;
-            self.chr_offsets[7] = self.bank_registers[5] * 0x0400;          
-        } else {
-            self.chr_offsets[4] = (self.bank_registers[0] & 0xFE) * 0x0400;
-            self.chr_offsets[5] = self.chr_offsets[4] + 0x0400;
-            self.chr_offsets[6] = (self.bank_registers[1] & 0xFE) * 0x0400;
-            self.chr_offsets[7] = self.chr_offsets[6] + 0x0400;
-            self.chr_offsets[0] = self.bank_registers[2] * 0x0400;
-            self.chr_offsets[1] = self.bank_registers[3] * 0x0400;
-            self.chr_offsets[2] = self.bank_registers[4] * 0x0400;
-            self.chr_offsets[3] = self.bank_registers[5] * 0x0400;  
-        }
+    if self.prg_mode == 0 {
+        // Mode 0: $8000 = R6, $A000 = R7, $C000 = Fixed to second-to-last, $E000 = Fixed to last
+        self.prg_offsets[0] = (self.bank_registers[6] % self.prg_banks) * 0x2000;
+        self.prg_offsets[1] = (self.bank_registers[7] % self.prg_banks) * 0x2000;
+        self.prg_offsets[2] = second_last * 0x2000;
+        self.prg_offsets[3] = last * 0x2000;
+    } else {
+        // Mode 1: $8000 = Fixed to second-to-last, $A000 = R7, $C000 = R6, $E000 = Fixed to last
+        self.prg_offsets[0] = second_last * 0x2000;
+        self.prg_offsets[1] = (self.bank_registers[7] % self.prg_banks) * 0x2000;
+        self.prg_offsets[2] = (self.bank_registers[6] % self.prg_banks) * 0x2000;
+        self.prg_offsets[3] = last * 0x2000;
     }
+
+    // --- CHR Banking ---
+    // Ensure 2KB banks explicitly ignore Bit 0 on standard MMC3 hardware
+    let r0 = self.bank_registers[0] & 0xFE;
+    let r1 = self.bank_registers[1] & 0xFE;
+    let r2 = self.bank_registers[2];
+    let r3 = self.bank_registers[3];
+    let r4 = self.bank_registers[4];
+    let r5 = self.bank_registers[5];
+
+    if self.chr_mode == 0 {
+        // Mode 0: 2KB banks at $0000-$0FFF, 1KB banks at $1000-$1FFF
+        self.chr_offsets[0] = r0 * 0x0400;
+        self.chr_offsets[1] = (r0 + 1) * 0x0400;
+        self.chr_offsets[2] = r1 * 0x0400;
+        self.chr_offsets[3] = (r1 + 1) * 0x0400;
+        self.chr_offsets[4] = r2 * 0x0400;
+        self.chr_offsets[5] = r3 * 0x0400;
+        self.chr_offsets[6] = r4 * 0x0400;
+        self.chr_offsets[7] = r5 * 0x0400;
+    } else {
+        // Mode 1 (Inverted): 1KB banks at $0000-$0FFF, 2KB banks at $1000-$1FFF
+        self.chr_offsets[0] = r2 * 0x0400;
+        self.chr_offsets[1] = r3 * 0x0400;
+        self.chr_offsets[2] = r4 * 0x0400;
+        self.chr_offsets[3] = r5 * 0x0400;
+        self.chr_offsets[4] = r0 * 0x0400;
+        self.chr_offsets[5] = (r0 + 1) * 0x0400;
+        self.chr_offsets[6] = r1 * 0x0400;
+        self.chr_offsets[7] = (r1 + 1) * 0x0400;
+    }
+}
     /// Maps a PPU nametable address ($2000-$2FFF) to its corresponding MMC3 CHR register index (0-5).
     /// This mirrors the CHR register lookup that determines the status of CHR A17 (acting as CIRAM A10).
     pub fn get_nametable_chr_register(&self, ppu_addr: u16) -> usize {
@@ -180,10 +200,15 @@ impl Mapper4 {
         }
     }
 
-    fn clock_irq_counter(&mut self) {
+    fn clock_irq_counter(&mut self, debug_frame: u64, ppu_cycles: u64) {
 //        godot_print!("clock_scanline: counter={} latch={} enabled={} active={}", 
 //            self.irq_counter.get(), self.irq_latch.get(), 
 //            self.irq_enabled.get(), self.irq_active.get());
+        if self.debug_frame >= 300 && self.debug_frame < 320 {
+            let elapsed = ppu_cycles - self.debug_frame_start_cycle;
+            godot_print!("IRQ fire: frame={} scanline={} dot={}",
+                self.debug_frame, elapsed / 341, elapsed % 341);
+        }
         let current_counter = self.irq_counter.get();
         let is_reload = current_counter == 0 || self.irq_reload_flag.get();
 
@@ -302,10 +327,11 @@ impl Mapper for Mapper4 {
         if addr < 0x2000 {
             let bank = (addr / 0x0400) as usize;
             let offset = self.chr_offsets[bank] + (addr & 0x03FF) as usize;
-            if self.chr_rom.is_empty() {
-                return self.chr_ram[offset % self.chr_ram.len()];
-            } else {
+        
+            if !self.chr_rom.is_empty() {
                 return self.chr_rom[offset % self.chr_rom.len()];
+            } else if !self.chr_ram.is_empty() {
+                return self.chr_ram[offset % self.chr_ram.len()];
             }
         }
         0
@@ -315,7 +341,7 @@ impl Mapper for Mapper4 {
         let addr = p_addr & 0x3FFF;
 
         if addr < 0x2000 {
-            if self.chr_rom.is_empty() {
+            if !self.chr_ram.is_empty() {
                 let bank = (addr / 0x0400) as usize;
                 let offset = self.chr_offsets[bank] + (addr & 0x03FF) as usize;
                 let len = self.chr_ram.len();
@@ -405,23 +431,31 @@ impl Mapper for Mapper4 {
         }
     }
 
-    fn update_a12(&mut self, addr: u16) {
+    fn update_a12(&mut self, addr: u16, _ppu_cycles: u64) {
+        if self.debug_frame_started {
+            self.debug_frame_start_cycle = _ppu_cycles;
+            self.debug_frame_started = false;
+        }
         let current_a12 = (addr & 0x1000) != 0;
 
         if !current_a12 {
             // Note when A12 went low
             if self.last_a12_state {
-                self.last_a12_low_cycle = self.current_cycle;
+                self.last_a12_low_cycle = _ppu_cycles as i64;
             }
         } else {
             // A12 transitioned from 0 -> 1 (Rising Edge)
             if !self.last_a12_state {
                 // Only clock the counter if A12 has been low for at least 3 CPU cycles
-                if self.current_cycle - self.last_a12_low_cycle >= 3 {
-                    self.clock_irq_counter();
+                if _ppu_cycles as i64 - self.last_a12_low_cycle > 10 {
+                    self.clock_irq_counter(self.debug_frame, _ppu_cycles);
                 }
             }
         }
         self.last_a12_state = current_a12;
+    }
+    fn notify_frame_start(&mut self) {
+        self.debug_frame += 1;
+        self.debug_frame_started = true;   // capture the cycle on the next A12 call
     }
 }

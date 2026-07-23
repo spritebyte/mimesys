@@ -132,11 +132,11 @@ pub struct M6502Cpu {
     temp_addr_high: u8,
     temp_value: u8,
     effective_addr: u16,
-    current_opcode: u8,
+    pub current_opcode: u8,
     current_op: Operation,
     current_mode: AddressingMode, 
     cycles_remaining: u32,
-    instruction_step: u32,
+    pub instruction_step: u32,
     test_prints: u8,
 }
 
@@ -321,6 +321,8 @@ impl M6502Cpu {
         self.prev_nmi_line = false;
         self.nmi_pending_shadow = false;
         self.irq_line_shadow = false;
+        self.irq_polled = false;
+        self.nmi_polled = false;
         self.last_cycles = 0;
         self.last_opcode = 0;
         for _ in 0..5 {
@@ -328,13 +330,13 @@ impl M6502Cpu {
         }
         self.operand_address_crossed_page = false;
 
+        bus.begin_cpu_cycle();
         let lo = bus.read_byte(0xFFFC) as u16;
-        bus.step_cycles(1);
+        bus.begin_cpu_cycle();
         let hi = bus.read_byte(0xFFFD) as u16;
-        bus.step_cycles(1);
         self.pc = (hi << 8) | lo;
         self.total_cycles = 7;
-//        emu_print!("total cycles {} bus cycles {}", self.total_cycles, bus.total_cycles());
+        emu_print!("power_on: total cycles {} bus cycles {}", self.total_cycles, bus.total_cycles());
     }
 
     pub fn reset(&mut self, bus: &mut dyn AddressBus) {
@@ -1190,10 +1192,12 @@ impl M6502Cpu {
     fn execute_micro_cycle(&mut self, bus: &mut dyn AddressBus) {
         match self.current_mode {
             AddressingMode::Implied => {
+                bus.read_byte(self.pc);
                 self.execute_operation(self.current_op, 0, bus);
             }
 
             AddressingMode::Accumulator => {
+                bus.read_byte(self.pc);
                 self.execute_operation(self.current_op, self.a, bus);
             }
 
@@ -1239,6 +1243,7 @@ impl M6502Cpu {
                         self.pc = self.pc.wrapping_add(1);
                     }
                     3 => {
+                        bus.read_byte(self.temp_addr_low as u16);
                         if self.current_mode == AddressingMode::ZeroPageX {
                             self.effective_addr = self.temp_addr_low.wrapping_add(self.x) as u16;
                         } else {
@@ -1340,7 +1345,6 @@ impl M6502Cpu {
                             let value = bus.read_byte(self.effective_addr);
                             if self.current_op.is_rmw() {
                                 self.temp_value = value;
-                                bus.write_byte(self.effective_addr, self.temp_value);
                             } else {
                                 self.execute_operation(self.current_op, value, bus);
                             }
@@ -1348,8 +1352,13 @@ impl M6502Cpu {
                     }
                     5 => {
                         if self.current_op.is_rmw() {
-                            self.execute_operation(self.current_op, self.temp_value, bus);
+                            bus.write_byte(self.effective_addr, self.temp_value);
                         } 
+                    }
+                    6 => {
+                        if self.current_op.is_rmw() {
+                            self.execute_operation(self.current_op, self.temp_value, bus);  // writes result
+                        }
                     }
                     _=> {}
                 }
@@ -1949,7 +1958,7 @@ impl M6502Cpu {
                 self.status.negative = (result & 0x80) != 0;
             }
             Operation::Lax => { // Undocumented 6502 instruction
-                self.a = bus.read_byte(self.effective_addr);
+                self.a = value;
                 self.x = self.a;
                 self.update_nz_flags(self.a);
             }
@@ -2075,9 +2084,13 @@ impl M6502Cpu {
             }
             Operation::Sha => {
                 // High byte of the target address + 1
-                let high_plus_one = ((self.effective_addr >> 8) + 1) as u8;
-                let val_to_write = self.a & self.x & high_plus_one;
-                bus.write_byte(self.effective_addr, val_to_write);
+                let value = self.a & self.x & self.temp_addr_high.wrapping_add(1);
+                let mut target = self.effective_addr;
+                if (target >> 8) as u8 != self.temp_addr_high {
+                // page crossed: high byte of the address is replaced by the value
+                    target = (target & 0x00FF) | ((value as u16) << 8);
+                }
+                bus.write_byte(target, value);
             }
 
             Operation::Shx => {

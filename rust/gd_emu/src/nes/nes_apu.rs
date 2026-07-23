@@ -778,11 +778,10 @@ impl NesAPU {
     }
 
     pub fn step_one_cycle<M: DmcMemoryReader>(&mut self, mem: &M) {
+        self.total_apu_cycles += 1;
         // Handle a pending $4017 write's delayed reset first — this needs to
         // resolve before anything else this cycle touches frame_counter.
         let just_reset = self.tick_frame_counter_reset_delay();
-        self.total_apu_cycles += 1;
-
         self.clamp_pulse_timers();
         self.tick_pulse_timers();
         self.tick_triangle_timer();

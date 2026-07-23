@@ -283,21 +283,6 @@ impl Mapper for Mapper64 {
         }
     }
 
-    fn notify_scanline(&mut self) {
-        let current_counter = self.irq_counter.get();
-        let is_reload = current_counter == 0 || self.irq_reload_flag.get();
-
-        if is_reload {
-            self.irq_counter.set(self.irq_latch.get());
-            self.irq_reload_flag.set(false);
-        } else {
-            self.irq_counter.set(current_counter.saturating_sub(1));
-        }
-        if self.irq_counter.get() == 0 && self.irq_enabled.get() {
-            self.irq_active.set(true);
-        }
-    }
-
     fn ppu_read(&self, p_addr: u16) -> u8 {
         let addr = p_addr & 0x3FFF;
 
@@ -394,7 +379,7 @@ impl Mapper for Mapper64 {
         }
     }
 
-    fn update_a12(&mut self, addr: u16) {
+    fn update_a12(&mut self, addr: u16, _current_cycle: u64) {
         let current_a12 = (addr & 0x1000) != 0;
 
         if self.irq_mode == 0 {

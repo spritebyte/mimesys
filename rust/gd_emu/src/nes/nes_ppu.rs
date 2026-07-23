@@ -18,11 +18,22 @@ const NES_PALETTE: [(u8, u8, u8); 64] = [
     (204, 210, 120), (180, 222, 120), (168, 226, 144), (152, 226, 180), (160, 214, 228), (160, 162, 160), (0, 0, 0),       (0, 0, 0),
 ];
 
+const SPRITE_A12_PHASE: u32 = 4;   // cycles 260, 268, 276, ...
+const BG_A12_PHASE: u32     = 5;   // cycles 5, 13, 21, ... (BG pattern fetch)
+
 struct SpritePixelInfo {
     color_bit: u8,
     palette_idx: u8,
     priority: u8,
     is_sprite_0: bool,
+}
+
+struct FrameDebug {
+    frame_num: u64,
+    sprite_0_dot: u16,
+    first_2002: u16,
+    first_2005: u16,
+    first_2006: u16,
 }
 
 pub struct NesPPU {
@@ -61,7 +72,7 @@ pub struct NesPPU {
     vbl_suppressed: bool,
     nmi_suppressed: bool,
     pub scanline: u16,   // 0 to 262
-    pub cycle: u16,      // 0 to 340
+    pub cycle: u32,      // 0 to 340
     // --- Video Buffers ---
     // Double buffering prevents the UI thread from reading half-rendered frames!
     back_buffer: Vec<u8>,       // The frame currently being drawn (Width * Height * 4 bytes RGBA)
@@ -76,6 +87,11 @@ pub struct NesPPU {
     pub sprite_0_hit: bool,
     pub debug_trace_bg: bool,
     pub frame_number: u64,
+    pub last_2002: u64,
+    pub last_2005: u64,
+    pub last_2005_2: u64,
+    pub last_2006: u64,
+    pub last_2006_2: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -102,7 +118,7 @@ pub struct PpuState {
 
     // Timing position
     pub scanline: u16,
-    pub cycle: u16,
+    pub cycle: u32,
     pub total_ppu_cycles: u64,
     pub is_odd_frame: bool,
 
@@ -145,7 +161,8 @@ impl NesPPU {
             back_buffer: vec![0; buffer_size],
             front_buffer: Arc::new(vec![0; buffer_size]),
             system_frame_ready,
-            total_ppu_cycles:0, frame_number: 0,
+            total_ppu_cycles:0, frame_number: 0, last_2002: 0, last_2005: 0, last_2006: 0,
+            last_2005_2: 0, last_2006_2: 0,
             sprite_0_hit: false, debug_trace_bg: false,
         }
     }
@@ -259,6 +276,11 @@ impl NesPPU {
                     self.render_pixel(mapper, (self.cycle - 1) as usize);
                 }
 
+                if is_prefetch && self.cycle == 1 {
+                    self.status &= 0x1F;
+                    self.nmi_suppressed = false;
+                }
+
                 if rendering_enabled {
                     match self.cycle {
                         0 => {
@@ -297,27 +319,26 @@ impl NesPPU {
                         _ => {}
                     }
 
-                    let cycle_type = self.cycle % 8;
-                    let is_pattern_phase = cycle_type == 5 || cycle_type == 6 || cycle_type == 7 || cycle_type == 0;
 
-                    if (1..=256).contains(&self.cycle) || (321..=336).contains(&self.cycle) {
-                        // Background Fetches
-                        let bus_addr = if is_pattern_phase {
+                    let in_sprite_region = (257..=320).contains(&self.cycle);
+                    let phase = if in_sprite_region { SPRITE_A12_PHASE } else { BG_A12_PHASE };
+
+                    if self.cycle % 8 == phase {
+                        let a12_addr = if in_sprite_region {
+                            let slot = ((self.cycle - SPRITE_A12_PHASE) / 8) as usize;  // 260 -> slot 0
+                            if self.sprite_size == 16 {
+                                match self.scanline_sprites.get(slot) {
+                                    Some(s) if (s.0 & 0x01) != 0 => 0x1000,
+                                    Some(_) => 0x0000,
+                                    None => 0x1000,
+                                }
+                            } else {
+                                self.sprite_pattern_table
+                            }
+                        } else {
                             self.background_pattern_table
-                        } else {
-                            0x2000 // Nametable/Attribute reads (A12 = 0)
                         };
-                        mapper.update_a12(bus_addr);
-                    } else if (257..=320).contains(&self.cycle) {
-                        // Sprite Fetches
-                        let bus_addr = if is_pattern_phase {
-                            // In 8x16 mode, sprite patterns can come from either page, but
-                            // standard MMC3 IRQ timing maps reliably using the sprite pattern base setup:
-                            self.sprite_pattern_table
-                        } else {
-                            0x2000
-                        };
-                        mapper.update_a12(bus_addr);
+                        mapper.update_a12(a12_addr, self.total_ppu_cycles);
                     }
                 }
             }
@@ -340,12 +361,7 @@ impl NesPPU {
                     }
                     self.vbl_suppressed = false;
                 }
-                if self.scanline == 260 && self.cycle == 340 {
-                    self.status &= 0x1F;
-                    self.nmi_suppressed = false;
-                }
             }
-
             _ => unreachable!(),
         }
 
@@ -562,9 +578,9 @@ impl NesPPU {
         if is_sprite_zero && bg_opaque && spr_opaque && bg_show && spr_show {
             // Sprite 0 cannot hit at x=255 or if either side is clipped in the left 8 pixels
             if x < 255 {
-                if self.status & 0x40 == 0 { 
+                if self.status & 0x40 == 0 {
 //                  godot_print!("[{}] Sprite 0 hit detected", self.total_ppu_cycles);
-//                  godot_print!("->Position: x={}. y={} Scanline={}, PPU cycle={}. V={}, T={}, Fine_X={}", x, y, self.scanline, self.cycle, self.v_addr, self.t_addr, self.fine_x);
+                    godot_print!("[{}] ->Position: x={}. y={} Scanline={}, PPU cycle={}. V={}, T={}, Fine_X={}", self.frame_number, x, y, self.scanline, self.cycle, self.v_addr, self.t_addr, self.fine_x);
                 }
                 self.status |= 0x40;
             }
@@ -818,21 +834,29 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
         }
     }
 
-    pub fn cpu_read_reg(&mut self, mapper: &dyn Mapper, reg: u16) -> u8 {
+    pub fn cpu_read_reg(&mut self, mapper: &mut dyn Mapper, reg: u16) -> u8 {
         match reg {
             2 => { // $2002 - PPUSTATUS
                 let _is_currently_vblank = self.scanline >= 241 && self.scanline <= 260;
                 let res = self.status | (self.ppu_open_bus & 0x1F);
-                if self.scanline == 241 && self.cycle == 0 {
-                    self.vbl_suppressed = true;
+                if self.scanline == 241 && self.cycle < 6 {
+                    godot_print!("status={}. cycle={}", self.status,self.cycle);
                 }
                 if self.scanline == 241 && self.cycle == 1 {
+                    self.vbl_suppressed = true;
+                }
+                if self.scanline == 241 && (self.cycle == 2 || self.cycle == 3) {
                     self.nmi_suppressed = true;
                 }
                 self.status &= 0x7F; // Reading status clears V-Blank bit
                 self.w_latch = false;    // And resets scroll/address double-write latch
                 self.ppu_open_bus = res;
                 self.decay_timer_upper = 89342;
+
+                if (res & 0x40 != 0) && self.frame_number != self.last_2002 {
+                    godot_print!("[{}]. PPUSTATUS read returned bit 6 set. scanline={}|cycle={}", self.frame_number, self.scanline, self.cycle);
+                    self.last_2002 = self.frame_number;
+                }
                 res
             }
             4 => {
@@ -859,6 +883,7 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
                 self.v_addr = self.v_addr.wrapping_add(self.vram_increment as u16) & 0x3FFF;
                 self.ppu_open_bus = data;
                 self.decay_timer_lower = 89342;
+                mapper.update_a12(self.v_addr, self.total_ppu_cycles);
                 data
             }
             _ => self.ppu_open_bus
@@ -908,14 +933,20 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
             }
             5 => { // $2005 - PPUSCROLL
                 if self.w_latch == false {
-//                    godot_print!("PPUSCROLL first write {value}. scanline={}, cycle={}", self.scanline, self.cycle);
+                    if self.frame_number != self.last_2005 {
+                        godot_print!("PPUSCROLL first write {value}. scanline={}, cycle={}", self.scanline, self.cycle);
+                        self.last_2005 = self.frame_number;
+                    }
                     // First write: Coarse X and Fine X scrolling values
                     self.t_addr = (self.t_addr & 0x7FE0) | ((value >> 3) as u16);
                     self.fine_x = value & 0x07;
                     self.w_latch = true;
 
                 } else {
-//                    godot_print!("PPUSCROLL second write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
+                    if self.frame_number != self.last_2005_2 {
+                        godot_print!("PPUSCROLL second write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
+                        self.last_2005_2 = self.frame_number;
+                    }
                     // Second write: Coarse Y and Fine Y scrolling values
                     self.t_addr = (self.t_addr & 0x0C1F) | (((value & 0x07) as u16) << 12) | (((value >> 3) as u16) << 5);
                     self.w_latch = false;
@@ -924,19 +955,25 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
             6 => { // $2006 - PPUADDR
             
                 if self.w_latch == false {
-//                    godot_print!("PPUADDR first write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
+                    if self.frame_number != self.last_2006 {
+                        godot_print!("PPUADDR first write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
+                        self.last_2006 = self.frame_number;
+                    }
                     // First write: High byte of the 14-bit destination target address
                     self.t_addr = (self.t_addr & 0x00FF) | (((value & 0x3F) as u16) << 8);
                     self.w_latch = true;
                 } else {
                     let old_v = self.v_addr;
-//                    godot_print!("PPUADDR second write {value}. scanline={}, cycle={}. Total Cycles={ }", self.scanline, self.cycle, self.total_ppu_cycles);
+                    if self.frame_number != self.last_2006_2 {
+                        godot_print!("PPUADDR second write {value}. scanline={}, cycle={}. Total Cycles={ }", self.scanline, self.cycle, self.total_ppu_cycles);
+                        self.last_2006_2 = self.frame_number;
+                    }
                     // Second write: Low byte of destination target address
                     self.t_addr = (self.t_addr & 0xFF00) | (value as u16);
                     self.v_addr = self.t_addr; // Latch copies address into current VRAM target
                     self.w_latch = false;
-
-                    mapper.update_a12(self.v_addr);
+//                    mapper.notify_vram_address(v & 0x3FFF, frame_cycle)
+                    mapper.update_a12(self.v_addr, self.total_ppu_cycles);
                 }
             }
             7 => { // $2007 - PPUDATA
@@ -945,7 +982,8 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
                 self.ppu_write(mapper, old_v, value);
                 // Automatically step forward the target address based on $2000 setup configurations
                 self.v_addr = self.v_addr.wrapping_add(self.vram_increment as u16) & 0x3FFF;
-                mapper.update_a12(self.v_addr);
+//                mapper.notify_vram_address(v & 0x3FFF, frame_cycle)
+                mapper.update_a12(self.v_addr, self.total_ppu_cycles);
             }
             _ => {}
         }

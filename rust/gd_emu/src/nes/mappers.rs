@@ -26,7 +26,7 @@ pub trait Mapper {
     fn load_sram(&mut self, _data: &[u8]) {}
     fn is_sram_dirty(&self) -> bool { false }
     fn clear_sram_dirty(&mut self) {}
-    fn update_a12(&mut self, _addr: u16) {}
+    fn update_a12(&mut self, _addr: u16, _ppu_cycle: u64) {}
     fn clock_scanline(&mut self) {}
     fn notify_scanline(&mut self) {}
     fn notify_frame_start(&mut self) {}
