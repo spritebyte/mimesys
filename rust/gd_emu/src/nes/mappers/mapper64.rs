@@ -13,10 +13,11 @@ pub enum Mmc3Revision {
 pub struct Mapper64 {
     prg_banks: usize, // Stored as count of 8KB banks
     chr_banks: usize,
-    bank_registers: [usize; 8],
+    bank_registers: [usize; 16],
     bank_select: u8,
     prg_mode: u8,
     chr_mode: u8,
+    chr_1k_mode: u8,
     prg_offsets: [usize; 4],
     chr_offsets: [usize; 8],
 
@@ -32,7 +33,6 @@ pub struct Mapper64 {
     irq_reload_flag: Cell<bool>,
     irq_enabled: Cell<bool>,
     irq_active: Cell<bool>,
-    irq_pending: bool,
     last_clock_cycle: Cell<i64>,
     irq_delay_cycles: i8,
 
@@ -48,10 +48,11 @@ pub struct Mapper64 {
 
 #[derive(Serialize, Deserialize)]
 struct Mapper64StateVariables {
-    bank_registers: [usize; 8],
+    bank_registers: [usize; 16],
     bank_select: u8,
     prg_mode: u8,
     chr_mode: u8,
+    chr_1k_mode: u8,
     last_a12: u8,
     last_a12_state: bool,
     ppu_a12_filter: u8,
@@ -61,7 +62,6 @@ struct Mapper64StateVariables {
     irq_latch: u8,
     irq_reload_flag: bool,
     irq_enabled: bool,
-    irq_pending: bool,
     irq_active: bool,
     irq_delay_cycles: i8,
     last_clock_cycle: i64,
@@ -81,10 +81,11 @@ impl Mapper64 {
         let mut mapper = Self {
             prg_banks: prg_banks_8kb,
             chr_banks,
-            bank_registers: [0; 8],
+            bank_registers: [0; 16],
             bank_select: 0,
             prg_mode: 0,
             chr_mode: 0,
+            chr_1k_mode: 0,
             prg_offsets: [0; 4],
             chr_offsets: [0; 8],
             irq_mode: 0,
@@ -96,7 +97,6 @@ impl Mapper64 {
             irq_reload_flag: Cell::new(false),
             irq_enabled: Cell::new(false),
             irq_active: Cell::new(false),
-            irq_pending: false,
             irq_delay_cycles: -1,
             last_a12: Cell::new(0),
             last_a12_state: false,
@@ -110,31 +110,11 @@ impl Mapper64 {
             current_cycle: 0,
             sram_dirty: false,
         };
-        
+        mapper.bank_registers[6] = 0;
+        mapper.bank_registers[7] = 1;
+        mapper.bank_registers[0xF] = prg_banks_8kb - 2;
         mapper.recalculate_banks();
         mapper
-    }
-
-   pub fn write_register(&mut self, address: u16, data: u8) {
-        match address {
-            0xC000..=0xDFFE if address % 2 == 0 => {
-                self.irq_latch.set(data);
-            }
-            0xC001..=0xDFFF if address % 2 != 0 => {
-                self.irq_mode = data & 0x01;
-                self.irq_reload_flag.set(true);
-                self.cpu_cycle_prescaler = 0; // Reset cycle mode prescaler
-            }
-            0xE000..=0xFFFE if address % 2 == 0 => {
-                self.irq_enabled.set(false);
-                self.irq_pending = false;
-                self.irq_delay_cycles = -1;
-            }
-            0xE001..=0xFFFF if address % 2 != 0 => {
-                self.irq_enabled.set(true);
-            }
-            _ => {}
-        }
     }
     
     fn recalculate_banks(&mut self) {
@@ -142,51 +122,90 @@ impl Mapper64 {
         let second_last = self.prg_banks - 2;
 
         if self.prg_mode == 0 {
-            self.prg_offsets[0] = self.bank_registers[6] * 0x2000;
-            self.prg_offsets[1] = self.bank_registers[7] * 0x2000;
-            self.prg_offsets[2] = second_last * 0x2000;
-            self.prg_offsets[3] = last * 0x2000;
+            self.prg_offsets[0] = self.bank_registers[6] * 0x2000;   // $8000
+            self.prg_offsets[1] = self.bank_registers[7] * 0x2000;   // $A000
+            self.prg_offsets[2] = self.bank_registers[0xF] * 0x2000; // $C000
         } else {
-            self.prg_offsets[0] = second_last * 0x2000;
-            self.prg_offsets[1] = self.bank_registers[7] * 0x2000;
-            self.prg_offsets[2] = self.bank_registers[6] * 0x2000;
-            self.prg_offsets[3] = last * 0x2000;
+            self.prg_offsets[0] = second_last * 0x2000; // $8000
+            self.prg_offsets[1] = self.bank_registers[7] * 0x2000;   // $A000
+            self.prg_offsets[2] = self.bank_registers[6] * 0x2000;   // $C000
         }
+        self.prg_offsets[3] = last * 0x2000;
 
-        if self.chr_mode == 0 {
-            self.chr_offsets[0] = (self.bank_registers[0] & 0xFE) * 0x0400;
-            self.chr_offsets[1] = self.chr_offsets[0] + 0x0400;
-            self.chr_offsets[2] = (self.bank_registers[1] & 0xFE) * 0x0400;
-            self.chr_offsets[3] = self.chr_offsets[2] + 0x0400;
-            self.chr_offsets[4] = self.bank_registers[2] * 0x0400;
-            self.chr_offsets[5] = self.bank_registers[3] * 0x0400;
-            self.chr_offsets[6] = self.bank_registers[4] * 0x0400;
-            self.chr_offsets[7] = self.bank_registers[5] * 0x0400;          
+        let (r0, r1, r2, r3, r4, r5, r8, r9) = (
+            self.bank_registers[0],
+            self.bank_registers[1],
+            self.bank_registers[2],
+            self.bank_registers[3],
+            self.bank_registers[4],
+            self.bank_registers[5],
+            self.bank_registers[8],
+            self.bank_registers[9],
+        );
+
+        if self.chr_1k_mode == 0 {
+            // Standard MMC3-like 2K/1K Mode
+            let c0 = (r0 & 0xFE) * 0x0400;
+            let c1 = (r1 & 0xFE) * 0x0400;
+            if self.chr_mode == 0 {
+                self.chr_offsets[0] = c0;
+                self.chr_offsets[1] = c0 + 0x0400;
+                self.chr_offsets[2] = c1;
+                self.chr_offsets[3] = c1 + 0x0400;
+                self.chr_offsets[4] = r2 * 0x0400;
+                self.chr_offsets[5] = r3 * 0x0400;
+                self.chr_offsets[6] = r4 * 0x0400;
+                self.chr_offsets[7] = r5 * 0x0400;          
+            } else {
+                self.chr_offsets[4] = c0;
+                self.chr_offsets[5] = c0 + 0x0400;
+                self.chr_offsets[6] = c1;
+                self.chr_offsets[7] = c1 + 0x0400;
+                self.chr_offsets[0] = r2 * 0x0400;
+                self.chr_offsets[1] = r3 * 0x0400;
+                self.chr_offsets[2] = r4 * 0x0400;
+                self.chr_offsets[3] = r5 * 0x0400;
+            }
         } else {
-            self.chr_offsets[4] = (self.bank_registers[0] & 0xFE) * 0x0400;
-            self.chr_offsets[5] = self.chr_offsets[4] + 0x0400;
-            self.chr_offsets[6] = (self.bank_registers[1] & 0xFE) * 0x0400;
-            self.chr_offsets[7] = self.chr_offsets[6] + 0x0400;
-            self.chr_offsets[0] = self.bank_registers[2] * 0x0400;
-            self.chr_offsets[1] = self.bank_registers[3] * 0x0400;
-            self.chr_offsets[2] = self.bank_registers[4] * 0x0400;
-            self.chr_offsets[3] = self.bank_registers[5] * 0x0400;  
+            // 1K CHR Mode for R0/R1 (Using R8/R9 for second halves)
+            let b0 = r0 * 0x0400;
+            let b1 = r8 * 0x0400;
+            let b2 = r1 * 0x0400;
+            let b3 = r9 * 0x0400;
+
+            if self.chr_mode == 0 {
+                self.chr_offsets[0] = b0;
+                self.chr_offsets[1] = b1;
+                self.chr_offsets[2] = b2;
+                self.chr_offsets[3] = b3;
+                self.chr_offsets[4] = r2 * 0x0400;
+                self.chr_offsets[5] = r3 * 0x0400;
+                self.chr_offsets[6] = r4 * 0x0400;
+                self.chr_offsets[7] = r5 * 0x0400;
+            } else {
+                self.chr_offsets[4] = b0;
+                self.chr_offsets[5] = b1;
+                self.chr_offsets[6] = b2;
+                self.chr_offsets[7] = b3;
+                self.chr_offsets[0] = r2 * 0x0400;
+                self.chr_offsets[1] = r3 * 0x0400;
+                self.chr_offsets[2] = r4 * 0x0400;
+                self.chr_offsets[3] = r5 * 0x0400;
+            }
         }
     }
     
     fn clock_irq_counter(&mut self) {
         if self.irq_reload_flag.get() {
-            self.irq_counter.set(self.irq_latch.get());
-            if self.irq_latch.get() != 0 {
-                let counter = self.irq_counter.get();
-                self.irq_counter.set(counter | 1); // Rambo-1 odd quirk
-            }
+            let mut latch = self.irq_latch.get();
+            self.irq_counter.set(if latch != 0 { latch | 1 } else { 0 });
             self.irq_reload_flag.set(false);
         } else if self.irq_counter.get() == 0 {
-            self.irq_counter.set(self.irq_latch.get());
+            let latch = self.irq_latch.get();
+            self.irq_counter.set(if latch != 0 { latch | 1 } else { 0 });
         } else {
-            let counter = self.irq_counter.get();
-            self.irq_counter.set(counter.wrapping_sub(1));
+//            let counter = self.irq_counter.get();
+            self.irq_counter.set(self.irq_counter.get().wrapping_sub(1));
         }
 
         if self.irq_counter.get() == 0 && self.irq_enabled.get() {
@@ -199,16 +218,16 @@ impl Mapper for Mapper64 {
     fn step_cycles(&mut self, cycles: u64) {
         self.current_cycle += cycles as i64;
         if self.irq_delay_cycles > 0 {
-            self.irq_delay_cycles -= 1;
-            if self.irq_delay_cycles == 0 {
-                self.irq_pending = true;
+            self.irq_delay_cycles -= cycles as i8;
+            if self.irq_delay_cycles <= 0 {
+                self.irq_active.set(true);
                 self.irq_delay_cycles = -1;
             }
         }
         if self.irq_mode == 1 {
-            self.cpu_cycle_prescaler += 1;
-            if self.cpu_cycle_prescaler >= 4 {
-                self.cpu_cycle_prescaler = 0;
+            self.cpu_cycle_prescaler += cycles as u32;
+            while self.cpu_cycle_prescaler >= 4 {
+                self.cpu_cycle_prescaler -= 4;
                 self.clock_irq_counter();
             }
         }
@@ -241,9 +260,10 @@ impl Mapper for Mapper64 {
         else if addr >= 0x8000 && addr <= 0x9FFF {
             if (addr & 1) == 0 {
                 // $8000: Bank Select configuration
-                self.bank_select = value & 0x07;
-                self.prg_mode = (value >> 6) & 1;
-                self.chr_mode = (value >> 7) & 1;
+                self.bank_select = value & 0x0F;
+                self.chr_1k_mode = (value >> 5) & 1;  // K
+                self.prg_mode = (value >> 6) & 1;     // P
+                self.chr_mode = (value >> 7) & 1;     // C (A12 inversion)
                 self.recalculate_banks();
             } else {
                 // $8001: Bank Register Data write
@@ -265,11 +285,16 @@ impl Mapper for Mapper64 {
         }
         else if addr >= 0xC000 && addr <= 0xDFFF {
             if (addr & 1) == 0 {
-                // $C000: IRQ Latch
+                // $C000: IRQ Latch Register
                 self.irq_latch.set(value);
-            } else {
-                // $C001: IRQ Reload Flag
                 self.irq_reload_flag.set(true);
+            } else {
+                // $C001: IRQ Mode and Reload
+                self.irq_mode = value & 0x01; // 0 = Scanline (A12), 1 = CPU Cycle
+                let latch = self.irq_latch.get();
+                self.irq_counter.set(if latch != 0 { latch | 1 } else { 0 });
+                self.irq_reload_flag.set(false);
+                self.cpu_cycle_prescaler = 0;
             }
         }
         else if addr >= 0xE000 && addr <= 0xFFFF {
@@ -328,6 +353,7 @@ impl Mapper for Mapper64 {
             bank_select: self.bank_select,
             prg_mode: self.prg_mode,
             chr_mode: self.chr_mode,
+            chr_1k_mode: self.chr_1k_mode,
             irq_mode: self.irq_mode,
             irq_delay_cycles: self.irq_delay_cycles,
             last_a12: self.last_a12.get(),
@@ -339,7 +365,6 @@ impl Mapper for Mapper64 {
             irq_reload_flag: self.irq_reload_flag.get(),
             irq_enabled: self.irq_enabled.get(),
             irq_active: self.irq_active.get(),
-            irq_pending: self.irq_pending,
             last_clock_cycle: self.last_clock_cycle.get(),
             mirroring_mode: self.mirroring_mode,
             current_cycle: self.current_cycle,
@@ -357,6 +382,7 @@ impl Mapper for Mapper64 {
             self.bank_select = state.bank_select;
             self.prg_mode = state.prg_mode;
             self.chr_mode = state.chr_mode;
+            self.chr_1k_mode = state.chr_1k_mode;
             self.last_a12.set(state.last_a12);
             self.last_a12_state = state.last_a12_state;
             self.irq_enabled.set(state.irq_enabled);

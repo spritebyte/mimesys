@@ -100,6 +100,10 @@ pub fn make_mapper(
             godot_print!("Mapper69 (Sunsoft FME-7/5A/5B) created");
             Ok(Box::new(super::mapper69::Mapper69::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
         }
+        71 => {
+            godot_print!("Mapper71 (Camerica) created");
+            Ok(Box::new(super::mapper71::Mapper71::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
+        }
         118 => {
             // TODO: using same mapper code as MMC3, will need to detect variant and handle differences accordingly
             godot_print!("Mapper118 (TLSROM/TKSROM) created");

@@ -18,7 +18,7 @@ const NES_PALETTE: [(u8, u8, u8); 64] = [
     (204, 210, 120), (180, 222, 120), (168, 226, 144), (152, 226, 180), (160, 214, 228), (160, 162, 160), (0, 0, 0),       (0, 0, 0),
 ];
 
-const SPRITE_A12_PHASE: u32 = 4;   // cycles 260, 268, 276, ...
+const SPRITE_A12_PHASE: u32 = 5;   // cycles 260, 268, 276, ...
 const BG_A12_PHASE: u32     = 5;   // cycles 5, 13, 21, ... (BG pattern fetch)
 
 struct SpritePixelInfo {
@@ -46,6 +46,7 @@ pub struct NesPPU {
     pub addr: u16,      // $2006 internal latches
     scanline_bg: [(u8, u8, u8); 33],   // (low_byte, high_byte, palette_idx) per tile, this scanline
     scanline_sprites: Vec<(usize, u8, u8, u8, u8, bool)>, // (oam_index, sprite_x, low_byte, high_byte, attr, is_sprite_zero)
+    a12_sprite_tiles: [Option<u8>; 8],
     mid_scanline_write: bool,
     // Addresses and internal latches
     pub base_nametable_address: u16,
@@ -71,6 +72,7 @@ pub struct NesPPU {
     pub frame_ready: bool,
     vbl_suppressed: bool,
     nmi_suppressed: bool,
+
     pub scanline: u16,   // 0 to 262
     pub cycle: u32,      // 0 to 340
     // --- Video Buffers ---
@@ -135,6 +137,7 @@ pub struct PpuState {
     #[serde(with = "serde_bytes")]
     pub palette_ram: Vec<u8>,   // 32 bytes
 
+    pub a12_sprite_tiles: [Option<u8>; 8],
     pub scanline_sprites: Vec<(usize, u8, u8, u8, u8, bool)>,
     // Deliberately NOT saved:
     // - front_buffer/back_buffer: the framebuffer will simply repopulate
@@ -164,6 +167,7 @@ impl NesPPU {
             total_ppu_cycles:0, frame_number: 0, last_2002: 0, last_2005: 0, last_2006: 0,
             last_2005_2: 0, last_2006_2: 0,
             sprite_0_hit: false, debug_trace_bg: false,
+            a12_sprite_tiles: [None; 8],
         }
     }
 
@@ -185,13 +189,13 @@ impl NesPPU {
             cycle: self.cycle,
             total_ppu_cycles: self.total_ppu_cycles,
             is_odd_frame: self.is_odd_frame,
-
             vbl_suppressed: self.vbl_suppressed,
             nmi_suppressed: self.nmi_suppressed,
             data_buffer: self.data_buffer,
             background_pattern_table: self.background_pattern_table,
             oam: self.oam.to_vec(),
             vram: self.vram.to_vec(),
+            a12_sprite_tiles: self.a12_sprite_tiles.clone(),
             palette_ram: self.palette_ram.to_vec(),
             scanline_sprites: self.scanline_sprites.clone(),
         }
@@ -219,6 +223,7 @@ impl NesPPU {
         self.nmi_suppressed = state.nmi_suppressed;
         self.data_buffer = state.data_buffer;
         self.scanline_sprites = state.scanline_sprites.clone();
+        self.a12_sprite_tiles = state.a12_sprite_tiles.clone();
         self.background_pattern_table = state.background_pattern_table;
         self.oam.copy_from_slice(&state.oam);
         self.vram.copy_from_slice(&state.vram);
@@ -295,9 +300,13 @@ impl NesPPU {
                         }
                         256 => {
                             self.increment_coarse_x();
-                            self.increment_fine_y();
+                            self.increment_vertical_scroll();
+                            if self.scanline == 175 {
+                                godot_print!("[{}] PPU dot 256 incremented coarse x and y. scanline={}, cycle={}. Total Cycles={ }. V={} T={}. frame parity={}", self.frame_number, self.scanline, self.cycle, self.total_ppu_cycles, self.v_addr, self.t_addr, self.frame_number % 2);
+                            }
                         }
                         257 => {
+                            self.collect_next_line_sprite_tiles();
                             self.copy_horizontal(); // Update active X from temporary X
                         }
                         260 => {
@@ -319,16 +328,20 @@ impl NesPPU {
                         _ => {}
                     }
 
-
+                    if (257..=320).contains(&self.cycle) {
+                       self.oam_addr = 0;
+                    }
+                    let first_sprite_dot = 256 + SPRITE_A12_PHASE;
+//                    godot_print!("First sprite dot={}",first_sprite_dot);
                     let in_sprite_region = (257..=320).contains(&self.cycle);
                     let phase = if in_sprite_region { SPRITE_A12_PHASE } else { BG_A12_PHASE };
 
                     if self.cycle % 8 == phase {
                         let a12_addr = if in_sprite_region {
-                            let slot = ((self.cycle - SPRITE_A12_PHASE) / 8) as usize;  // 260 -> slot 0
+                            let slot = ((self.cycle - first_sprite_dot) / 8) as usize;  // 260 -> slot 0
                             if self.sprite_size == 16 {
-                                match self.scanline_sprites.get(slot) {
-                                    Some(s) if (s.0 & 0x01) != 0 => 0x1000,
+                                match self.a12_sprite_tiles[slot] {
+                                    Some(tile) if (tile & 0x01) != 0 => 0x1000,
                                     Some(_) => 0x0000,
                                     None => 0x1000,
                                 }
@@ -347,6 +360,9 @@ impl NesPPU {
             240 => {
                 if self.cycle == 0 {
                     // End of frame: swap buffers safely
+                    if rendering_enabled {
+                        self.evaluate_sprite_overflow(240);
+                    }
                     let completed_buffer = std::mem::replace(&mut self.back_buffer, vec![0; 256 * 240 * 4]);
                     self.front_buffer = Arc::new(completed_buffer);
                     self.system_frame_ready.store(true, Ordering::Release);
@@ -404,6 +420,23 @@ impl NesPPU {
         }
     }
 
+    fn collect_next_line_sprite_tiles(&mut self) {
+        self.a12_sprite_tiles = [None; 8];
+        let target = if self.scanline == 261 { 0 } else { self.scanline as i32 + 1 };
+        let h = if (self.ctrl & 0x20) != 0 { 16 } else { 8 };
+        let mut n = 0;
+        for i in 0..64 {
+            let y = self.oam[i * 4] as i32;
+            if y >= 240 { continue; }
+            let row = target - (y + 1);
+            if row >= 0 && row < h {
+                self.a12_sprite_tiles[n] = Some(self.oam[i * 4 + 1]);
+                n += 1;
+                if n == 8 { break; }
+            }
+        }
+    }
+
     fn increment_vertical_scroll(&mut self) {
         if self.v_addr & 0x7000 != 0x7000 {  // if fine Y < 7
             self.v_addr += 0x1000;            // increment fine Y
@@ -425,6 +458,7 @@ impl NesPPU {
         }
     }
 
+    // dead code
     pub fn increment_horizontal_scroll(&mut self) {
         // 1. Check if Coarse X has reached the end of the nametable row (Column 31)
         // 0x001F masks out bits 0-4
@@ -463,6 +497,7 @@ impl NesPPU {
         } */
     }
 
+    // deprecated
     fn increment_fine_y(&mut self) {
         let before_nt_y = (self.v_addr >> 11) & 1;
         if (self.v_addr & 0x7000) != 0x7000 {
@@ -580,7 +615,7 @@ impl NesPPU {
             if x < 255 {
                 if self.status & 0x40 == 0 {
 //                  godot_print!("[{}] Sprite 0 hit detected", self.total_ppu_cycles);
-                    godot_print!("[{}] ->Position: x={}. y={} Scanline={}, PPU cycle={}. V={}, T={}, Fine_X={}", self.frame_number, x, y, self.scanline, self.cycle, self.v_addr, self.t_addr, self.fine_x);
+//                    godot_print!("[{}] ->Position: x={}. y={} Scanline={}, PPU cycle={}. V={}, T={}, Fine_X={}", self.frame_number, x, y, self.scanline, self.cycle, self.v_addr, self.t_addr, self.fine_x);
                 }
                 self.status |= 0x40;
             }
@@ -638,10 +673,10 @@ impl NesPPU {
         is_visible_line && is_bg_cycle
     }
 
-fn load_background_shifters(&mut self, mapper: &dyn Mapper) {
-    // 1. Fetch Tile ID from the PPU's internal VRAM (Not the mapper!)
-    let nt_addr = 0x2000 | (self.v_addr & 0x0FFF);
-    let tile_id = mapper.read_nametable_byte(nt_addr, &self.vram, false);
+    fn load_background_shifters(&mut self, mapper: &dyn Mapper) {
+        // 1. Fetch Tile ID from the PPU's internal VRAM (Not the mapper!)
+        let nt_addr = 0x2000 | (self.v_addr & 0x0FFF);
+        let tile_id = mapper.read_nametable_byte(nt_addr, &self.vram, false);
 /*
     if self.debug_trace_bg && self.scanline == TARGET_SCANLINE && self.cycle == 240 {
         godot_print!(
@@ -650,133 +685,150 @@ fn load_background_shifters(&mut self, mapper: &dyn Mapper) {
         );
     }
 */
-    // 2. Fetch Attribute Byte from the PPU's internal VRAM
-    let attr_addr = 0x23C0 | (self.v_addr & 0x0C00) | ((self.v_addr >> 4) & 0x38) | ((self.v_addr >> 2) & 0x07);
+        // 2. Fetch Attribute Byte from the PPU's internal VRAM
+        let attr_addr = 0x23C0 | (self.v_addr & 0x0C00) | ((self.v_addr >> 4) & 0x38) | ((self.v_addr >> 2) & 0x07);
 //    let attr_vram_index = mapper.mirror_vram_address(attr_addr) as u16;
-    let attr_byte = mapper.read_nametable_byte(attr_addr, &self.vram, true); 
+        let attr_byte = mapper.read_nametable_byte(attr_addr, &self.vram, true); 
 
-    // Parse attribute byte to find the 2-bit palette index
-    let coarse_x = self.v_addr & 0x001F;
-    let coarse_y = (self.v_addr >> 5) & 0x001F;
-    let top_bottom = (coarse_y >> 1) & 1; 
-    let left_right = (coarse_x >> 1) & 1; 
-    let shift = (top_bottom << 2) | (left_right << 1);
-    let palette_idx = (attr_byte >> shift) & 0x03;
+        // Parse attribute byte to find the 2-bit palette index
+        let coarse_x = self.v_addr & 0x001F;
+        let coarse_y = (self.v_addr >> 5) & 0x001F;
+        let top_bottom = (coarse_y >> 1) & 1; 
+        let left_right = (coarse_x >> 1) & 1; 
+        let shift = (top_bottom << 2) | (left_right << 1);
+        let palette_idx = (attr_byte >> shift) & 0x03;
 
-    // 3. Fetch Pattern Table Low and High bytes (THIS goes to the mapper!)
-    let fine_y = (self.v_addr >> 12) & 0x07;
-    let bg_table_base = self.background_pattern_table; 
-    let pattern_addr_low = bg_table_base + ((tile_id as u16) << 4) + fine_y;
+        // 3. Fetch Pattern Table Low and High bytes (THIS goes to the mapper!)
+        let fine_y = (self.v_addr >> 12) & 0x07;
+        let bg_table_base = self.background_pattern_table; 
+        let pattern_addr_low = bg_table_base + ((tile_id as u16) << 4) + fine_y;
 
-    // Pattern table addresses are < 0x2000, so the mapper safely processes them
-    let bg_low = mapper.ppu_read_ctx(pattern_addr_low, self.is_bg_fetch());
-    let bg_high = mapper.ppu_read_ctx(pattern_addr_low + 8, self.is_bg_fetch());
+        // Pattern table addresses are < 0x2000, so the mapper safely processes them
+        let bg_low = mapper.ppu_read_ctx(pattern_addr_low, self.is_bg_fetch());
+        let bg_high = mapper.ppu_read_ctx(pattern_addr_low + 8, self.is_bg_fetch());
 
-    // Load the lower 8 bits of our 16-bit shifters with the fresh data
-    self.bg_shift_low = (self.bg_shift_low & 0xFF00) | (bg_low as u16);
-    self.bg_shift_high = (self.bg_shift_high & 0xFF00) | (bg_high as u16);
+        // Load the lower 8 bits of our 16-bit shifters with the fresh data
+        self.bg_shift_low = (self.bg_shift_low & 0xFF00) | (bg_low as u16);
+        self.bg_shift_high = (self.bg_shift_high & 0xFF00) | (bg_high as u16);
 
-    // Explode the 2-bit palette attributes into individual bitplanes for the 8 pixels
-    let attr_bit0 = if (palette_idx & 0x01) != 0 { 0xFF } else { 0x00 };
-    let attr_bit1 = if (palette_idx & 0x02) != 0 { 0xFF } else { 0x00 };
+        // Explode the 2-bit palette attributes into individual bitplanes for the 8 pixels
+        let attr_bit0 = if (palette_idx & 0x01) != 0 { 0xFF } else { 0x00 };
+        let attr_bit1 = if (palette_idx & 0x02) != 0 { 0xFF } else { 0x00 };
     
-    self.attr_shift_low = (self.attr_shift_low & 0xFF00) | attr_bit0;
-    self.attr_shift_high = (self.attr_shift_high & 0xFF00) | attr_bit1;
-}
+        self.attr_shift_low = (self.attr_shift_low & 0xFF00) | attr_bit0;
+        self.attr_shift_high = (self.attr_shift_high & 0xFF00) | attr_bit1;
+    }
 
-fn load_background_shifters_high(&mut self, mapper: &dyn Mapper) {
-    // Same fetch as load_background_shifters, but seeds the HIGH byte directly —
-    // this tile has no more per-dot shifts left before it's displayed at the
-    // start of the next scanline (mirrors real hardware's dot ~321-328 fetch).
-    let nt_addr = 0x2000 | (self.v_addr & 0x0FFF);
-    let tile_id = mapper.read_nametable_byte(nt_addr, &self.vram, false);
+    fn load_background_shifters_high(&mut self, mapper: &dyn Mapper) {
+        // Same fetch as load_background_shifters, but seeds the HIGH byte directly —
+        // this tile has no more per-dot shifts left before it's displayed at the
+        // start of the next scanline (mirrors real hardware's dot ~321-328 fetch).
+        let nt_addr = 0x2000 | (self.v_addr & 0x0FFF);
+        let tile_id = mapper.read_nametable_byte(nt_addr, &self.vram, false);
 
-    // 2. Fetch Attribute Byte from the PPU's internal VRAM
-    let attr_addr = 0x23C0 | (self.v_addr & 0x0C00) | ((self.v_addr >> 4) & 0x38) | ((self.v_addr >> 2) & 0x07);
-    let attr_byte = mapper.read_nametable_byte(attr_addr, &self.vram, true); 
+        // 2. Fetch Attribute Byte from the PPU's internal VRAM
+        let attr_addr = 0x23C0 | (self.v_addr & 0x0C00) | ((self.v_addr >> 4) & 0x38) | ((self.v_addr >> 2) & 0x07);
+        let attr_byte = mapper.read_nametable_byte(attr_addr, &self.vram, true); 
 
-    let coarse_x = self.v_addr & 0x001F;
-    let coarse_y = (self.v_addr >> 5) & 0x001F;
-    let shift = (((coarse_y >> 1) & 1) << 2) | (((coarse_x >> 1) & 1) << 1);
-    let palette_idx = (attr_byte >> shift) & 0x03;
+        let coarse_x = self.v_addr & 0x001F;
+        let coarse_y = (self.v_addr >> 5) & 0x001F;
+        let shift = (((coarse_y >> 1) & 1) << 2) | (((coarse_x >> 1) & 1) << 1);
+        let palette_idx = (attr_byte >> shift) & 0x03;
 
-    let fine_y = (self.v_addr >> 12) & 0x07;
-    let pattern_addr_low = self.background_pattern_table + ((tile_id as u16) << 4) + fine_y;
-    let bg_low = mapper.ppu_read_ctx(pattern_addr_low, self.is_bg_fetch());
-    let bg_high = mapper.ppu_read_ctx(pattern_addr_low + 8, self.is_bg_fetch());
+        let fine_y = (self.v_addr >> 12) & 0x07;
+        let pattern_addr_low = self.background_pattern_table + ((tile_id as u16) << 4) + fine_y;
+        let bg_low = mapper.ppu_read_ctx(pattern_addr_low, self.is_bg_fetch());
+        let bg_high = mapper.ppu_read_ctx(pattern_addr_low + 8, self.is_bg_fetch());
 
-    self.bg_shift_low  = (self.bg_shift_low  & 0x00FF) | ((bg_low  as u16) << 8);
-    self.bg_shift_high = (self.bg_shift_high & 0x00FF) | ((bg_high as u16) << 8);
+        self.bg_shift_low  = (self.bg_shift_low  & 0x00FF) | ((bg_low  as u16) << 8);
+        self.bg_shift_high = (self.bg_shift_high & 0x00FF) | ((bg_high as u16) << 8);
 
-    let attr_bit0 = if (palette_idx & 0x01) != 0 { 0xFF00 } else { 0x0000 };
-    let attr_bit1 = if (palette_idx & 0x02) != 0 { 0xFF00 } else { 0x0000 };
-    self.attr_shift_low  = (self.attr_shift_low  & 0x00FF) | attr_bit0;
-    self.attr_shift_high = (self.attr_shift_high & 0x00FF) | attr_bit1;
-}
+        let attr_bit0 = if (palette_idx & 0x01) != 0 { 0xFF00 } else { 0x0000 };
+        let attr_bit1 = if (palette_idx & 0x02) != 0 { 0xFF00 } else { 0x0000 };
+        self.attr_shift_low  = (self.attr_shift_low  & 0x00FF) | attr_bit0;
+        self.attr_shift_high = (self.attr_shift_high & 0x00FF) | attr_bit1;
+    }
 
-fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
-    self.scanline_sprites.clear();
+    fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
+        self.scanline_sprites.clear();
 
-    let sprite_height = if (self.ctrl & 0x20) != 0 { 16 } else { 8 };
-    let sprite_table_base = if (self.ctrl & 0x08) != 0 { 0x1000 } else { 0x0000 };
+        let sprite_height = if (self.ctrl & 0x20) != 0 { 16 } else { 8 };
+        let sprite_table_base = if (self.ctrl & 0x08) != 0 { 0x1000 } else { 0x0000 };
 
-    let current_y = self.scanline as i32;
+        let current_y = self.scanline as i32;
 
-    // Scan through all 64 available sprites in OAM
-    for i in 0..64 {
-        let oam_idx = i * 4;
-        let sprite_y = self.oam[oam_idx] as i32;
+        // Scan through all 64 available sprites in OAM
+        for i in 0..64 {
+            let oam_idx = i * 4;
+            let sprite_y = self.oam[oam_idx] as i32;
         
-        // A sprite Y coordinate of 239+ means it's hidden or off-screen
-        if sprite_y >= 240 { continue; }
+            // A sprite Y coordinate of 239+ means it's hidden or off-screen
+            if sprite_y >= 240 { continue; }
 
-        // Check if the sprite vertically intersects the current scanline
-        // Note: Sprites are delayed by 1 scanline in hardware rendering
-        let row = current_y - (sprite_y + 1);
-        if row >= 0 && row < sprite_height {
-            // Keep a hardware limit of 8 sprites per scanline
-            if self.scanline_sprites.len() >= 8 {
-                // Optionally set the sprite overflow flag in self.status here if desired
-                break;
-            }
-
-            let tile_id = self.oam[oam_idx + 1];
-            let attr = self.oam[oam_idx + 2];
-            let x = self.oam[oam_idx + 3];
-
-            // Determine if this is Sprite 0 for hit detection
-            let is_sprite_zero = i == 0;
-
-            // Handle vertical flipping
-            let flip_y = (attr & 0x80) != 0;
-            let mut sprite_row = row;
-            if flip_y {
-                sprite_row = (sprite_height - 1) - row;
-            }
-
-            // Calculate the pattern table address for this sprite tile row
-            let pattern_addr_low = if sprite_height == 16 {
-                // 8x16 Sprite Mode: Bit 0 of tile_id selects the pattern table bank
-                let base_bank = if (tile_id & 1) != 0 { 0x1000 } else { 0x0000 };
-                let mut actual_tile = tile_id & 0xFE;
-                if sprite_row >= 8 {
-                    actual_tile += 1;
+            // Check if the sprite vertically intersects the current scanline
+            // Note: Sprites are delayed by 1 scanline in hardware rendering
+            let row = current_y - (sprite_y + 1);
+            if row >= 0 && row < sprite_height {
+                // Keep a hardware limit of 8 sprites per scanline
+                if self.scanline_sprites.len() >= 8 {
+                    self.status |= 0x20;
+                    break;
                 }
-                base_bank + (actual_tile as u16 * 16) + (sprite_row % 8) as u16
-            } else {
-                // 8x8 Sprite Mode: Uses the global sprite pattern table base selection
-                sprite_table_base + (tile_id as u16 * 16) + sprite_row as u16
-            };
 
-            // Fetch the 2 bitplanes for this sprite row using the mapper
-            let s_low = mapper.ppu_read_ctx(pattern_addr_low, self.is_bg_fetch());
-            let s_high = mapper.ppu_read_ctx(pattern_addr_low + 8, self.is_bg_fetch());
+                let tile_id = self.oam[oam_idx + 1];
+                let attr = self.oam[oam_idx + 2];
+                let x = self.oam[oam_idx + 3];
 
-            // (index, x_coord, low_byte, high_byte, attributes, is_sprite_zero)
-            self.scanline_sprites.push((i, x, s_low, s_high, attr, is_sprite_zero));
+                // Determine if this is Sprite 0 for hit detection
+                let is_sprite_zero = i == 0;
+
+                // Handle vertical flipping
+                let flip_y = (attr & 0x80) != 0;
+                let mut sprite_row = row;
+                if flip_y {
+                    sprite_row = (sprite_height - 1) - row;
+                }
+
+                // Calculate the pattern table address for this sprite tile row
+                let pattern_addr_low = if sprite_height == 16 {
+                    // 8x16 Sprite Mode: Bit 0 of tile_id selects the pattern table bank
+                    let base_bank = if (tile_id & 1) != 0 { 0x1000 } else { 0x0000 };
+                    let mut actual_tile = tile_id & 0xFE;
+                    if sprite_row >= 8 {
+                        actual_tile += 1;
+                    }
+                    base_bank + (actual_tile as u16 * 16) + (sprite_row % 8) as u16
+                } else {
+                    // 8x8 Sprite Mode: Uses the global sprite pattern table base selection
+                    sprite_table_base + (tile_id as u16 * 16) + sprite_row as u16
+                };
+
+                // Fetch the 2 bitplanes for this sprite row using the mapper
+                let s_low = mapper.ppu_read_ctx(pattern_addr_low, self.is_bg_fetch());
+                let s_high = mapper.ppu_read_ctx(pattern_addr_low + 8, self.is_bg_fetch());
+
+                // (index, x_coord, low_byte, high_byte, attributes, is_sprite_zero)
+                self.scanline_sprites.push((i, x, s_low, s_high, attr, is_sprite_zero));
+            }
         }
     }
-}
+
+    fn evaluate_sprite_overflow(&mut self, target_scanline: i32) {
+        let sprite_height = if (self.ctrl & 0x20) != 0 { 16 } else { 8 };
+        let mut count = 0;
+        for i in 0..64 {
+            let sprite_y = self.oam[i * 4] as i32;
+            if sprite_y >= 240 { continue; }
+            let row = target_scanline - (sprite_y + 1);
+            if row >= 0 && row < sprite_height {
+                count += 1;
+                if count > 8 {
+                    self.status |= 0x20;
+                    return;
+                }
+            }
+        }
+    }
 
     /// Exposes a thread-safe read clone of the completed pixel array
     pub fn get_front_buffer(&self) -> Arc<Vec<u8>> {
@@ -839,9 +891,9 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
             2 => { // $2002 - PPUSTATUS
                 let _is_currently_vblank = self.scanline >= 241 && self.scanline <= 260;
                 let res = self.status | (self.ppu_open_bus & 0x1F);
-                if self.scanline == 241 && self.cycle < 6 {
-                    godot_print!("status={}. cycle={}", self.status,self.cycle);
-                }
+//                if self.scanline == 241 && self.cycle < 6 {
+//                    godot_print!("status={}. cycle={}", self.status,self.cycle);
+//                }
                 if self.scanline == 241 && self.cycle == 1 {
                     self.vbl_suppressed = true;
                 }
@@ -880,7 +932,8 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
                     self.data_buffer = self.ppu_read(mapper, current_vram_addr - 0x1000, self.is_bg_fetch());
                     data = (data & 0x3F) | (self.ppu_open_bus & 0xC0);
                 }
-                self.v_addr = self.v_addr.wrapping_add(self.vram_increment as u16) & 0x3FFF;
+                self.increment_vram_address();
+//                self.v_addr = self.v_addr.wrapping_add(self.vram_increment as u16) & 0x3FFF;
                 self.ppu_open_bus = data;
                 self.decay_timer_lower = 89342;
                 mapper.update_a12(self.v_addr, self.total_ppu_cycles);
@@ -890,6 +943,15 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
         }
     }
 
+    fn increment_vram_address(&mut self) {
+        if self.rendering_enabled() && (self.scanline < 240 || self.scanline == 261) {
+            self.increment_coarse_x();
+            self.increment_vertical_scroll();
+        } else {
+            // Normal behavior outside rendering
+            self.v_addr = self.v_addr.wrapping_add(self.vram_increment as u16) & 0x3FFF;
+        }
+    }
     pub fn cpu_write_reg(&mut self, mapper: &mut dyn crate::nes::mappers::Mapper, reg: u16, value: u8) {
         self.ppu_open_bus = value;
         self.decay_timer_upper = 89342;
@@ -934,7 +996,7 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
             5 => { // $2005 - PPUSCROLL
                 if self.w_latch == false {
                     if self.frame_number != self.last_2005 {
-                        godot_print!("PPUSCROLL first write {value}. scanline={}, cycle={}", self.scanline, self.cycle);
+  //                      godot_print!("PPUSCROLL first write {value}. scanline={}, cycle={}", self.scanline, self.cycle);
                         self.last_2005 = self.frame_number;
                     }
                     // First write: Coarse X and Fine X scrolling values
@@ -944,7 +1006,7 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
 
                 } else {
                     if self.frame_number != self.last_2005_2 {
-                        godot_print!("PPUSCROLL second write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
+//                        godot_print!("PPUSCROLL second write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
                         self.last_2005_2 = self.frame_number;
                     }
                     // Second write: Coarse Y and Fine Y scrolling values
@@ -956,7 +1018,7 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
             
                 if self.w_latch == false {
                     if self.frame_number != self.last_2006 {
-                        godot_print!("PPUADDR first write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
+//                        godot_print!("PPUADDR first write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
                         self.last_2006 = self.frame_number;
                     }
                     // First write: High byte of the 14-bit destination target address
@@ -965,7 +1027,7 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
                 } else {
                     let old_v = self.v_addr;
                     if self.frame_number != self.last_2006_2 {
-                        godot_print!("PPUADDR second write {value}. scanline={}, cycle={}. Total Cycles={ }", self.scanline, self.cycle, self.total_ppu_cycles);
+                        godot_print!("PPUADDR second write {value}. scanline={}, cycle={}. Total Cycles={ }. V={} T={}", self.scanline, self.cycle, self.total_ppu_cycles, self.v_addr, self.t_addr);
                         self.last_2006_2 = self.frame_number;
                     }
                     // Second write: Low byte of destination target address
@@ -973,7 +1035,7 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
                     self.v_addr = self.t_addr; // Latch copies address into current VRAM target
                     self.w_latch = false;
 //                    mapper.notify_vram_address(v & 0x3FFF, frame_cycle)
-                    mapper.update_a12(self.v_addr, self.total_ppu_cycles);
+                    mapper.update_a12(self.t_addr & 0x3FFF, self.total_ppu_cycles);
                 }
             }
             7 => { // $2007 - PPUDATA
@@ -981,8 +1043,9 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
                 // Write the value into the destination VRAM address
                 self.ppu_write(mapper, old_v, value);
                 // Automatically step forward the target address based on $2000 setup configurations
-                self.v_addr = self.v_addr.wrapping_add(self.vram_increment as u16) & 0x3FFF;
+//                self.v_addr = self.v_addr.wrapping_add(self.vram_increment as u16) & 0x3FFF;
 //                mapper.notify_vram_address(v & 0x3FFF, frame_cycle)
+                self.increment_vram_address();
                 mapper.update_a12(self.v_addr, self.total_ppu_cycles);
             }
             _ => {}
@@ -996,6 +1059,6 @@ fn evaluate_sprites_for_scanline(&mut self, mapper: &dyn Mapper) {
     pub fn is_nmi_line_asserted(&self) -> bool {
         let nmi_occurred = (self.status & 0x80) != 0;
         let nmi_output = (self.ctrl & 0x80) != 0;
-        nmi_occurred && nmi_output && !self.nmi_suppressed
+        nmi_occurred && nmi_output
     }
 }

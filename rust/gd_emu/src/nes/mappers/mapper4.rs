@@ -136,8 +136,9 @@ fn recalculate_banks(&mut self) {
 
     // --- CHR Banking ---
     // Ensure 2KB banks explicitly ignore Bit 0 on standard MMC3 hardware
-    let r0 = self.bank_registers[0] & 0xFE;
-    let r1 = self.bank_registers[1] & 0xFE;
+    let chr_mask: usize = if self.revision == Mmc3Revision::Tlsrom { 0x7F } else { 0xFF };
+    let r0 = self.bank_registers[0] & 0xFE & chr_mask;
+    let r1 = self.bank_registers[1] & 0xFE & chr_mask;
     let r2 = self.bank_registers[2];
     let r3 = self.bank_registers[3];
     let r4 = self.bank_registers[4];
@@ -172,17 +173,14 @@ fn recalculate_banks(&mut self) {
         let offset = ppu_addr & 0x0FFF; 
     
         // Check MMC3 CHR inversion bit ($8000 bit 7)
-        let chr_inversion = (self.bank_select & 0x80) != 0;
+//        let chr_inversion = (self.bank_select & 0x80) != 0;
+        let chr_inversion = self.chr_mode != 0;
 
         if !chr_inversion {
         // --- Normal CHR Layout ---
         // $0000-$07FF: 2KB bank 0 (maps both $2000-$23FF and $2400-$27FF to Register 0)
         // $0800-$0FFF: 2KB bank 1 (maps both $2800-$2BFF and $2C00-$2FFF to Register 1)
-            if offset < 0x0800 {
-                0
-            } else {
-                1
-            }
+            if offset < 0x0800 { 0 } else { 1 }
         } else {
             // --- Inverted CHR Layout ---
             // $0000-$0FFF: Divided into four 1KB pages mapping directly to registers 2, 3, 4, and 5
@@ -288,7 +286,7 @@ impl Mapper for Mapper4 {
         else if addr >= 0xA000 && addr <= 0xBFFF {
             if (addr & 1) == 0 {
                 // $A000: Mirroring Mode (0 = Vertical, 1 = Horizontal)
-                if !self.has_four_screen {
+                if !self.has_four_screen && self.revision != Mmc3Revision::Tlsrom {
                     self.mirroring_mode = if value & 1 == 0 {
                         Mirroring::Vertical
                     } else {
@@ -361,7 +359,7 @@ impl Mapper for Mapper4 {
                 let chr_register = self.get_nametable_chr_register(ppu_addr);
         
                 // Extract Bit 7 (A17) from that bank register to feed directly to CIRAM A10
-                let a10 = (self.chr_offsets[chr_register] & 0x80) != 0;
+                let a10 = (self.bank_registers[chr_register] & 0x80) != 0;
         
                 // Calculate nametable offset
                 let base = if a10 { 0x400 } else { 0x000 };
@@ -369,7 +367,8 @@ impl Mapper for Mapper4 {
         
                 (base + offset) as usize
             } else {
-                ppu_addr as usize
+                // not sure about this, is it even reachable?
+                (ppu_addr & 0x07FF) as usize
             }
         } else {
             let v = (addr - 0x2000) as usize & 0x0FFF; 

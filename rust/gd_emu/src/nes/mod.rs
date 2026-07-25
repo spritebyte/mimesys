@@ -23,6 +23,8 @@ pub mod mapper64;
 pub mod mapper66;
 #[path = "mappers/mapper69.rs"]
 pub mod mapper69;
+#[path = "mappers/mapper71.rs"]
+pub mod mapper71;
 #[path = "mappers/mapper206.rs"]
 pub mod mapper206;
 pub mod nes_system;

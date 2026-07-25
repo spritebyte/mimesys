@@ -67,11 +67,11 @@ impl SystemDisplayInfo {
     fn new() -> Self {
         SystemDisplayInfo {
             buffer_width: 256,
-            buffer_height: 240,
+            buffer_height: 242,
             visible_x: 0,
-            visible_y: 8,
+            visible_y: 0,
             visible_width: 256,
-            visible_height: 224,
+            visible_height: 242,
             target_aspect_ratio: 4.0/3.0,
         }
     }
@@ -215,11 +215,37 @@ impl NesSystem {
         let mut cpu_cycles_run:u16 = 0;
         self.bus.accesses_this_cycle = 0;
         while !unsafe { (*self.bus.ppu.get()).is_frame_complete() } {
+            self.bus.accesses_this_cycle = 0;
+            let apu = self.bus.apu.get();
+            if self.bus.dmc_stall_remaining == 0 && unsafe { (*apu).dmc_dma_request } {
+                unsafe { (*apu).dmc_dma_request = false; }
+
+                let is_even = unsafe { (*apu).even_cycle };
+
+                self.bus.dmc_stall_remaining = if is_even { 3 } else { 4 };
+            }
+            if self.bus.dmc_stall_remaining > 0 {
+                self.bus.begin_cpu_cycle();
+                self.bus.dmc_stall_remaining -= 1;
+                if self.bus.dmc_stall_remaining == 0 {
+                    let apu = self.bus.apu.get();
+                    let addr = unsafe { (*apu).dmc_dma_address() };
+                    let byte = self.bus.read_byte(addr);   // real read — supplies this cycle's 3 dots
+                    unsafe { (*apu).dmc_dma_complete(byte) };
+                } else {
+                    self.bus.step_ppu_dots(3);             // stall cycle, no bus access
+                }
+                self.cpu.sample_interrupt_lines(&mut self.bus);
+                continue;
+            }
             if !self.bus.bus_available {
 //                self.bus.step_one_cycle();
                 self.bus.step_dma_one_cycle(&mut self.cpu);
 //                self.bus.step_remaining_ppu_cycles();
-                self.bus.accesses_this_cycle = 0;
+//                let ppu = self.bus.ppu.get();
+//                let apu = self.bus.apu.get();
+//                let mapper = self.bus.cartridge.mapper_mut();
+//                godot_print!("[{}] CPU Cycles={}|PPU Cycles/3={}|APU Cycles={}, even_cycle={}|Mapper Cycles={}. Scanline={}|PPU dot={}", self.current_frame, self.cpu.total_cycles, unsafe {(*ppu).total_ppu_cycles / 3}, unsafe{(*apu).total_apu_cycles}, unsafe{(*apu).even_cycle}, mapper.total_cycles(), unsafe{(*ppu).scanline}, unsafe{(*ppu).cycle});
                 self.cpu.sample_interrupt_lines(&mut self.bus);
             } else {
 //                self.bus.step_one_cycle();
@@ -229,7 +255,7 @@ impl NesSystem {
                 match self.bus.accesses_this_cycle {
                     1 => {}
                     0 => {
-        // Internal cycle with no bus access — hardware would do a dummy read.
+                        // Internal cycle with no bus access — hardware would do a dummy read.
                         godot_print!("no-access cycle: opcode={:02X} step={}",
                         self.cpu.current_opcode, self.cpu.instruction_step);
                         self.bus.step_ppu_dots(3);
@@ -239,23 +265,17 @@ impl NesSystem {
                 }
                 self.cpu.sample_interrupt_lines(&mut self.bus);
             }
-            self.bus.accesses_this_cycle = 0;
             cpu_cycles_run += 1;
-//            for _ in 0..3 {
-//                let mapper = self.bus.cartridge.mapper_mut();
-//                self.bus.ppu.get_mut().step_one_cycle(mapper);
-//            }
-//            let mapper = self.bus.cartridge.mapper_mut();
-//            godot_print!("CPU cycles: {} | Bus CPU cycles: {} PPU: {} | PPU cycles: { } | APU cycles: {}| Last opcode={:02X}", self.cpu.total_cycles(), self.bus.total_cpu_cycles, self.bus.total_ppu_dots, unsafe { (*self.bus.ppu.get()).total_cycles() }, self.bus.apu.get_mut().total_cycles(), self.cpu.current_opcode);
-//            if self.bus.total_cpu_cycles >= 100000 && self.bus.total_cpu_cycles <= 120000 {
-//                godot_print!("CYCLE COUNT: cpu: {}, ppu: {}", self.bus.total_cpu_cycles, self.bus.ppu.get_mut().total_ppu_cycles);
-//            }
 
             // failsafe
             if cpu_cycles_run > 35000 {
                 break;
             }
         }
+        let ppu = self.bus.ppu.get();
+        let apu = self.bus.apu.get();
+        let mapper = self.bus.cartridge.mapper_mut();
+//        godot_print!("[{}] CPU Cycles={}|PPU Cycles/3={}|APU Cycles={}, even_cycle={}|Mapper Cycles={}. Scanline={}|PPU dot={}", self.current_frame, self.cpu.total_cycles, unsafe {(*ppu).total_ppu_cycles / 3}, unsafe{(*apu).total_apu_cycles}, unsafe{(*apu).even_cycle}, mapper.total_cycles(), unsafe{(*ppu).scanline}, unsafe{(*ppu).cycle});
         debug_assert_eq!(self.bus.total_ppu_dots, self.bus.total_cpu_cycles * 3,
             "CPU cycle performed no bus access");
         self.current_frame += 1;
@@ -304,17 +324,6 @@ impl NesSystem {
         self.cpu.power_on(&mut self.bus);
         self.is_running.store(true, Ordering::SeqCst);
         let _playback = audio_player.get_stream_playback();
-        /*
-        let lo = self.bus.peek_byte(0xFFFC);
-        let hi = self.bus.peek_byte(0xFFFD);
-        let lo2 = self.bus.peek_byte(0xFFFE);
-        let hi2 = self.bus.peek_byte(0xFFFF);
-        godot_print!(
-        "CPU Powering On:\n\
-         - Reset Vector Bytes: [$FFFC] = 0x{:02X}, [$FFFD] = 0x{:02X}\n\
-         - 0x{:02X}, 0x{:02X}\n\
-         - Initial Program Counter (PC): 0x{:04X}", lo, hi, lo2, hi2, self.cpu.pc);
-        */
         let save_path = format!("{}/{}.sav", self.save_battery_path, self.save_filename);
         if self.bus.cartridge.has_battery && godot::classes::FileAccess::file_exists(&save_path) {
             if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::READ) {
@@ -496,8 +505,6 @@ impl NesSystem {
         dict.set("flag_decimal", state.status.decimal);
         dict.set("flag_overflow", state.status.overflow);
         dict.set("flag_negative", state.status.negative);
-
-        dict.set("i_flag_delayed", state.i_delay);
         dict
     }
 
@@ -542,98 +549,4 @@ impl NesSystem {
         }
         self.cached_texture.as_ref().unwrap().clone().upcast()
     }
-/*
-    pub fn load_rom(&mut self, bus) {
-        let rom = bus.cartridge;
-        bus.Cartridge.mapper = mappers::make_mapper(
-            rom.mapper_id,
-            rom.prg_banks,
-            rom.chr_banks,
-            rom.prg_rom,
-            rom.chr_rom,
-            rom.mirroring,
-            rom.four_screen,
-        ).unwrap();
-    }
-*/
-/*
-    // A factory function that maps an integer ID to a concrete Rust struct
-    fn instantiate_mapper(mapper_id: u8, prg_rom: Vec<u8>, chr_rom: Vec<u8>, header:Vec<u8>) -> Option<Box<dyn Mapper>> {
-        let prg_bank_size = match mapper_id {
-            4|206 => 8192,   // MMC3, DxROM: 8KB banks
-            _ => 16384,      // MMC, UxROM: 16KB banks
-        };
-        let chr_bank_size = match mapper_id {
-            4|206 => 1024,  // MMC3, DxROM: 1KB banks
-            _ => 8192,      // MMC, UxROM: 8KB banks
-        };
-        let prg_banks = prg_rom.len() / prg_bank_size;
-        let chr_banks = chr_rom.len() / chr_bank_size;
-        let submapper = 0;
-
-        let mirroring_bit = (header[6] & 0x01) != 0;
-        let four_screen_bit = (header[6] & 0x08) != 0;
-
-        match mapper_id {
-            0 => { let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
-                godot_print!("Mapper0 (Nrom) created with initial mirroring bit={mirroring_bit}");
-                Some(Box::new(Mapper0::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring))) // NROM
-            }
-            1 => { // MMC1 
-                godot_print!("Mapper1 (MMC1) created");
-                let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
-                Some(Box::new(Mapper1::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen_bit)))
-            } 
-            2 => { // UxROM
-                godot_print!("Mapper2 (UxROM) created");
-                let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
-                Some(Box::new(Mapper2::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen_bit, submapper)))
-            }
-            3 => { // CNROM
-                godot_print!("Mapper3 (CNROM) created");
-                let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
-                Some(Box::new(Mapper3::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen_bit)))
-            }
-            4 => { // MMC3
-                godot_print!("Mapper4 (MMC3) created");
-                let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
-                Some(Box::new(Mapper4::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen_bit, submapper)))
-            }
-            5 => { // MMC3
-                godot_print!("Mapper5 (MMC5) created");
-                let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
-                Some(Box::new(Mapper5::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen_bit)))
-            }
-            7 => { // AxROM
-                godot_print!("Mapper7 (AxROM) created");
-                let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
-                Some(Box::new(Mapper7::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen_bit)))
-            } 
-            9 => { // CNROM
-                godot_print!("Mapper9 (MMC2) created");
-                let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
-                Some(Box::new(Mapper9::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen_bit)))
-            }
-            34 => { // BNROM/NINA-001
-                godot_print!("Mapper34 (NINA-001/NINA-002/BNROM) created");
-                let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
-                Some(Box::new(Mapper34::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen_bit, submapper)))
-            }
-            69 => { // Sunsoft mappers
-                godot_print!("Mapper69 (Sunsoft FME-7/5A/5B) created");
-                let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
-                Some(Box::new(Mapper69::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen_bit, submapper)))
-            } 
-            206 => { // DxROM
-                godot_print!("Mapper206 (DxROM) created");
-                let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
-                Some(Box::new(Mapper206::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen_bit)))
-            } 
-            _ => {
-                godot_error!("Unsupported Mapper ID: {}", mapper_id);
-                None
-            }
-        }
-    }
-    */
 }
