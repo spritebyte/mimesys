@@ -87,6 +87,9 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 #			return ColecoSystem.new(bus)
 
 		"gb", "gbc":
+#			var gb_system = GbSystemNode.create_from_bytes(data, base_name.validate_filename())
+#			return gb_system
+
 			print("TODO: Rewriting in rust...")
 			return null
 #			var gbrom := GBRom.new(data)

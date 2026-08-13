@@ -10,7 +10,7 @@ config_version=5
 
 [application]
 
-config/name="gd_emu2"
+config/name="mimesys"
 run/main_scene="uid://dmqrip33lf7oq"
 config/features=PackedStringArray("4.6", "GL Compatibility")
 config/icon="res://icon.svg"
