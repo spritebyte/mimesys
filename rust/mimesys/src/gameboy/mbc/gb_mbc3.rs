@@ -3,47 +3,32 @@ use crate::gameboy::gb_mbc::Mbc;
 
 pub struct Mbc3 {
     prg_rom: Vec<u8>,
-    prg_ram: Vec<u8>,
+    cart_ram: Vec<u8>,
 }
 
 impl Mbc3 {
     pub fn new(prg_rom: Vec<u8>, cart_ram: Vec<u8>) -> Self {
         Self {
             prg_rom,
-            prg_ram: cart_ram,
+            cart_ram,
         }
     }
 }
 
 impl Mbc for Mbc3 {
-    fn read_rom(&self, addr: u16) -> u8 {
+    fn read(&self, addr: u16) -> u8 {
         if addr < 0x8000 {
-            if addr >= 0x6000 {
-                return self.prg_ram[(addr - 0x6000) as usize];
-            }
-            return 0;
+            return self.prg_rom[addr as usize];
         }
-        let mut rom_addr = addr - 0x8000;
-        if self.prg_rom.len() == 16384 {
-            rom_addr %= 16384; // Mirroring for 16KB games
+        else if addr >= 0xA000 && addr <= 0xBFFF {
+            return self.cart_ram[(addr - 0xA000) as usize];
         }
-        self.prg_rom[rom_addr as usize]
+        0xFF
     }
 
-    fn write_rom(&mut self, addr: u16, value: u8) {
-        // handle chr_ram writes or modifications if needed
-    }
-
-    fn write_ram(&mut self, addr: u16, value: u8) {
-        if addr < 0x8000 {
-            if addr >= 0x6000 {
-                self.prg_ram[(addr - 0x6000) as usize] = value;
-            }
-            return;
+    fn write(&mut self, addr: u16, value: u8) {
+        if addr >= 0xA000 && addr <= 0xBFFF {
+            self.cart_ram[(addr - 0xA000) as usize] = value;
         }
-    }
-
-    fn read_ram(&self, addr: u16) -> u8 {
-        self.prg_ram[(addr - 0x6000) as usize]
     }
 }

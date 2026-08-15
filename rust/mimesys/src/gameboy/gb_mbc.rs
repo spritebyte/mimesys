@@ -1,8 +1,6 @@
 pub trait Mbc {
-    fn read_rom(&self, addr: u16) -> u8;
-    fn write_rom(&mut self, addr: u16, val: u8);
-    fn read_ram(&self, addr: u16) -> u8;
-    fn write_ram(&mut self, addr: u16, val: u8);
+    fn read(&self, addr: u16) -> u8;
+    fn write(&mut self, addr: u16, val: u8);
     fn get_sram(&self) -> Option<&[u8]> { None }
     fn load_sram(&mut self, _data: &[u8]) {}
     fn is_sram_dirty(&self) -> bool { false }

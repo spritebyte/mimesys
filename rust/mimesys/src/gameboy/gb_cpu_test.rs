@@ -2,7 +2,8 @@
 mod tests {
     use super::*;
     use crate::gameboy::gb_cpu::{GameBoyCpu, GbVariant};
-    use crate::gameboy::gb_dummy_bus::{Bus, GameBoyBus};
+    use crate::gameboy::gb_bus::Bus;
+    use crate::gameboy::gb_mock_bus::MockBus;
 
     const FLAG_Z:u8 = 0x80;
     const FLAG_N:u8 = 0x40;
@@ -12,7 +13,7 @@ mod tests {
     #[test]
     fn test_ld_reg_reg_and_immediate_execution() {
         let mut cpu = GameBoyCpu::new(GbVariant::Dmg);
-        let mut bus = GameBoyBus::new();
+        let mut bus = MockBus::new();
 
         // --- CASE 1: Load Immediate (2 M-Cycles) ---
         // LD B, 0x42 (Opcode 0x06, Imm 0x42)
@@ -66,7 +67,7 @@ mod tests {
     #[test]
     fn test_alu_add_and_adc_flags() {
         let mut cpu = GameBoyCpu::new(GbVariant::Dmg);
-        let mut bus = GameBoyBus::new();
+        let mut bus = MockBus::new();
 
         // --- CASE 1: ADD Immediate causing Half-Carry and Carry (2 M-Cycles) ---
         // ADD A, 0x01 with A = 0xFF -> Result 0x00 (Z=1, N=0, H=1, C=1)
@@ -106,7 +107,7 @@ mod tests {
     #[test]
     fn test_alu_sub_and_cp_flags() {
         let mut cpu = GameBoyCpu::new(GbVariant::Dmg);
-        let mut bus = GameBoyBus::new();
+        let mut bus = MockBus::new();
 
         // --- CASE 1: SUB Immediate with Borrow (2 M-Cycles) ---
         // SUB A, 0x05 with A = 0x00 -> Result 0xFB (Z=0, N=1, H=1, C=1)
@@ -147,7 +148,7 @@ mod tests {
     #[test]
     fn test_halt_bug_trigger_and_byte_duplication() {
         let mut cpu = GameBoyCpu::new(GbVariant::Dmg);
-        let mut bus = GameBoyBus::new();
+        let mut bus = MockBus::new();
 
         // Setup HALT Bug Trigger Condition: IME = 0, Pending IRQ > 0
         cpu.pc = 0xC000;
@@ -188,7 +189,7 @@ mod tests {
     #[test]
     fn test_inc_dec_8bit_registers_and_flags() {
         let mut cpu = GameBoyCpu::new(GbVariant::Dmg);
-        let mut bus = GameBoyBus::new();
+        let mut bus = MockBus::new();
 
         // --- CASE 1: INC B causing Half-Carry (1 M-Cycle) ---
         // INC B (0x04) with B = 0x0F, pre-set Carry flag
@@ -264,7 +265,7 @@ mod tests {
     #[test]
     fn test_inc_dec_memory_hl() {
         let mut cpu = GameBoyCpu::new(GbVariant::Dmg);
-        let mut bus = GameBoyBus::new();
+        let mut bus = MockBus::new();
 
         // --- CASE 1: INC (HL) (3 M-Cycles: Fetch, Read, Write) ---
         // Opcode 0x34: INC (HL)
@@ -301,7 +302,7 @@ mod tests {
     #[test]
     fn test_inc_dec_16bit_registers_preserve_all_flags() {
         let mut cpu = GameBoyCpu::new(GbVariant::Dmg);
-        let mut bus = GameBoyBus::new();
+        let mut bus = MockBus::new();
 
         // Preset flags to a distinct pattern (Z=1, N=0, H=1, C=0)
         let initial_flags = FLAG_Z | FLAG_H;

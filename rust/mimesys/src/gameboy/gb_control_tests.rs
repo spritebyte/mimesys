@@ -2,7 +2,8 @@
 mod control_flow_and_stack_tests {
     use super::*;
     use crate::gameboy::gb_cpu::{GameBoyCpu, GbVariant};
-    use crate::gameboy::gb_dummy_bus::{Bus, GameBoyBus};
+    use crate::gameboy::gb_bus::Bus;
+    use crate::gameboy::gb_mock_bus::MockBus;
 
     const FLAG_Z: u8 = 0x80;
     const FLAG_N: u8 = 0x40;
@@ -12,7 +13,7 @@ mod control_flow_and_stack_tests {
     #[test]
     fn test_push_pop_and_pop_af_masking() {
         let mut cpu = GameBoyCpu::new(GbVariant::Dmg);
-        let mut bus = GameBoyBus::new();
+        let mut bus = MockBus::new();
 
         cpu.pc = 0xC000;
         cpu.sp = 0xFFFE;
@@ -61,7 +62,7 @@ mod control_flow_and_stack_tests {
     #[test]
     fn test_jp_and_jr_conditional_timing() {
         let mut cpu = GameBoyCpu::new(GbVariant::Dmg);
-        let mut bus = GameBoyBus::new();
+        let mut bus = MockBus::new();
 
         // --- CASE 1: JP a16 Unconditional (0xC3) -> 4 M-Cycles ---
         cpu.pc = 0xC000;
@@ -143,7 +144,7 @@ mod control_flow_and_stack_tests {
     #[test]
     fn test_call_and_ret_conditional_execution() {
         let mut cpu = GameBoyCpu::new(GbVariant::Dmg);
-        let mut bus = GameBoyBus::new();
+        let mut bus = MockBus::new();
 
         // --- CASE 1: CALL a16 Unconditional (0xCD) -> 6 M-Cycles ---
         cpu.pc = 0xC000;

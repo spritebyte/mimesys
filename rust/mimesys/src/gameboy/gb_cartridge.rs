@@ -32,15 +32,15 @@ impl GbCartridge {
         }
     }
 
-    pub fn mapper(&self) -> &dyn Mbc {
+    pub fn mbc(&self) -> &dyn Mbc {
         unsafe { &**self.mbc.get() }
     }
 
-    pub fn mapper_mut(&self) -> &mut dyn Mbc {
+    pub fn mbc_mut(&self) -> &mut dyn Mbc {
         unsafe { &mut **self.mbc.get() }
     }
-    pub fn get_sram(&self) -> Option<&[u8]> { self.mapper().get_sram() }
-    pub fn load_sram(&mut self, data: &[u8]) { self.mapper_mut().load_sram(data); }
-    pub fn is_sram_dirty(&self) -> bool { self.mapper().is_sram_dirty() }
-    pub fn clear_sram_dirty(&mut self) { self.mapper_mut().clear_sram_dirty(); }
+    pub fn get_sram(&self) -> Option<&[u8]> { self.mbc().get_sram() }
+    pub fn load_sram(&mut self, data: &[u8]) { self.mbc_mut().load_sram(data); }
+    pub fn is_sram_dirty(&self) -> bool { self.mbc().is_sram_dirty() }
+    pub fn clear_sram_dirty(&mut self) { self.mbc_mut().clear_sram_dirty(); }
 }

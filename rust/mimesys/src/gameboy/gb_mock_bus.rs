@@ -1,15 +1,17 @@
-pub trait Bus {
+use crate::gameboy::gb_bus::Bus;
+/*
+pub trait MockBus {
     fn read(&mut self, addr: u16) -> u8;
     fn write(&mut self, addr: u16, value: u8);
     fn peek(&self, addr: u16) -> u8;
     fn irq_pending(&self) -> u8;
     fn ack_irq(&mut self, index: u8);   // clear bit 'index' in IF
 }
-
+*/
 #[derive(Clone, Copy)]
 pub enum Irq { VBlank = 0, LcdStat = 1, Timer = 2, Serial = 3, Joypad = 4 }
 
-pub struct GameBoyBus {
+pub struct MockBus {
     pub ram: [u8; 65536],
     pub ie: u8,
     pub iflags: u8,
@@ -17,7 +19,7 @@ pub struct GameBoyBus {
     serial_control: u8,
 }
 
-impl GameBoyBus {
+impl MockBus {
     pub fn new() -> Self {
         Self {
             ram: [0; 65536],
@@ -33,7 +35,7 @@ impl GameBoyBus {
     }
 }
 
-impl Bus for GameBoyBus {
+impl Bus for MockBus {
     fn irq_pending(&self) -> u8 {
         self.ie & self.iflags & 0x1F
     }

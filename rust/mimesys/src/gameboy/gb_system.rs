@@ -6,13 +6,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub struct GbSystem {
-    cpu: GameBoyCpu,
-    bus: GameBoyBus,
-    frame_ready: Arc<AtomicBool>,
-    is_running: Arc<AtomicBool>,
-    save_battery_path: String,
-    save_state_path: String,
-    save_filename: String,
+    pub cpu: GameBoyCpu,
+    pub bus: GameBoyBus,
+    pub frame_ready: Arc<AtomicBool>,
+    pub is_running: Arc<AtomicBool>,
+    pub save_battery_path: String,
+    pub save_state_path: String,
+    pub save_filename: String,
 }
 
 impl GbSystem {
@@ -105,6 +105,49 @@ impl GbSystem {
     }
 
     pub fn tick(&mut self) {
+        let before = self.bus.master;
         self.cpu.step_one_m_cycle(&mut self.bus);
+        debug_assert_eq!(self.bus.master - before, self.bus.cycle_len(), 
+                         "M-cycle must advance the clock exactly once");
+    }
+
+    pub fn power_on(&mut self) {
+        self.is_running.store(true, Ordering::SeqCst);
+    }
+
+    pub fn power_off(&mut self) {
+        self.is_running.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.is_running.load(Ordering::Relaxed)
+    }
+
+    pub fn has_battery(&self) -> bool {
+        self.bus.cartridge.has_battery
+    }
+
+    pub fn save_filename(&self) -> &str {
+        &self.save_filename
+    }
+
+    pub fn save_battery_path(&self) -> &str {
+        &self.save_battery_path
+    }
+
+    pub fn is_sram_dirty(&self) -> bool {
+        self.bus.is_sram_dirty()
+    }
+
+    pub fn clear_sram_dirty(&mut self) {
+        self.bus.clear_sram_dirty();
+    }
+
+    pub fn get_sram(&self) -> Option<&[u8]> {
+        self.bus.get_sram()
+    }
+
+    pub fn load_sram(&mut self, data: &[u8]) {
+        self.bus.load_sram(data);
     }
 }
