@@ -1,3 +1,4 @@
+use crate::common::timed::Timed;
 use crate::gameboy::gb_bus::Bus;
 /*
 pub trait MockBus {
@@ -17,12 +18,16 @@ pub struct MockBus {
     pub iflags: u8,
     serial_data_buffer: u8,
     serial_control: u8,
+    master: u64,
+    last_master: u64,
 }
 
 impl MockBus {
     pub fn new() -> Self {
         Self {
             ram: [0; 65536],
+            master: 0,
+            last_master: 0,
             ie: 0,
             iflags: 0,
             serial_data_buffer: 0,
@@ -33,6 +38,20 @@ impl MockBus {
     pub fn request_irq(&mut self, irq: Irq) {
         self.iflags |= 1 << (irq as u8);
     }
+
+    pub fn cycle_len(&self) -> u64 {
+        2
+    }
+}
+
+impl Timed for MockBus {
+    fn run_until(&mut self, target_master: u64) {
+        self.last_master = target_master;
+    }
+
+    fn sync_point(&self) -> u64 {
+        self.last_master
+    } 
 }
 
 impl Bus for MockBus {
@@ -68,5 +87,18 @@ impl Bus for MockBus {
             }
             _ => { self.ram[addr as usize] = value; }
         }
+    }
+
+    fn idle_cycle(&mut self) {
+        self.master += self.cycle_len();
+        self.run_until(self.master);
+    }
+
+    fn reset_div(&mut self) {
+
+    }
+
+    fn perform_speed_switch(&mut self) {
+        
     }
 }

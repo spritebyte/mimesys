@@ -21,14 +21,18 @@ impl Mbc for Mbc0 {
             return self.prg_rom[addr as usize];
         }
         else if addr >= 0xA000 && addr <= 0xBFFF {
-            return self.cart_ram[(addr - 0xA000) as usize];
+            if self.cart_ram.len() > 0 {
+                return self.cart_ram[(addr - 0xA000) as usize];
+            }
         }
         0xFF
     }
 
     fn write(&mut self, addr: u16, value: u8) {
         if addr >= 0xA000 && addr <= 0xBFFF {
-            self.cart_ram[(addr - 0xA000) as usize] = value;
+            if self.cart_ram.len() > 0 {
+                self.cart_ram[(addr - 0xA000) as usize] = value;
+            }
         }
     }
 }

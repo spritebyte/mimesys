@@ -69,6 +69,8 @@ pub struct NesPPU {
     pub oam: [u8; 256], // 64 sprites * 4 bytes each
     data_buffer: u8,    // Delayed reading cache buffer for PPUDATA ($2007)
     // --- Timing & Synchronization ---
+    // Should maybe rename this to something like slice_complete to avoid confusion with the
+    //  system_frame_ready which indicates front buffer is available to blit. 
     pub frame_ready: bool,
     vbl_suppressed: bool,
     nmi_suppressed: bool,

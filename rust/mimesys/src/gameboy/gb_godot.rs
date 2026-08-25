@@ -10,7 +10,7 @@ use std::sync::{Arc};
 use std::path::PathBuf;
 
 // only checking a few bytes from logo
-const _NINTENDO_LOGO: [u8; 6] = [0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D];
+const _NINTENDO_LOGO: [u8; 10] = [0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73];
 
 #[derive(GodotClass)]
 #[class(base=Node, no_init)]
@@ -52,8 +52,8 @@ impl GbSystemNode {
     #[func]
     pub fn run_slice(&mut self, input_mask: u16) { 
         if let Some(sys) = &mut self.system {
-            sys.set_input(input_mask as u8);
-            sys.run_frame();
+//            sys.set_input(input_mask as u8);
+            sys.run_frame(input_mask as u8);
 //            self.blit(sys.framebuffer());
 //            self.queue_audio(sys.audio_samples());
         }
@@ -85,6 +85,10 @@ impl GbSystemNode {
         println!("Gb System Power On");
     }
     
+    #[func]
+    pub fn reset(&mut self) {
+
+    }
 
     #[func]
     pub fn power_off(&mut self) {
@@ -110,13 +114,51 @@ impl GbSystemNode {
     }
 
     #[func]
-    pub fn is_frame_ready(&self) {
-
+    pub fn is_frame_ready(&self) -> bool {
+        let Some(sys) = &self.system else { return false;};
+        sys.frame_published.load(Ordering::Acquire)
     }
 
     #[func]
-    pub fn get_frame_texture(&self) -> Gd<Texture2D>  {
-//        self.cached_texture
+    pub fn get_current_frame(&self) -> i64 {
+        let Some(sys) = &self.system else { return 0;};
+        sys.current_frame as i64
+    }
+
+    #[func]
+    pub fn request_rewind_to_frame(&mut self, target_frame: i64) -> bool {
+        false
+    }
+
+    #[func]
+    pub fn get_oldest_rewindable_frame(&self) -> i64 {
+        0
+    }
+
+    #[func]
+    pub fn get_frame_texture(&mut self) -> Gd<Texture2D>  {
+        let Some(sys) = &mut self.system else { return Default::default(); };
+        sys.frame_published.store(false, Ordering::Release);
+        let pixel_data = {
+            let ppu = sys.bus.ppu.get_mut();
+            let front_guard = ppu.front_buffer.lock().unwrap();
+            PackedByteArray::from(front_guard.as_slice())
+        };
+
+        if self.cached_image.is_none() {
+            let image = Image::create_from_data(160, 144, false, Format::RGBA8, &pixel_data).unwrap();
+            let texture = ImageTexture::create_from_image(&image).unwrap();
+            self.cached_image = Some(image);
+            self.cached_texture = Some(texture);
+        } else {
+            if let Some(image) = self.cached_image.as_mut() {
+                image.set_data(160, 144, false, Format::RGBA8, &pixel_data);
+            }
+            let image_clone = self.cached_image.as_ref().unwrap().clone();
+            if let Some(texture) = self.cached_texture.as_mut() {
+                texture.update(&image_clone);
+            }
+        }
         self.cached_texture.as_ref().unwrap().clone().upcast()
     }
 }

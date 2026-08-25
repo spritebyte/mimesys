@@ -1,14 +1,5 @@
 use crate::gameboy::gb_bus::Bus;
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum GbVariant {
-    Dmg,
-    Mgb,
-    Cgb,
-    Sgb,
-    Sgb2,
-    Agb,
-}
+use crate::gameboy::gb_common::{GbVariant, GbCpuConfig};
 
 const FLAG_Z:u8 = 0x80;
 const FLAG_N:u8 = 0x40;
@@ -73,7 +64,7 @@ impl Reg16Stk {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AluOp { Add, Adc, Sub, Sbc, And, Xor, Or, Cp }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CbOp { Rlc, Rrc, Rl, Rr, Sla, Sra, Swap, Srl, Bit, Res, Set }
 
 impl AluOp {
@@ -86,11 +77,13 @@ impl AluOp {
     }
  }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Instruction {
     Nop,
     DI,
     EI,
+    AddHlReg16 { src: Reg16 },
+    AddSpReg   { src: Reg },
     AluReg     { op: AluOp, src: Reg },
     AluImm     { op: AluOp },
     BitAnd     { src: Reg },
@@ -102,19 +95,27 @@ enum Instruction {
     Call       { cond: Option<Condition> },
     CbPrefix,
     Cb(CbInstruction),
+    Cpl,
     Daa,       // Decimal Adjust Accumulator
     DecReg16   { dst: Reg16 },
     DecReg     { dst: Reg },
     Halt,
     IncReg16   { dst: Reg16 },
     IncReg     { dst: Reg },
+    Interrupt  { vector: u16 },
     Jp         { cond: Option<Condition> },
     JpHl,
     Jr         { cond: Option<Condition> },
     LdRegReg   { dst: Reg, src: Reg },
     LdRegImm   { dst: Reg },
     LdReg16Imm { dst: Reg16 },
-    LdMemReg   { src: Reg },
+    LdAcc,
+    LdhAcc,
+    LdFromAcc,
+    LdhFromAcc,
+    LdHlSp,
+    LdSpHl,
+    LdhCIndA,
     LdRegMem   { dst: Reg },
     LdR16MemA  { dst: Reg16Mem },
     LdAR16Mem  { src: Reg16Mem },
@@ -124,11 +125,14 @@ enum Instruction {
     Rlca,
     Rla,
     Reti,
+    Rra,
+    Rrca,
+    Rst        { addr: u16 },
     Stop,
     Unknown(u8),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CbInstruction { pub op: CbOp, pub bit: u8, pub target: Reg }
 
 impl Default for Instruction {
@@ -136,61 +140,6 @@ impl Default for Instruction {
 }
 
 enum Operand { Reg(Reg), MemHL }
-
-pub struct GbCpuConfig {
-    pub variant: GbVariant,
-    pub initial_a: u8,
-    pub initial_f: u8,
-    pub initial_bc: u16,
-    pub initial_de: u16,
-    pub initial_hl: u16,
-    pub initial_sp: u16,
-    pub initial_pc: u16,             // set to 0x0100 to skip bios
-    pub supports_double_speed: bool,
-}
-
-impl GbCpuConfig {
-    pub fn for_variant(variant: GbVariant) -> Self {
-        match variant {
-            // Starting values assume skipping the BIOS. Want to load bios as an option in the future.
-            GbVariant::Dmg => Self {
-                variant, initial_a: 0x01, initial_f: 0xB0,
-                initial_bc: 0x0013, initial_de: 0x00D8, initial_hl: 0x014D,
-                initial_sp: 0xFFFE, supports_double_speed: false,
-                initial_pc: 0x0100,
-            },
-            GbVariant::Mgb => Self {
-                variant, initial_a: 0xFF, initial_f: 0xB0,
-                initial_bc: 0x0013, initial_de: 0x00D8, initial_hl: 0x014D,
-                initial_sp: 0xFFFE, supports_double_speed: false,
-                initial_pc: 0x0100,
-            },
-            GbVariant::Cgb => Self {
-                variant, initial_a: 0x11, initial_f: 0x80,
-                initial_bc: 0x0000, initial_de: 0xFF56, initial_hl: 0x000D,
-                initial_sp: 0xFFFE, supports_double_speed: true,
-                initial_pc: 0x0100,
-            },
-            GbVariant::Agb => Self {
-                variant, initial_a: 0x11, initial_f: 0x80,
-                initial_bc: 0x0100, initial_de: 0xFF56, initial_hl: 0x000D,
-                initial_sp: 0xFFFE, supports_double_speed: true,
-                initial_pc: 0x0100,
-            },
-            GbVariant::Sgb | GbVariant::Sgb2 => Self {
-                variant,
-                initial_a: 0x01,  // Identifies as a classic monochrome Game Boy
-                initial_f: 0xB0,
-                initial_bc: 0x0013,
-                initial_de: 0x00D8,
-                initial_hl: 0x014D,
-                initial_sp: 0xFFFE,
-                initial_pc: 0x0100,
-                supports_double_speed: false, // Runs strictly at normal speed
-            },
-        }
-    }
-}
 
 pub struct GameBoyCpu {
     pub a: u8, pub f: u8,
@@ -207,12 +156,14 @@ pub struct GameBoyCpu {
     pub current_value: u8,
     pub cb_prefixed: bool,
     pub halted: bool,
+    pub stopped: bool,
     pub halt_bug: bool,
     pub ime: bool,
     pub ime_pending: bool,
     pub config: GbCpuConfig,
     pub current: Instruction,
     pub double_speed: bool,
+    pub variant: GbVariant,
 }
 
 impl GameBoyCpu {
@@ -235,10 +186,11 @@ impl GameBoyCpu {
             current: Instruction::Nop,
             current_msb: 0, current_lsb: 0,
             current_opcode: 0, current_value: 0,
-            halted: false, halt_bug: false,
+            halted: false, halt_bug: false, stopped: false,
             double_speed: config.supports_double_speed,
             cb_prefixed: false,
             config,
+            variant,
         }
     }
     pub fn bc(&self) -> u16 { ((self.b as u16) << 8) | self.c as u16 }
@@ -283,13 +235,23 @@ impl GameBoyCpu {
 
     // exactly one bus access happens per call
     pub fn step_one_m_cycle(&mut self, bus: &mut dyn Bus) {
+        if self.halted {
+            if bus.irq_pending() != 0 {
+                self.halted = false;
+            } else {
+                bus.idle_cycle();
+                return;
+            }
+        }
+//        println!("step_one_m_cycle. Opcode={:02X} Instruction step={}", self.current_opcode, self.instruction_step);
         if self.instruction_step == 0 {
-            if self.service_interrupt(bus) { return; }
+            if self.check_interrupts(bus) { return; }
             if self.ime_pending {
                 self.ime = true;
                 self.ime_pending = false;
             }
             let opcode = self.fetch_byte(bus);
+//            println!("Fetched opcode {:02X}", opcode);
             self.current_opcode = opcode;
             if self.cb_prefixed {
                 let cb = self.decode_cb(opcode);
@@ -328,11 +290,17 @@ impl GameBoyCpu {
 
     fn execute_fetch_cycle(&mut self, bus: &mut dyn Bus) -> bool {
         match self.current {
+            Instruction::AddHlReg16 { .. }=> false,
             Instruction::CbPrefix => {
                 self.cb_prefixed = true;
                 true
             },
             Instruction::Cb(_) => false,
+            Instruction::Cpl => {
+                self.a = !self.a;
+                self.f |= FLAG_N | FLAG_H;
+                true
+            },
             Instruction::Nop => true,
             Instruction::EI => { self.ime_pending = true; true },
             Instruction::DI => { self.ime = false; self.ime_pending = false; true },
@@ -359,32 +327,30 @@ impl GameBoyCpu {
             Instruction::Call { .. } => false,
 
             Instruction::Daa => {
-                let mut a:u16 = self.a as u16;
-                let h = self.f & FLAG_H == FLAG_H;
-                let n = self.f & FLAG_N == FLAG_N;
-                let c = self.f & FLAG_C == FLAG_C;
+                let mut a = self.a;
+                let mut adjust = 0;
+                let mut carry = false;
 
-                if n {
-                    if h {
-                        a -= 0x06;
-                        a &= 0xFF;
-                    }
-                    if c {
-                        a -= 0x60;
-                    }
-                } else {
-                    if (a & 0x0F) > 0x09 || h {
-                        a += 0x06;
-                    }
-                    if (a > 0x9F) || c {
-                        a += 0x60;
-                    }
+                if (self.f & FLAG_H != 0) || ((self.f & FLAG_N == 0) && (a & 0x0F) > 0x09) {
+                    adjust |= 0x06;
+                }
+                if (self.f & FLAG_C != 0) || ((self.f & FLAG_N == 0) && a > 0x99) {
+                    adjust |= 0x60;
+                    carry = true;
                 }
 
-                if a & 0xFF == 0 { self.f |= FLAG_Z; }
-                self.f &= !FLAG_H;
-                if (a & 0x100) != 0 { self.f |= FLAG_C; }
-                self.a = (a & 0xFF) as u8;
+                if self.f & FLAG_N != 0 {
+                    a = a.wrapping_sub(adjust);
+                } else {
+                    a = a.wrapping_add(adjust);
+                }
+
+                let mut f = self.f & FLAG_N; // Preserve N, clear Z, H, C
+                if a == 0 { f |= FLAG_Z; }
+                if carry { f |= FLAG_C; }
+
+                self.a = a;
+                self.f = f;
                 true
             },
 
@@ -426,9 +392,21 @@ impl GameBoyCpu {
                 false
             },
 
-            Instruction::Jp { .. } => false,
+            Instruction::Jp { .. } => {
+                false
+            },
             Instruction::Jr { .. } => false,
 
+            Instruction::JpHl => {
+                self.pc = self.hl();
+                true
+            },
+            Instruction::LdR16MemA { .. } => false,
+            Instruction::LdAR16Mem { .. } => false,
+            Instruction::LdHlSp|Instruction::LdSpHl => false,
+            Instruction::LdhCIndA => false,
+            Instruction::LdFromAcc|Instruction::LdAcc => false,
+            Instruction::LdhFromAcc|Instruction::LdhAcc => false,
             // LD r, r' with both operands registers: 1 M-cycle
             // if either side is (HL), need a memory access
             Instruction::LdRegReg { dst, src } => {
@@ -449,6 +427,45 @@ impl GameBoyCpu {
             Instruction::Push { .. } => false,
             Instruction::Ret { .. } => false,
             Instruction::Reti => false,
+
+            // 0x07 - RLCA
+            Instruction::Rlca => {
+                let a_reg = self.a;
+                let carry = (a_reg & 0x80) != 0;
+                self.a = (a_reg << 1) | (if carry { 0x01 } else { 0 });
+                self.f = if carry { FLAG_C } else { 0 }; // Z=0, N=0, H=0
+                true
+            },
+
+            // 0x17 - RLA
+            Instruction::Rla => {
+                let a_reg = self.a;
+                let old_carry = (self.f & FLAG_C) != 0;
+                let new_carry = (a_reg & 0x80) != 0;
+                self.a = (a_reg << 1) | (if old_carry { 0x01 } else { 0 });
+                self.f = if new_carry { FLAG_C } else { 0 }; // Z=0, N=0, H=0
+                true
+            },
+
+            Instruction::Rra => {
+                let a_reg = self.a;
+                let old_carry:u8 = if (self.f & FLAG_C) != 0 { 0x80 } else { 0 };
+                let new_carry = (a_reg & 0x01) != 0;
+                let ret_val = (a_reg >> 1) | old_carry;
+                self.a = ret_val;
+                self.f = if new_carry { FLAG_C } else { 0 };
+                true
+            },
+            Instruction::Rrca => {
+                let a_reg:u8 = self.a;
+                let carry_out:bool = a_reg & 0x01 != 0;
+                let value = (a_reg >> 1) | (if carry_out { 0x80 } else { 0 });
+                self.f = if carry_out { FLAG_C } else { 0 };
+                self.a = value;
+                true
+            }
+            Instruction::Rst { .. } => false,
+            Instruction::Stop => false,
             Instruction::Unknown(op) => panic!("Unimplemented opcode {:02X}", op),
             _ => { todo!("need to handle all instructions"); },
         }
@@ -457,6 +474,25 @@ impl GameBoyCpu {
     // returns true when instruction completes
     fn execute_micro_step(&mut self, bus: &mut dyn Bus) -> bool {
         match self.current {
+            Instruction::AddHlReg16 { src } => {
+                let reg = match src {
+                    Reg16::BC => self.bc(),
+                    Reg16::DE => self.de(),
+                    Reg16::HL => self.hl(),
+                    _=> self.sp,
+                };
+                bus.idle_cycle();
+                let hl = self.hl();
+                let result = hl.wrapping_add(reg);
+                self.f &= !FLAG_N;
+                let h:bool = (hl & 0xFF) as u16 + (reg & 0xFF) as u16 > 0xFF;
+                let c:bool = (hl & 0xFFFF) as u32 + (reg & 0xFFFF) as u32 > 0xFFFF;
+                self.f |= if c { 1 } else { 0 };
+                self.f |= if h { 1 } else { 0 };
+                self.set_hl(result);
+                true
+            },
+
             Instruction::Call { cond } => {
                 match self.instruction_step {
                     1 => {
@@ -473,14 +509,15 @@ impl GameBoyCpu {
                         false
                     }
                     3 => {
-                        self.push(bus, (self.pc >> 8) as u8);
+                        bus.idle_cycle();
                         false
                     }
                     4 => {
-                        self.push(bus, (self.pc & 0xFF) as u8);
+                        self.push(bus, (self.pc >> 8) as u8);
                         false
                     }
                     _ => {
+                        self.push(bus, (self.pc & 0xFF) as u8);
                         let target = ((self.current_msb as u16)<< 8) | (self.current_lsb as u16);
                         self.pc = target;
                         true
@@ -519,6 +556,7 @@ impl GameBoyCpu {
                         true
                     }                
                 } else {
+                    bus.idle_cycle();
                     true
                 }
             }
@@ -527,6 +565,7 @@ impl GameBoyCpu {
                 let val = self.read_reg16(dst);
                 let res = val.wrapping_add(1);
                 self.write_reg16(dst, res);
+                bus.idle_cycle();
                 true
             }
 
@@ -539,12 +578,14 @@ impl GameBoyCpu {
                         let res = self.current_value.wrapping_sub(1);
                         let mut f = (self.f & FLAG_C) | FLAG_N;
                         if res == 0 { f |= FLAG_Z; }
-                        if self.current_value & 0xF0 == 0 { f |= FLAG_H; }
+                        if self.current_value & 0x0F == 0 { f |= FLAG_H; }
                         self.f = f;
                         bus.write(self.hl(), res);
                         true
                     }                
                 } else {
+                    println!("DecReg execute microstep dst is not MemHL");
+                    bus.idle_cycle();
                     true
                 }
             }
@@ -553,8 +594,31 @@ impl GameBoyCpu {
                 let val = self.read_reg16(dst);
                 let res = val.wrapping_sub(1);
                 self.write_reg16(dst, res);
+                bus.idle_cycle();
                 true
             }
+
+            Instruction::Interrupt { vector } => {
+                match self.instruction_step {
+                    1 => {
+                        bus.idle_cycle(); // M2: Internal setup cycle
+                        false
+                    }
+                    2 => {
+                        self.push(bus, (self.pc >> 8) as u8); // M3: Push High PC byte
+                        false
+                    }
+                    3 => {
+                        self.push(bus, (self.pc & 0xFF) as u8); // M4: Push Low PC byte
+                        false
+                    }
+                    _ => {
+                        bus.idle_cycle();
+                        self.pc = vector; // M5: Jump to Interrupt Vector
+                        true // Done, resets instruction_step to 0
+                    }
+                }
+            },
 
             Instruction::Jp { cond } => {
                 match self.instruction_step {
@@ -572,6 +636,7 @@ impl GameBoyCpu {
                         false
                     }
                     _ => {
+                        bus.idle_cycle();
                         let target = ((self.current_msb as u16)<< 8) | (self.current_lsb as u16);
                         self.pc = target;
                         true
@@ -591,12 +656,128 @@ impl GameBoyCpu {
                         false
                     }
                     _ => {
+                        bus.idle_cycle();
                         let offset = self.current_lsb as i8;
                         self.pc = self.pc.wrapping_add_signed(offset as i16);
                         true
                     }
                 }
             }
+
+            Instruction::LdAcc|Instruction::LdhAcc => {
+                match self.instruction_step {
+                    1 => {
+                        self.current_lsb = self.fetch_byte(bus);
+                        false
+                    }
+
+                    2 => {
+                        if self.current == Instruction::LdhAcc {
+                            let addr:u16 = 0xFF00 | (self.current_lsb as u16);
+                            let value:u8 = bus.read(addr);
+                            self.a = value;
+                            return true;
+                        }
+                        self.current_msb = self.fetch_byte(bus);
+                        false
+                    }
+
+                    _ => {
+                        let addr:u16 = ((self.current_msb as u16) << 8) | (self.current_lsb as u16);
+                        let value:u8 = bus.read(addr);
+                        self.a = value;
+                        true
+                    }
+                }
+            },
+
+            Instruction::LdFromAcc|Instruction::LdhFromAcc => {
+                match self.instruction_step {
+                    1 => {
+                        self.current_lsb = self.fetch_byte(bus);
+                        false
+                    }
+
+                    2 => {
+                        if self.current == Instruction::LdhFromAcc {
+                            let addr = 0xFF00 | (self.current_lsb as u16);
+                            bus.write(addr, self.a);
+                            return true;
+                        }
+                        self.current_msb = self.fetch_byte(bus);
+                        false
+                    }
+
+                    _ => {
+                        let addr = ((self.current_msb as u16) << 8) | (self.current_lsb as u16);
+                        bus.write(addr, self.a);
+                        true
+                    }
+                }
+            },
+
+            Instruction::LdAR16Mem { src } => {
+                let addr:u16 = self.get_reg16_addr(src);
+                self.a = bus.read(addr);
+                if src == Reg16Mem::HLI {
+                    let hl:u16 = self.hl();
+                    self.set_hl(hl.wrapping_add(1));
+                } 
+                else if src == Reg16Mem::HLD {
+                    let hl:u16 = self.hl();
+                    self.set_hl(hl.wrapping_sub(1));
+                }
+                true
+            },
+
+            Instruction::LdHlSp => {
+                match self.instruction_step {
+                    1 => {
+                        self.current_lsb = self.fetch_byte(bus); // Fetch signed byte e8
+                        false
+                    }
+                    _ => {
+                        bus.idle_cycle(); // M3: Internal 16-bit calculation cycle
+                        let raw_e8 = self.current_lsb as u16;
+                        let sp = self.sp;
+                        let res = sp.wrapping_add_signed(self.current_lsb as i8 as i16);
+            
+                        // Calculate H and C flags based on lower byte addition
+                        let h = (sp & 0x0F) + (raw_e8 & 0x0F) > 0x0F;
+                        let c = (sp & 0xFF) + (raw_e8 & 0xFF) > 0xFF;
+            
+                        self.f = (if h { FLAG_H } else { 0 }) | (if c { FLAG_C } else { 0 }); // Z=0, N=0
+                        self.set_hl(res);
+                        true
+                    }
+                }
+            },
+
+            Instruction::LdhCIndA => {
+                let addr:u16 = 0xFF00 | self.c as u16;
+                bus.write(addr, self.a);
+                true
+            },
+
+            Instruction::LdSpHl => {
+                bus.idle_cycle();
+                self.sp = self.hl();
+                true
+            },
+
+            Instruction::LdR16MemA { dst } => {
+                let addr:u16 = self.get_reg16_addr(dst);
+                bus.write(addr, self.a);
+                if dst == Reg16Mem::HLI {
+                    let hl:u16 = self.hl();
+                    self.set_hl(hl.wrapping_add(1));
+                }
+                if dst == Reg16Mem::HLD {
+                    let hl:u16 = self.hl();
+                    self.set_hl(hl.wrapping_sub(1));
+                }
+                true
+            },
 
             Instruction::LdRegReg { dst, src } => {
                 if src == Reg::MemHL {
@@ -666,7 +847,7 @@ impl GameBoyCpu {
 
             Instruction::Push { dst } => {
                 match self.instruction_step {
-                    1 => false,
+                    1 => { bus.idle_cycle(); false },
                     2 => {
                         self.push(bus, (self.read_reg16_stk(dst) >> 8) as u8);
                         false
@@ -682,6 +863,7 @@ impl GameBoyCpu {
                 match cond {
                     None => match self.instruction_step {
                         1 => {
+                            println!("return: unconditional");
                             self.current_lsb = self.pop(bus);
                             false
                         }
@@ -690,12 +872,15 @@ impl GameBoyCpu {
                             false
                         }
                         _ => {
+                            bus.idle_cycle();
                             self.pc = ((self.current_msb as u16) << 8) | (self.current_lsb as u16);
                             true
                         }
                     },
                     Some(c) => match self.instruction_step {
                         1 => {
+                            println!("conditional return");
+                            bus.idle_cycle();
                             if !self.check_condition(c) {
                                 return true;
                             }
@@ -711,6 +896,7 @@ impl GameBoyCpu {
                         }
 
                         _ => {
+                            bus.idle_cycle();
                             let target = ((self.current_msb as u16)<< 8) | (self.current_lsb as u16);
                             self.pc = target;
                             true
@@ -730,14 +916,54 @@ impl GameBoyCpu {
                         false
                     }
                     _ => {
-                        self.pc = (self.current_msb as u16) >> 8 | (self.current_lsb as u16);
+                        bus.idle_cycle();
+                        self.pc = (self.current_msb as u16) << 8 | (self.current_lsb as u16);
                         self.ime = true;
                         true
                     }
                 }
             }
+            Instruction::Rst { addr } => {
+                match self.instruction_step {
+                    1 => {
+                        bus.idle_cycle();
+                        false
+                    },
 
-            _ => true,
+                    2 => {
+                        self.push(bus, (self.pc >> 8) as u8);
+                        false
+                    },
+
+                    _ => {
+                        self.push(bus, (self.pc & 0xFF) as u8);
+                        self.pc = addr;
+                        true
+                    },
+                }
+            }
+
+            Instruction::Stop => {
+                // CGB speed switch. if KEY1 bit 0 is set, toggle double speed mode
+                // Need to implement glitch case later to pass certain test roms.
+                // if interrupt pending and no speed switch is armed, STOP behaves as
+                // one-byte instruction. Following byte executes as opcode.
+                bus.reset_div();
+                let speed_armed = bus.read(0xFF4D) & 0x01 != 0;
+                if speed_armed && self.variant == GbVariant::Cgb {
+                    bus.perform_speed_switch();        // toggles CPU divider, clears KEY1 bit 0
+                    self.pc = self.pc.wrapping_add(1); // consume the second byte
+                } else {
+                    self.stopped = true;               // DMG low-power; wake on joypad
+                    self.pc = self.pc.wrapping_add(1);
+                }
+                true
+            }
+
+            _ => {
+                bus.idle_cycle(); 
+                true
+            }
         }
     }
 
@@ -748,6 +974,10 @@ impl GameBoyCpu {
                 let dst = Reg16::from_index((op >> 4) & 3);
                 Instruction::LdReg16Imm { dst }
             },
+            0x02 => {
+                let dst = Reg16Mem::BC;
+                Instruction::LdR16MemA { dst }
+            }
             0x03|0x13|0x23|0x33 => {
                 let dst = Reg16::from_index((op >> 4) & 3);
                 Instruction::IncReg16 { dst }
@@ -764,15 +994,53 @@ impl GameBoyCpu {
                 let dst = Reg::from_index((op >> 3) & 7);
                 Instruction::LdRegImm { dst }
             },
+            0x07 => Instruction::Rlca,
+            0x09 => Instruction::AddHlReg16 { src: Reg16::BC },
+            0x0A => {
+                let src = Reg16Mem::BC;
+                Instruction::LdAR16Mem { src }
+            },
             0x0B|0x1B|0x2B|0x3B => {
                 let dst = Reg16::from_index((op >> 4) & 3);
                 Instruction::DecReg16 { dst }
             },
+            0x0F => Instruction::Rrca,
+            0x10 => Instruction::Stop,
+            0x12 => {
+                let dst = Reg16Mem::DE;
+                Instruction::LdR16MemA { dst }
+            }
+            0x17 => Instruction::Rla,
             0x18 => Instruction::Jr { cond: None },
+            0x19 => Instruction::AddHlReg16 { src: Reg16::DE },
+            0x1A => {
+                let src = Reg16Mem::DE;
+                Instruction::LdAR16Mem { src }
+            },
+            0x1F => Instruction::Rra,
             0x20|0x28|0x30|0x38 => Instruction::Jr {
                 cond: Some(Condition::from_index((op >> 3) & 3)),
             },
+            0x22 => {
+                let dst = Reg16Mem::HLI;
+                Instruction::LdR16MemA { dst }
+            }
             0x27 => Instruction::Daa,
+            0x29 => Instruction::AddHlReg16 { src: Reg16::HL },
+            0x2A => {
+                let src = Reg16Mem::HLI;
+                Instruction::LdAR16Mem { src }
+            },
+            0x2F => Instruction::Cpl,
+            0x32 => {
+                let dst = Reg16Mem::HLD;
+                Instruction::LdR16MemA { dst }
+            }
+            0x39 => Instruction::AddHlReg16 { src: Reg16::SP },
+            0x3A => {
+                let src = Reg16Mem::HLD;
+                Instruction::LdAR16Mem { src }
+            },
             0x76 => Instruction::Halt,   
             0x40..=0x7F => {
                 let dst = Reg::from_index((op >> 3) & 7);
@@ -806,20 +1074,35 @@ impl GameBoyCpu {
                 Instruction::Push { dst }
             },
             0xC6 => Instruction::AluImm { op: AluOp::Add },
+            0xC7 => Instruction::Rst { addr: 0x0000 },
             0xC9 => Instruction::Ret { cond: None },
             0xCB => Instruction::CbPrefix,
             0xCD => Instruction::Call { cond: None },
             0xCE => Instruction::AluImm { op: AluOp::Adc },
+            0xCF => Instruction::Rst { addr: 0x0008 },
             0xD6 => Instruction::AluImm { op: AluOp::Sub },
+            0xD7 => Instruction::Rst { addr: 0x0010 },
             0xD9 => Instruction::Reti,
             0xDE => Instruction::AluImm { op: AluOp::Sbc },
+            0xDF => Instruction::Rst { addr: 0x0018 },
+            0xE0 => Instruction::LdhFromAcc,
+            0xE2 => Instruction::LdhCIndA,
             0xE6 => Instruction::AluImm { op: AluOp::And },
+            0xE7 => Instruction::Rst { addr: 0x0020 },
             0xE9 => Instruction::JpHl,
+            0xEA => Instruction::LdFromAcc,
             0xEE => Instruction::AluImm { op: AluOp::Xor },
+            0xEF => Instruction::Rst { addr: 0x0028 },
+            0xF0 => Instruction::LdhAcc,
             0xF3 => Instruction::DI,
             0xF6 => Instruction::AluImm { op: AluOp::Or  },
+            0xF7 => Instruction::Rst { addr: 0x0030 },
+            0xF8 => Instruction::LdHlSp,
+            0xF9 => Instruction::LdSpHl,
+            0xFA => Instruction::LdAcc,
             0xFB => Instruction::EI,
             0xFE => Instruction::AluImm { op: AluOp::Cp  },
+            0xFF => Instruction::Rst { addr: 0x0038 },
             _ => todo!("opcode {:02X}", op),
         }
     }
@@ -870,16 +1153,19 @@ impl GameBoyCpu {
         Some(result)
     }
 
-    fn service_interrupt(&mut self, bus: &mut dyn Bus) -> bool {
+    fn check_interrupts(&mut self, bus: &mut dyn Bus) -> bool {
         if !self.ime { return false; }
         let pending = bus.irq_pending();
-        if pending == 0 { self.halted = false; return false; }
+        if pending == 0 { return false; }
 
         let index = pending.trailing_zeros() as u8;
         let vector = 0x0040 + (index as u16) * 8;
         self.ime = false;
         bus.ack_irq(index);
-        self.pc = vector;
+        
+        bus.idle_cycle();
+        self.current = Instruction::Interrupt { vector };
+        self.instruction_step = 1;
         true
     }
 
@@ -937,6 +1223,14 @@ impl GameBoyCpu {
             Reg16Stk::DE => self.set_de(v),
             Reg16Stk::HL => self.set_hl(v),
             Reg16Stk::AF => self.set_af(v), // set_af automatically masks lower 4 bits of F to 0
+        }
+    }
+
+    fn get_reg16_addr(&mut self, rr: Reg16Mem) -> u16 {
+        match rr {
+            Reg16Mem::BC => self.bc(),
+            Reg16Mem::DE => self.de(),
+            _ => self.hl(),
         }
     }
     

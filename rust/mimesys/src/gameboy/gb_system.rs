@@ -1,5 +1,6 @@
-use crate::gameboy::gb_cpu::{GameBoyCpu,GbVariant};
+use crate::gameboy::gb_cpu::GameBoyCpu;
 use crate::gameboy::gb_bus::GameBoyBus;
+use crate::gameboy::gb_common::GbVariant;
 use crate::gameboy::gb_cartridge::{GbCartridge, CartType};
 use crate::gameboy::gb_mbc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,11 +9,14 @@ use std::sync::{Arc, Mutex};
 pub struct GbSystem {
     pub cpu: GameBoyCpu,
     pub bus: GameBoyBus,
-    pub frame_ready: Arc<AtomicBool>,
+    pub slice_complete: bool,
+    pub frame_published: Arc<AtomicBool>,
     pub is_running: Arc<AtomicBool>,
     pub save_battery_path: String,
     pub save_state_path: String,
     pub save_filename: String,
+    pub current_frame: u64,
+    pub cgb_mode: bool,
 }
 
 impl GbSystem {
@@ -29,7 +33,12 @@ impl GbSystem {
 
         let prg_rom = bytes[prg_start..prg_end].to_vec();
         let cart_ram = if cart_ram_size > 0 { vec![0; cart_ram_size] } else { vec![] };
-
+        let color_gb = bytes[0x143];
+        let variant = if color_gb == 0x80 || color_gb == 0xC0 {
+            GbVariant::Cgb
+        } else {
+            GbVariant::Dmg
+        };
         // initialize the mapper
         let mbc = gb_mbc::make_mbc(cart_type.mbc_id, prg_rom.clone(), cart_ram.clone());
         //{
@@ -43,20 +52,22 @@ impl GbSystem {
         // initialize cartridge and bus
         let cartridge = GbCartridge::new(prg_rom, cart_ram, mbc?, base_name.to_string());
         println!("Cartridge created: {0}", cartridge.base_filename);
-        let bus = GameBoyBus::new(cartridge, Arc::clone(&frame_ready));
+        let bus = GameBoyBus::new(variant, cartridge, Arc::clone(&frame_ready));
         println!("prg_rom size: {prg_rom_size} ");
         println!("cart ram size: {cart_ram_size} ");
 
         Ok( {
             Self {
                 bus,
-                cpu: GameBoyCpu::new(GbVariant::Dmg),
+                cpu: GameBoyCpu::new(variant),
                 save_filename: base_name.to_string(),
-                frame_ready,
+                slice_complete: false, cgb_mode: false,
                 // todo: different path for gameboy color?
                 save_battery_path: "user://GD_EMU/Gb/Save".to_string(),
                 save_state_path: "user://GD_EMU/Gb/State".to_string(),
                 is_running: Arc::new(AtomicBool::new(false)),
+                current_frame: 0,
+                frame_published: frame_ready,
             }
         })
     }
@@ -75,13 +86,26 @@ impl GbSystem {
 
     fn determine_mbc(cart_type_code: u8) -> CartType {
         match cart_type_code {
-            0 => CartType {mbc_id: 0, has_battery: false},
-            _ => CartType {mbc_id: 0, has_battery: false},
+            0 => CartType { mbc_id: 0, has_battery: false },
+            1|2|7|8 => CartType { mbc_id: 1, has_battery: false },
+            3 => CartType { mbc_id: 1, has_battery: true },
+            5 => CartType { mbc_id: 2, has_battery: false },
+            6 => CartType { mbc_id: 2, has_battery: true },
+            9 => CartType { mbc_id: 0, has_battery: true },
+            0x0F|0x11|0x12 => CartType { mbc_id: 3, has_battery: false },
+            0x10|0x13 => CartType { mbc_id: 3, has_battery: true },
+
+            _ => CartType { mbc_id: 0, has_battery: false },
         }
     }
 
-    pub fn run_frame(&mut self) {
-
+    pub fn run_frame(&mut self, input: u8) {
+        unsafe { (*self.bus.ppu.get()).clear_slice_complete_flag() };
+        self.current_frame = self.current_frame.wrapping_add(1);
+        self.set_input(input);
+        while !unsafe { (*self.bus.ppu.get()).is_slice_complete() } {
+            self.tick();
+        }
     }
 
     pub fn framebuffer(&self) -> Vec<u8> {

@@ -6,6 +6,7 @@ mod gb_system;
 mod gb_bus;
 mod gb_mbc;
 mod gb_cartridge;
+mod gb_common;
 mod gb_apu;
 mod gb_ppu;
 mod gb_timer;
