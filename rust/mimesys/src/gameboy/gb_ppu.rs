@@ -28,6 +28,7 @@ pub struct GbPPU {
     ly: u8,
     pub vram: Vec<u8>,
     pub oam: [u8; 160],
+    scanline_bg_indices: [u8; 160],
     // --- Video Buffers ---
     // Double buffering prevents the UI thread from reading half-rendered frames!
     back_buffer: Vec<u8>,       // The frame currently being drawn (Width * Height * 4 bytes RGBA)
@@ -52,7 +53,7 @@ impl GbPPU {
             last_master: 0, ticks: 0,
             dot: 0, current_mode: 0,
             pending_irqs: 0,
-            vram: vec![0;vram_size], oam: [0;160],
+            vram: vec![0;vram_size], oam: [0;160], scanline_bg_indices: [0; 160],
             back_buffer: vec![0; buffer_size],
             front_buffer: Arc::new(Mutex::new(vec![0; buffer_size])),
             frame_published, slice_complete: false,
@@ -77,7 +78,7 @@ impl GbPPU {
             last_master: 0, ticks: 0,
             dot: 0, current_mode: 0,
             pending_irqs: 0,
-            vram: vec![0;vram_size], oam: [0;160],
+            vram: vec![0;vram_size], oam: [0;160], scanline_bg_indices: [0; 160],
             back_buffer: vec![0; buffer_size],
             front_buffer: Arc::new(Mutex::new(vec![0; buffer_size])),
             frame_published, slice_complete: false,
@@ -240,7 +241,9 @@ impl GbPPU {
 
             let tile_map_bit = if is_win_pixel { 0x40 } else { 0x08 };
             let tile_map_base = if (self.lcdc & tile_map_bit) != 0 { 0x1C00 } else { 0x1800 };
-            let fetch_x = if is_win_pixel { x - win_x } else { (x + self.scx) & 0xFF };
+            // attempt to add with overflow.
+            let temp_x = x.wrapping_add(self.scx);
+            let fetch_x = if is_win_pixel { x - win_x } else { (temp_x) & 0xFF };
             let fetch_y = if is_win_pixel { self.window_line_counter } else { (self.ly.wrapping_add(self.scy)) & 0xFF };
 
             let tile_row = fetch_y / 8;
@@ -258,11 +261,9 @@ impl GbPPU {
             let bit0 = (byte1 >> bit_idx) & 0x01;
             let bit1 = (byte2 >> bit_idx) & 0x01;
             let color_idx = (bit1 << 1) | bit0;
-
-            // TODO: store background indices for checking sprite priority 
+            self.scanline_bg_indices[x as usize] = color_idx;
             let color: u32 = self._apply_palette(color_idx, self.bgp);
             let base_idx: usize = (self.ly as usize * 160 + x as usize) * 4;
-
             self.back_buffer[base_idx]     = (color >> 16) as u8 & 0xFF;    // R
             self.back_buffer[base_idx + 1] = (color >> 8) as u8 & 0xFF; // G
             self.back_buffer[base_idx + 2] = color as u8 & 0xFF;        // B
@@ -297,6 +298,58 @@ impl GbPPU {
         if (self.lcdc & 0x02) == 0 {
             return;
         }
+        let mut sprites = self._get_active_sprites();
+        let sprite_16 = (self.lcdc & 0x04) != 0;
+        let sprite_height = if sprite_16 { 16 } else { 8 };
+        sprites.reverse();
+    }
+
+    fn _get_active_sprites(&self) -> Vec<usize> {
+        let oam = &self.oam;
+        let lcdc = self.lcdc;
+        let ly:u16 = self.ly as u16;
+        let sprite_height = if (lcdc & 0x04) != 0 { 16 } else { 8 };
+        let mut active_sprites: Vec<usize> = Vec::with_capacity(10);
+
+        // Iterate through all 40 potential sprites in OAM
+        for i in 0..40 {
+            let oam_addr = i * 4;
+        
+            // Bounds check in case oam slice is smaller than expected (though OAM is always 160 bytes)
+            if oam_addr + 1 >= oam.len() {
+                break;
+            }
+
+            let oam_y = oam[oam_addr] as u16;
+
+            // Game Boy hardware visibility check:
+            // Sprite is visible if: OAM_Y <= current_line + 16 < OAM_Y + sprite_height
+            // Note: OAM Y=0 is hidden on real hardware, but logic below handles the range check.
+            let scanline_offset = (ly + 16).saturating_sub(oam_y);
+
+            if scanline_offset < sprite_height {
+                active_sprites.push(i);
+            
+                // Hardware limit: only 10 sprites per scanline
+                if active_sprites.len() == 10 {
+                    break;
+                }
+            }
+        }
+
+        // Sort by X coordinate (ascending), then by OAM index (ascending) for priority
+        // Closures capture 'oam' by reference (&)
+        active_sprites.sort_by(|&a, &b| {
+            let x_a = oam[a * 4 + 1];
+            let x_b = oam[b * 4 + 1];
+        
+            // Compare X coordinates
+            x_a.cmp(&x_b)
+                // If X is equal, compare indices (lower index = higher priority)
+                .then_with(|| a.cmp(&b))
+        });
+
+        active_sprites
     }
 
     pub fn read_register(&mut self, p_addr: u16) -> u8 {

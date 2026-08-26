@@ -33,6 +33,7 @@ pub struct GameBoyBus {
     pub pad1_state: u8,
     pub pad1_shift_reg: Cell<u8>,
     pub pad_strobe: bool,
+    joyp_reg: u8,
     serial_data_buffer: u8,
     serial_control: u8,
     last_master: u64,
@@ -62,6 +63,7 @@ impl GameBoyBus {
             pad1_state: 0,
             pad1_shift_reg: Cell::new(0),
             pad_strobe: false,
+            joyp_reg: 0x30,
             serial_data_buffer: 0,
             serial_control: 0,
             master: 0,
@@ -89,18 +91,49 @@ impl GameBoyBus {
         self.double_speed
     }
 
+    fn _read_io(&mut self, addr: u16) -> u8 {
+        match addr {
+            0xFF00 => {
+                return 0xC0 | self.joyp_reg | self.pad1_state;
+            },
+            0xFF01 => self.serial_data_buffer,
+            0xFF02 => self.serial_control | 0x7E,
+            0xFF04..=0xFF07 => unsafe { (*self.timer.get()).read(addr) }
+            0xFF0F => self.iflags | 0xE0,
+            0xFF40..=0xFF4B | 0xFF4F => unsafe { (*self.ppu.get()).read_register(addr) },
+            _ => self.open_bus,
+        }
+    }
+
+    fn _write_io(&mut self, addr: u16, value: u8) {
+        match addr {
+            0xFF00 => {
+                self.joyp_reg = value & 0x30;
+                // write joypad
+            },
+            0xFF01 => { self.serial_data_buffer = value; },
+            0xFF02 => {
+                self.serial_control = value;
+                // serial_transfer_pending. set cycles to 0
+            },
+            0xFF04..=0xFF07 => {
+                unsafe { (*self.timer.get()).write(addr, value) }
+            },
+            0xFF0F => self.iflags = value & 0x1F,
+            // APU range $FF10-$FF3F
+            // Wave RAM  $FF30-$FF3F
+            0xFF40..=0xFF4B | 0xFF4F => unsafe { (*self.ppu.get()).write_register(addr, value) },
+            _ => { }
+        }
+    }
+
     fn read_inner(&mut self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x7FFF | 0xA000..=0xBFFF => unsafe { (*self.cartridge.mbc.get()).read(addr) },
             0x8000..=0x9FFF => unsafe { (&(*self.ppu.get()).vram)[(addr & 0x1FFF) as usize] },
             0xC000..=0xFDFF => self.ram[(addr & 0x1FFF) as usize], // WRAM & Echo RAM
             0xFE00..=0xFE9F => unsafe { (*self.ppu.get()).oam[(addr & 0xFF) as usize] },
-            0xFF00..=0xFF7F => match addr {
-                0xFF0F => self.iflags | 0xE0,
-                0xFF40..=0xFF4B | 0xFF4F => unsafe { (*self.ppu.get()).read_register(addr) },
-                // ... Add Timer (0xFF04..=0xFF07), Joypad (0xFF00)
-                _ => self.open_bus,
-            },
+            0xFF00..=0xFF7F => return self._read_io(addr),
             0xFF80..=0xFFFE => self.hram[(addr & 0x7F) as usize],
             0xFFFF => self.ie,
             _ => 0xFF
@@ -113,18 +146,7 @@ impl GameBoyBus {
             0x8000..=0x9FFF => unsafe { (&mut (*self.ppu.get()).vram)[(addr & 0x1FFF) as usize] = value },
             0xC000..=0xFDFF => self.ram[(addr & 0x1FFF) as usize] = value,
             0xFE00..=0xFE9F => unsafe { (*self.ppu.get()).oam[(addr & 0xFF) as usize] = value },
-            0xFF00..=0xFF7F => match addr {
-                0xFF01 => self.serial_data_buffer = value,
-                0xFF02 => {
-                    self.serial_control = value;
-                    if (value & 0x80) != 0 {
-
-                    }
-                },
-                0xFF0F => self.iflags = value & 0x1F,
-                0xFF40..=0xFF4B | 0xFF4F => unsafe { (*self.ppu.get()).write_register(addr, value) },
-                _ => {},
-            },
+            0xFF00..=0xFF7F => self._write_io(addr, value),
             0xFF80..=0xFFFE => self.hram[(addr & 0x7F) as usize] = value,
             0xFFFF => self.ie = value,
             _ => { }

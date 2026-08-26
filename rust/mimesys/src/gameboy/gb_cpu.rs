@@ -95,6 +95,7 @@ enum Instruction {
     Call       { cond: Option<Condition> },
     CbPrefix,
     Cb(CbInstruction),
+    Ccf,
     Cpl,
     Daa,       // Decimal Adjust Accumulator
     DecReg16   { dst: Reg16 },
@@ -114,7 +115,9 @@ enum Instruction {
     LdFromAcc,
     LdhFromAcc,
     LdHlSp,
+    LdFromSp,
     LdSpHl,
+    LdAIndC,
     LdhCIndA,
     LdRegMem   { dst: Reg },
     LdR16MemA  { dst: Reg16Mem },
@@ -128,6 +131,7 @@ enum Instruction {
     Rra,
     Rrca,
     Rst        { addr: u16 },
+    Scf,
     Stop,
     Unknown(u8),
 }
@@ -326,6 +330,12 @@ impl GameBoyCpu {
 
             Instruction::Call { .. } => false,
 
+            Instruction::Ccf => {
+                self.f ^= FLAG_C;
+                self.f &= !FLAG_N | !FLAG_H;
+                true
+            }
+
             Instruction::Daa => {
                 let mut a = self.a;
                 let mut adjust = 0;
@@ -404,9 +414,11 @@ impl GameBoyCpu {
             Instruction::LdR16MemA { .. } => false,
             Instruction::LdAR16Mem { .. } => false,
             Instruction::LdHlSp|Instruction::LdSpHl => false,
+            Instruction::LdAIndC => false,
             Instruction::LdhCIndA => false,
             Instruction::LdFromAcc|Instruction::LdAcc => false,
             Instruction::LdhFromAcc|Instruction::LdhAcc => false,
+            Instruction::LdFromSp => false,
             // LD r, r' with both operands registers: 1 M-cycle
             // if either side is (HL), need a memory access
             Instruction::LdRegReg { dst, src } => {
@@ -465,6 +477,11 @@ impl GameBoyCpu {
                 true
             }
             Instruction::Rst { .. } => false,
+            Instruction::Scf => {
+                self.f |= FLAG_C;
+                self.f &= !FLAG_N | !FLAG_H;
+                true
+            }
             Instruction::Stop => false,
             Instruction::Unknown(op) => panic!("Unimplemented opcode {:02X}", op),
             _ => { todo!("need to handle all instructions"); },
@@ -484,11 +501,11 @@ impl GameBoyCpu {
                 bus.idle_cycle();
                 let hl = self.hl();
                 let result = hl.wrapping_add(reg);
-                self.f &= !FLAG_N;
-                let h:bool = (hl & 0xFF) as u16 + (reg & 0xFF) as u16 > 0xFF;
-                let c:bool = (hl & 0xFFFF) as u32 + (reg & 0xFFFF) as u32 > 0xFFFF;
-                self.f |= if c { 1 } else { 0 };
-                self.f |= if h { 1 } else { 0 };
+
+                let h:bool = (hl & 0x0FFF) as u32 + (reg & 0x0FFF) as u32 > 0x0FFF;
+                let c:bool = (hl as u32) + (reg as u32) > 0xFFFF;
+                self.f = (self.f & FLAG_Z) | if h { FLAG_H } else { 0 }
+                    | if c { FLAG_C } else { 0 };
                 self.set_hl(result);
                 true
             },
@@ -716,6 +733,30 @@ impl GameBoyCpu {
                 }
             },
 
+            Instruction::LdFromSp => {
+                match self.instruction_step {
+                    1 => {
+                        self.current_lsb = self.fetch_byte(bus);
+                        false
+                    }
+                    2 => {
+                        self.current_msb = self.fetch_byte(bus);
+                        false
+                    }
+                    3 => {
+                        let addr:u16 = (self.current_msb as u16) << 8 | self.current_lsb as u16;
+                        bus.write(addr, self.sp as u8);
+                        self.current_msb = self.current_msb.wrapping_add(1);
+                        false
+                    }
+                    _ => {
+                        let addr:u16 = (self.current_msb as u16) << 8 | self.current_lsb as u16;
+                        bus.write(addr, (self.sp >> 8) as u8);
+                        true
+                    }
+                }
+            },
+
             Instruction::LdAR16Mem { src } => {
                 let addr:u16 = self.get_reg16_addr(src);
                 self.a = bus.read(addr);
@@ -756,6 +797,13 @@ impl GameBoyCpu {
             Instruction::LdhCIndA => {
                 let addr:u16 = 0xFF00 | self.c as u16;
                 bus.write(addr, self.a);
+                true
+            },
+
+            Instruction::LdAIndC => {
+                let addr: u16 = 0xFF00 | self.c as u16;
+                let value:u8 = bus.read(addr);
+                self.a = value;
                 true
             },
 
@@ -863,7 +911,6 @@ impl GameBoyCpu {
                 match cond {
                     None => match self.instruction_step {
                         1 => {
-                            println!("return: unconditional");
                             self.current_lsb = self.pop(bus);
                             false
                         }
@@ -879,7 +926,6 @@ impl GameBoyCpu {
                     },
                     Some(c) => match self.instruction_step {
                         1 => {
-                            println!("conditional return");
                             bus.idle_cycle();
                             if !self.check_condition(c) {
                                 return true;
@@ -995,6 +1041,7 @@ impl GameBoyCpu {
                 Instruction::LdRegImm { dst }
             },
             0x07 => Instruction::Rlca,
+            0x08 => Instruction::LdFromSp,
             0x09 => Instruction::AddHlReg16 { src: Reg16::BC },
             0x0A => {
                 let src = Reg16Mem::BC;
@@ -1036,11 +1083,13 @@ impl GameBoyCpu {
                 let dst = Reg16Mem::HLD;
                 Instruction::LdR16MemA { dst }
             }
+            0x37 => Instruction::Scf,
             0x39 => Instruction::AddHlReg16 { src: Reg16::SP },
             0x3A => {
                 let src = Reg16Mem::HLD;
                 Instruction::LdAR16Mem { src }
             },
+            0x3F => Instruction::Ccf,
             0x76 => Instruction::Halt,   
             0x40..=0x7F => {
                 let dst = Reg::from_index((op >> 3) & 7);
@@ -1094,6 +1143,7 @@ impl GameBoyCpu {
             0xEE => Instruction::AluImm { op: AluOp::Xor },
             0xEF => Instruction::Rst { addr: 0x0028 },
             0xF0 => Instruction::LdhAcc,
+            0xF2 => Instruction::LdAIndC,
             0xF3 => Instruction::DI,
             0xF6 => Instruction::AluImm { op: AluOp::Or  },
             0xF7 => Instruction::Rst { addr: 0x0030 },
