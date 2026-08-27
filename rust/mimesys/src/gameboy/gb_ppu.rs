@@ -300,8 +300,85 @@ impl GbPPU {
         }
         let mut sprites = self._get_active_sprites();
         let sprite_16 = (self.lcdc & 0x04) != 0;
+
         let sprite_height = if sprite_16 { 16 } else { 8 };
-        sprites.reverse();
+        //sprites.reverse();
+
+        for sprite_idx in sprites.iter().rev() {
+            let oam_base:usize = *sprite_idx as usize * 4;
+            let oam_y = self.oam[oam_base];
+            let x_pos = self.oam[oam_base + 1] - 8;
+            let tile_id = self.oam[oam_base + 2];
+            let attributes = self.oam[oam_base + 3];
+
+            let raw_line = (self.ly + 16) - oam_y;
+
+            let x_flip = (attributes & 0x20) != 0;
+            let y_flip = (attributes & 0x40) != 0;
+            let priority = (attributes & 0x80) != 0;
+            let palette = if attributes & 0x10 != 0 { self.obp1 } else { self.obp0 };
+            let mut tile_data_addr:usize = 0;
+
+            if sprite_height == 16 {
+                let actual_tile_id = tile_id & 0xFE;
+                let mut tile_number = actual_tile_id;
+                let mut tile_line = 0;
+                if !y_flip {
+                    if raw_line < 8 {
+                        tile_number = actual_tile_id;
+                        tile_line = raw_line;
+                    } else {
+                        tile_number = actual_tile_id + 1;
+                        tile_line = raw_line - 8;
+                    }
+                } else { // y-flipped mode. The whole 16-pixel block is upside down.
+                    if raw_line < 8 {
+                        tile_number = actual_tile_id + 1;
+                        tile_line = 7 - raw_line;
+                    } else {
+                        tile_number = actual_tile_id;
+                        tile_line = 7 - (raw_line - 8);
+                    }
+                }
+                tile_data_addr = (tile_id as usize * 16) + (tile_line as usize * 2);
+            } else {   // standard 8x8 sprite mode
+                let tile_line = if y_flip { 7 - raw_line } else { raw_line };
+                tile_data_addr = (tile_id as usize * 16) + (tile_line as usize * 2);
+            }
+
+            let byte1 = self.vram[tile_data_addr];
+            let byte2 = self.vram[tile_data_addr + 1];
+
+            for x in 1..8 {
+                let screen_x = x_pos + x;
+                if screen_x < 0 || screen_x >= 160 {
+                    continue;
+                }
+
+                let bit_idx = if x_flip { x } else { 7 - x };
+                let bit0 = (byte1 >> bit_idx) & 0x01;
+                let bit1 = (byte2 >> bit_idx) & 0x01;
+                let color_idx = (bit1 << 1) | bit0;
+
+                // Color 0 is transparent for sprites
+                if color_idx == 0 {
+                    continue;
+                }
+
+                // Check BG priority
+                let bg_color_idx = self.scanline_bg_indices[screen_x as usize];
+                if priority && bg_color_idx != 0 {
+                    continue;
+                }
+
+                let color = self._apply_palette(color_idx, palette);
+                let base_idx: usize = (self.ly as usize * 160 + screen_x as usize) * 4;
+                self.back_buffer[base_idx]     = (color >> 16) as u8 & 0xFF; // R
+                self.back_buffer[base_idx + 1] = (color >> 8) as u8 & 0xFF;  // G
+                self.back_buffer[base_idx + 2] = color as u8 & 0xFF;         // B
+                self.back_buffer[base_idx + 3] = 0xFF;                       // A
+            }
+        }
     }
 
     fn _get_active_sprites(&self) -> Vec<usize> {

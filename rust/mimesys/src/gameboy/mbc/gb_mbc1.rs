@@ -51,7 +51,9 @@ impl Mbc for Mbc1 {
             return self.prg_rom[offset];
         }
         else if addr >= 0xA000 && addr <= 0xBFFF {
-            return self.cart_ram[(addr - 0xA000) as usize];
+            if self.ram_enabled && self.cart_ram.len() > 0 {
+                return self.cart_ram[(addr - 0xA000) as usize];
+            }
         }
         0xFF
     }

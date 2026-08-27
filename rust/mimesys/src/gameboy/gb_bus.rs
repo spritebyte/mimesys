@@ -91,10 +91,33 @@ impl GameBoyBus {
         self.double_speed
     }
 
+    pub fn read_joyp(&self) -> u8 {
+        // Bits 4 & 5 store the selection lines set by CPU writes to $FF00
+        // Bits 6 & 7 are unused and always read as 1 (0xC0)
+        let select = self.joyp_reg & 0x30;
+        let mut result = select | 0xC0;
+
+        let mut button_bits = 0x0F; // Default: 0xF (no buttons pressed, active-low)
+
+        // Bit 4 = 0: Select Direction Buttons
+        if (select & 0x10) == 0 {
+            let directions = (self.pad1_state >> 4) & 0x0F;
+            button_bits &= !directions;
+        }
+
+        // Bit 5 = 0: Select Action Buttons
+        if (select & 0x20) == 0 {
+            let actions = self.pad1_state & 0x0F;
+            button_bits &= !actions;
+        }
+
+        result | button_bits
+    }
+
     fn _read_io(&mut self, addr: u16) -> u8 {
         match addr {
             0xFF00 => {
-                return 0xC0 | self.joyp_reg | self.pad1_state;
+                return self.read_joyp();
             },
             0xFF01 => self.serial_data_buffer,
             0xFF02 => self.serial_control | 0x7E,
@@ -188,6 +211,10 @@ impl Bus for GameBoyBus {
         self.master += self.access_offset();   // partway into the cycle
         self.run_until(self.master);           // components catch up to here
         let value = self.read_inner(addr);     // the access sees state AT this point
+        if addr == 0xC671 || addr == 0xC672 {
+            println!("read from {:04X} returned val={:02X}", addr, value);
+//            panic!("C671 or C672 write");
+        }
         self.master += self.cycle_len() - self.access_offset();
         self.run_until(self.master);           // finish out the M-cycle
 //        println!("bus read. total cycles now {}", self.master);
@@ -201,6 +228,11 @@ impl Bus for GameBoyBus {
     fn write(&mut self, addr: u16, value: u8) {
         self.master += self.access_offset();
         self.run_until(self.master);
+        if addr == 0xDD00 || addr == 0xDD01 {
+            println!("Write to {:04X}: val={:02X}", addr, value);
+//            panic!("C671 or C672 write");
+        }
+
         self.write_inner(addr, value);
         self.master += self.cycle_len() - self.access_offset();
         self.run_until(self.master);

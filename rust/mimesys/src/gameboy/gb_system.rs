@@ -112,18 +112,22 @@ impl GbSystem {
         Vec::new()
     }
 
+    // Function is setting bits high for pressed, gameboy expects bits to be low for pressed
+    // So reading 0xFF00 needs to invert the result
     pub fn set_input(&mut self, input_mask: u8) {
         let mut gb_pad_state = 0u8;
 
-        // Frontend layout vs Gameboy expected bit positions:
-        if (input_mask & (1 << 5)) != 0 { gb_pad_state |= 1 << 0; } // GDScript A (Bit 5)      -> GB A (Bit 0)
-        if (input_mask & (1 << 4)) != 0 { gb_pad_state |= 1 << 1; } // GDScript B (Bit 4)      -> GB B (Bit 1)
-        if (input_mask & (1 << 6)) != 0 { gb_pad_state |= 1 << 2; } // GDScript Select (Bit 6) -> GB Select (Bit 2)
-        if (input_mask & (1 << 7)) != 0 { gb_pad_state |= 1 << 3; } // GDScript Start (Bit 7)  -> GB Start (Bit 3)
-        if (input_mask & (1 << 0)) != 0 { gb_pad_state |= 1 << 4; } // GDScript Up (Bit 0)     -> GB Up (Bit 4)
-        if (input_mask & (1 << 1)) != 0 { gb_pad_state |= 1 << 5; } // GDScript Down (Bit 1)   -> GB Down (Bit 5)
-        if (input_mask & (1 << 2)) != 0 { gb_pad_state |= 1 << 6; } // GDScript Left (Bit 2)   -> GB Left (Bit 6)
-        if (input_mask & (1 << 3)) != 0 { gb_pad_state |= 1 << 7; } // GDScript Right (Bit 3)  -> GB Right (Bit 7)
+        // Action Buttons (Bits 0..3 -> P10..P13 when P15 is low)
+        if (input_mask & (1 << 5)) != 0 { gb_pad_state |= 1 << 0; } // A      -> Bit 0
+        if (input_mask & (1 << 4)) != 0 { gb_pad_state |= 1 << 1; } // B      -> Bit 1
+        if (input_mask & (1 << 6)) != 0 { gb_pad_state |= 1 << 2; } // Select -> Bit 2
+        if (input_mask & (1 << 7)) != 0 { gb_pad_state |= 1 << 3; } // Start  -> Bit 3
+
+        // Directional Buttons (Bits 4..7 -> P10..P13 when P14 is low)
+        if (input_mask & (1 << 3)) != 0 { gb_pad_state |= 1 << 4; } // Right  -> Bit 4
+        if (input_mask & (1 << 2)) != 0 { gb_pad_state |= 1 << 5; } // Left   -> Bit 5
+        if (input_mask & (1 << 0)) != 0 { gb_pad_state |= 1 << 6; } // Up     -> Bit 6
+        if (input_mask & (1 << 1)) != 0 { gb_pad_state |= 1 << 7; } // Down   -> Bit 7
 
         self.bus.pad1_state = gb_pad_state;
     }
