@@ -104,7 +104,7 @@ enum Instruction {
     Halt,
     IncReg16   { dst: Reg16 },
     IncReg     { dst: Reg },
-    Interrupt  { vector: u16 },
+    Interrupt,
     Jp         { cond: Option<Condition> },
     JpHl,
     Jr         { cond: Option<Condition> },
@@ -218,19 +218,19 @@ impl GameBoyCpu {
     // read at current PC and advance PC - unless halt bug is armed
     // byte gets executed twice in that case.
     fn fetch_byte(&mut self, bus: &mut dyn Bus) -> u8 {
-        let b = bus.read(self.pc);
+        let val = bus.read(self.pc);
         if self.halt_bug {
             self.halt_bug = false;
         } else {
             self.pc = self.pc.wrapping_add(1);
         }
-        b
+        val
     }
 
     fn pop(&mut self, bus: &mut dyn Bus) -> u8 {
-        let b = bus.read(self.sp);
+        let val = bus.read(self.sp);
         self.sp = self.sp.wrapping_add(1);
-        b
+        val
     }
 
     fn push(&mut self, bus: &mut dyn Bus, val: u8) {
@@ -249,7 +249,7 @@ impl GameBoyCpu {
             }
         }
         if self.instruction_step == 0 {
-            if self.check_interrupts(bus) { return; }
+            if !self.cb_prefixed && self.check_interrupts(bus) { return; }
             if self.ime_pending {
                 self.ime = true;
                 self.ime_pending = false;
@@ -643,7 +643,7 @@ impl GameBoyCpu {
                 true
             }
 
-            Instruction::Interrupt { vector } => {
+            Instruction::Interrupt => {
                 match self.instruction_step {
                     1 => {
                         bus.idle_cycle(); // M2: Internal setup cycle
@@ -659,6 +659,27 @@ impl GameBoyCpu {
                     }
                     _ => {
                         bus.idle_cycle();
+                        let pending = bus.irq_pending(); // Reads current (self.ie & self.iflags & 0x1F)
+
+                        let vector = if (pending & 0x01) != 0 {
+                            bus.ack_irq(0);
+                            0x0040 // VBlank
+                        } else if (pending & 0x02) != 0 {
+                            bus.ack_irq(1);
+                            0x0048 // STAT
+                        } else if (pending & 0x04) != 0 {
+                            bus.ack_irq(2);
+                            0x0050 // Timer
+                        } else if (pending & 0x08) != 0 {
+                            bus.ack_irq(3);
+                            0x0058 // Serial
+                        } else if (pending & 0x10) != 0 {
+                            bus.ack_irq(4);
+                            0x0060 // Joypad
+                        } else {
+                            // CANCELED: If IE/IF was cleared by the push, default to $0000
+                            0x0000
+                        };
                         self.pc = vector; // M5: Jump to Interrupt Vector
                         true // Done, resets instruction_step to 0
                     }
@@ -773,13 +794,11 @@ impl GameBoyCpu {
                     }
                     3 => {
                         let addr:u16 = (self.current_msb as u16) << 8 | self.current_lsb as u16;
-                        println!("LdFromSp Low: writing {:02X} to {:04X}", (self.sp & 0xFF) as u8, addr);
                         bus.write(addr, (self.sp & 0xFF) as u8);
                         false
                     }
                     _ => {
                         let addr:u16 = (((self.current_msb as u16) << 8) | (self.current_lsb as u16)).wrapping_add(1);
-                        println!("LdFromSp High: writing {:02X} to {:04X}", (self.sp >> 8) as u8, addr);
                         bus.write(addr, (self.sp >> 8) as u8);
                         true
                     }
@@ -1233,13 +1252,12 @@ impl GameBoyCpu {
         let pending = bus.irq_pending();
         if pending == 0 { return false; }
 
-        let index = pending.trailing_zeros() as u8;
-        let vector = 0x0040 + (index as u16) * 8;
+//        let index = pending.trailing_zeros() as u8;
+//        let vector = 0x0040 + (index as u16) * 8;
         self.ime = false;
-        bus.ack_irq(index);
         
         bus.idle_cycle();
-        self.current = Instruction::Interrupt { vector };
+        self.current = Instruction::Interrupt;
         self.instruction_step = 1;
         true
     }

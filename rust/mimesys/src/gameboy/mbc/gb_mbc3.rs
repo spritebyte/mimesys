@@ -8,7 +8,7 @@ pub struct Mbc3 {
     rom_bank: u8,
     ram_bank: u8,
     ram_enabled: bool,
-    bank_mask: u8,
+    bank_mask: usize,
     // RTC registers and variables
     rtc_register: u8,
     rtc_seconds: u8,
@@ -24,7 +24,8 @@ pub struct Mbc3 {
 
 impl Mbc3 {
     pub fn new(prg_rom: Vec<u8>, cart_ram: Vec<u8>) -> Self {
-        let total_banks = prg_rom.len() / 16384;
+        let total_banks:usize = (prg_rom.len() / 16384).max(1);
+        let bank_mask:usize = total_banks.next_power_of_two() - 1;
 
         Self {
             prg_rom,
@@ -36,7 +37,7 @@ impl Mbc3 {
             rtc_seconds: 0, rtc_minutes: 0, rtc_hours: 0, rtc_days: 0,
             rtc_halt: false, rtc_day_carry: false, last_system_time: 0,
             rtc_latch_value: 0, rtc_selected: false,
-            bank_mask: total_banks as u8 - 1,
+            bank_mask,
         }
     }
 }
@@ -47,7 +48,7 @@ impl Mbc for Mbc3 {
             return self.prg_rom[addr as usize]
         }
         else if addr >= 0x4000 && addr <= 0x7FFF {
-            let bank = self.rom_bank & self.bank_mask;
+            let bank = (self.rom_bank as usize) & self.bank_mask;
             let bank_offset:usize = bank as usize * 0x4000;
             return self.prg_rom[bank_offset + (addr as usize - 0x4000)];
         }

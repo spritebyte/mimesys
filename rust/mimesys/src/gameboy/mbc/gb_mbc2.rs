@@ -4,20 +4,22 @@ use crate::gameboy::gb_mbc::Mbc;
 pub struct Mbc2 {
     prg_rom: Vec<u8>,
     cart_ram: Vec<u8>, // MBC2 has exactly 512 bytes of internal RAM
-    rom_bank: u8,
+    rom_bank: usize,
     ram_enabled: bool,
-    bank_mask: u8,
+    bank_mask: usize,
 }
 
 impl Mbc2 {
     pub fn new(prg_rom: Vec<u8>, cart_ram: Vec<u8>) -> Self {
-        let total_banks = prg_rom.len() / 16384;
+        let total_banks:usize = (prg_rom.len() / 16384).max(1);
+        let bank_mask:usize = total_banks.next_power_of_two() - 1;
+        
         Self {
             prg_rom,
             cart_ram,
             rom_bank: 1,
             ram_enabled: false,
-            bank_mask: total_banks as u8 - 1,
+            bank_mask,
         }
     }
 }
@@ -28,8 +30,8 @@ impl Mbc for Mbc2 {
             return self.prg_rom[addr as usize];
         }
         else if addr >= 0x4000 && addr <= 0x7FFF {
-            let bank = self.rom_bank & self.bank_mask;
-            let offset = (bank as usize * 0x4000) + (addr as usize - 0x4000);
+            let bank:usize = self.rom_bank & self.bank_mask;
+            let offset:usize = (bank * 0x4000) + (addr as usize - 0x4000);
             return self.prg_rom[offset];
         }
         // MBC2 RAM is mirrored up to $BFFF, but only 512 bytes exist.
@@ -46,7 +48,7 @@ impl Mbc for Mbc2 {
             if (addr & 0x0100) == 0 {
                 self.ram_enabled = (value & 0x0F) == 0x0A;
             } else {
-                self.rom_bank = value & 0x0F;
+                self.rom_bank = (value & 0x0F) as usize;
                 if self.rom_bank == 0 { self.rom_bank = 1; }
             }
         }

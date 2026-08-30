@@ -1,5 +1,6 @@
 use crate::common::timed::Timed;
 use crate::gameboy::gb_common::GbVariant;
+use crate::gameboy::gb_palette::{DmgPaletteSet,PaletteTheme};
 use crate::gameboy::gb_bus::GameBoyBus;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,12 +38,18 @@ pub struct GbPPU {
     // Frame published
     frame_published: Arc<AtomicBool>,
     slice_complete: bool,
+
+    pub active_palette: DmgPaletteSet,
     // CGB-only
     vbk: u8,
+    bgpi: u8,
+    obpi: u8,
+    bgpd: [u8;64],
+    obpd: [u8;64],
 }
 
 impl GbPPU {
-    pub fn new(variant: GbVariant, frame_published: Arc<AtomicBool>) -> Self {
+    pub fn new(variant: GbVariant, frame_published: Arc<AtomicBool>, active_palette: DmgPaletteSet) -> Self {
         let buffer_size = 160 * 144 * 4;
         let vram_size: usize = match variant {
             GbVariant::Cgb => 16384,
@@ -62,11 +69,13 @@ impl GbPPU {
             // Registers
             lcdc: 0x91, scy: 0, scx: 0, bgp: 0xFC, wx: 0, wy: 0,
             obp0: 0, obp1: 0, stat: 0x85, lyc: 0, ly: 0,
+            active_palette,
             vbk: 0,
+            bgpi: 0, obpi: 0, bgpd: [0;64], obpd: [0;64],
         }
     }
 
-    pub fn with_divider(variant: GbVariant, frame_published: Arc<AtomicBool>, div: u64) -> Self {
+    pub fn with_divider(variant: GbVariant, frame_published: Arc<AtomicBool>, active_palette: DmgPaletteSet, div: u64) -> Self {
         let buffer_size = 160 * 144 * 4;
         let vram_size: usize = match variant {
             GbVariant::Cgb => 16384,
@@ -86,7 +95,9 @@ impl GbPPU {
             div,
             lcdc: 0x91, scy: 0, scx: 0, bgp: 0xFC, wx: 0, wy: 0,
             obp0: 0, obp1: 0, stat: 0x85, lyc: 0, ly: 0,
+            active_palette,
             vbk: 0,
+            bgpi: 0, obpi: 0, bgpd: [0;64], obpd: [0;64],
         }
     }
 
@@ -262,7 +273,7 @@ impl GbPPU {
             let bit1 = (byte2 >> bit_idx) & 0x01;
             let color_idx = (bit1 << 1) | bit0;
             self.scanline_bg_indices[x as usize] = color_idx;
-            let color: u32 = self._apply_palette(color_idx, self.bgp);
+            let color: u32 = self._apply_palette(color_idx, self.bgp, &self.active_palette.bg);
             let base_idx: usize = (self.ly as usize * 160 + x as usize) * 4;
             self.back_buffer[base_idx]     = (color >> 16) as u8 & 0xFF;    // R
             self.back_buffer[base_idx + 1] = (color >> 8) as u8 & 0xFF; // G
@@ -282,7 +293,7 @@ impl GbPPU {
         }
     }
 
-    fn _apply_palette(&self, color_idx: u8, palette_reg: u8) -> u32 {
+    fn _old_apply_palette(&self, color_idx: u8, palette_reg: u8) -> u32 {
         let shade = (palette_reg >> (color_idx * 2)) & 0x03;
 
         match shade {
@@ -294,6 +305,15 @@ impl GbPPU {
         }
     }
 
+    pub fn set_palette(&mut self, palette: DmgPaletteSet) {
+        self.active_palette = palette;
+    }
+    
+    fn _apply_palette(&self, color_idx: u8, palette_reg: u8, colors: &[u32; 4]) -> u32 {
+        let shade = (palette_reg >> (color_idx * 2)) & 0x03;
+        colors[shade as usize]
+    }
+
     fn _render_sprites(&mut self) {
         if (self.lcdc & 0x02) == 0 {
             return;
@@ -301,83 +321,89 @@ impl GbPPU {
         let mut sprites = self._get_active_sprites();
         let sprite_16 = (self.lcdc & 0x04) != 0;
 
-        let sprite_height = if sprite_16 { 16 } else { 8 };
         //sprites.reverse();
 
         for sprite_idx in sprites.iter().rev() {
             let oam_base:usize = *sprite_idx as usize * 4;
-            let oam_y = self.oam[oam_base];
-            let x_pos = self.oam[oam_base + 1] - 8;
+            let oam_y = self.oam[oam_base] as i16;
+            let sprite_height = if (self.lcdc & 0x04) != 0 { 16 } else { 8 };
+            let x_pos = (self.oam[oam_base + 1] as i16) - 8;
             let tile_id = self.oam[oam_base + 2];
             let attributes = self.oam[oam_base + 3];
+            let ly_offset = (self.ly as i16) + 16;
 
-            let raw_line = (self.ly + 16) - oam_y;
+            if ly_offset >= oam_y && ly_offset < (oam_y + sprite_height) {
+                let raw_line = (ly_offset - oam_y) as u8;
 
-            let x_flip = (attributes & 0x20) != 0;
-            let y_flip = (attributes & 0x40) != 0;
-            let priority = (attributes & 0x80) != 0;
-            let palette = if attributes & 0x10 != 0 { self.obp1 } else { self.obp0 };
-            let mut tile_data_addr:usize = 0;
+                let x_flip = (attributes & 0x20) != 0;
+                let y_flip = (attributes & 0x40) != 0;
+                let priority = (attributes & 0x80) != 0;
+                let palette = if attributes & 0x10 != 0 { self.obp1 } else { self.obp0 };
+                let mut tile_data_addr:usize = 0;
 
-            if sprite_height == 16 {
-                let actual_tile_id = tile_id & 0xFE;
-                let mut tile_number = actual_tile_id;
-                let mut tile_line = 0;
-                if !y_flip {
-                    if raw_line < 8 {
-                        tile_number = actual_tile_id;
-                        tile_line = raw_line;
-                    } else {
-                        tile_number = actual_tile_id + 1;
-                        tile_line = raw_line - 8;
+                if sprite_height == 16 {
+                    let actual_tile_id = tile_id & 0xFE;
+                    let mut tile_number = actual_tile_id;
+                    let mut tile_line = 0;
+                    if !y_flip {
+                        if raw_line < 8 {
+                            tile_number = actual_tile_id;
+                            tile_line = raw_line;
+                        } else {
+                            tile_number = actual_tile_id + 1;
+                            tile_line = raw_line - 8;
+                        }
+                    } else { // y-flipped mode. The whole 16-pixel block is upside down.
+                        if raw_line < 8 {
+                            tile_number = actual_tile_id + 1;
+                            tile_line = 7 - raw_line;
+                        } else {
+                            tile_number = actual_tile_id;
+                            tile_line = 7 - (raw_line - 8);
+                        }
                     }
-                } else { // y-flipped mode. The whole 16-pixel block is upside down.
-                    if raw_line < 8 {
-                        tile_number = actual_tile_id + 1;
-                        tile_line = 7 - raw_line;
-                    } else {
-                        tile_number = actual_tile_id;
-                        tile_line = 7 - (raw_line - 8);
+                    tile_data_addr = (tile_number as usize * 16) + (tile_line as usize * 2);
+                } else {   // standard 8x8 sprite mode
+                    let tile_line = if y_flip { 7 - raw_line } else { raw_line };
+                    tile_data_addr = (tile_id as usize * 16) + (tile_line as usize * 2);
+                }
+
+                let byte1 = self.vram[tile_data_addr];
+                let byte2 = self.vram[tile_data_addr + 1];
+
+                for x in 0..8 {
+                    let screen_x = x_pos + x;
+                    if screen_x < 0 || screen_x >= 160 {
+                        continue;
                     }
+
+                    let bit_idx = if x_flip { x } else { 7 - x };
+                    let bit0 = (byte1 >> bit_idx) & 0x01;
+                    let bit1 = (byte2 >> bit_idx) & 0x01;
+                    let color_idx = (bit1 << 1) | bit0;
+
+                    // Color 0 is transparent for sprites
+                    if color_idx == 0 {
+                        continue;
+                    }
+
+                    // Check BG priority
+                    let bg_color_idx = self.scanline_bg_indices[screen_x as usize];
+                    if priority && bg_color_idx != 0 {
+                        continue;
+                    }
+
+                    let mut color = self._apply_palette(color_idx, palette, &self.active_palette.obp0);
+                    if attributes & 0x10 != 0 {
+                        color = self._apply_palette(color_idx, palette, &self.active_palette.obp1);
+                    }
+                    let base_idx: usize = (self.ly as usize * 160 + screen_x as usize) * 4;
+                    self.back_buffer[base_idx]     = (color >> 16) as u8 & 0xFF; // R
+                    self.back_buffer[base_idx + 1] = (color >> 8) as u8 & 0xFF;  // G
+                    self.back_buffer[base_idx + 2] = color as u8 & 0xFF;         // B
+                    self.back_buffer[base_idx + 3] = 0xFF;                       // A
                 }
-                tile_data_addr = (tile_id as usize * 16) + (tile_line as usize * 2);
-            } else {   // standard 8x8 sprite mode
-                let tile_line = if y_flip { 7 - raw_line } else { raw_line };
-                tile_data_addr = (tile_id as usize * 16) + (tile_line as usize * 2);
-            }
-
-            let byte1 = self.vram[tile_data_addr];
-            let byte2 = self.vram[tile_data_addr + 1];
-
-            for x in 1..8 {
-                let screen_x = x_pos + x;
-                if screen_x < 0 || screen_x >= 160 {
-                    continue;
-                }
-
-                let bit_idx = if x_flip { x } else { 7 - x };
-                let bit0 = (byte1 >> bit_idx) & 0x01;
-                let bit1 = (byte2 >> bit_idx) & 0x01;
-                let color_idx = (bit1 << 1) | bit0;
-
-                // Color 0 is transparent for sprites
-                if color_idx == 0 {
-                    continue;
-                }
-
-                // Check BG priority
-                let bg_color_idx = self.scanline_bg_indices[screen_x as usize];
-                if priority && bg_color_idx != 0 {
-                    continue;
-                }
-
-                let color = self._apply_palette(color_idx, palette);
-                let base_idx: usize = (self.ly as usize * 160 + screen_x as usize) * 4;
-                self.back_buffer[base_idx]     = (color >> 16) as u8 & 0xFF; // R
-                self.back_buffer[base_idx + 1] = (color >> 8) as u8 & 0xFF;  // G
-                self.back_buffer[base_idx + 2] = color as u8 & 0xFF;         // B
-                self.back_buffer[base_idx + 3] = 0xFF;                       // A
-            }
+            }   
         }
     }
 
@@ -402,9 +428,8 @@ impl GbPPU {
             // Game Boy hardware visibility check:
             // Sprite is visible if: OAM_Y <= current_line + 16 < OAM_Y + sprite_height
             // Note: OAM Y=0 is hidden on real hardware, but logic below handles the range check.
-            let scanline_offset = (ly + 16).saturating_sub(oam_y);
 
-            if scanline_offset < sprite_height {
+            if (ly + 16) >= oam_y && (ly + 16) < (oam_y + sprite_height) {
                 active_sprites.push(i);
             
                 // Hardware limit: only 10 sprites per scanline
@@ -446,6 +471,8 @@ impl GbPPU {
                 if self.hardware == GbVariant::Cgb { self.vbk | 0xFE }
                 else { 0xFF }
             },
+            0xFF67 => { self.bgpi },
+            0xFF6A => { self.obpi },
             // unmapped reads return 0xFF, but I need to remember to review how open bus
             // actually works on Gameboy and Gameboy Color in case of any exceptions
             // According to Claude it floats high rather than holding a latch like the NES.
@@ -459,14 +486,23 @@ impl GbPPU {
                 let lcd_was_enabled:bool = (self.lcdc & 0x80) != 0;
                 let lcd_enabled: bool = (p_value & 0x80) != 0;
                 self.lcdc = p_value;
+                if !lcd_was_enabled && lcd_enabled {
+                    println!("lcd enabled");
+                    self.ly = 0;                    // Force scanline 0
+                    self.window_line_counter = 0;   // Reset internal window line counter
+                    // immediately set mode 2 so STAT ($FF41) reports 0x02
+                    self._set_mode(2);
+                    self._update_stat_coincidence();
+
+                    // offset dot counter by 2 to align with mid-m-cycle write timing
+                    self.dot = 2;
+                }
                 if  !lcd_enabled && lcd_was_enabled {
                     println!("lcd disabled");
                     self.dot = 0;
                     self.ly = 0;
-                    self._set_mode(0);
-                }
-                if !lcd_was_enabled && lcd_enabled {
-                    println!("lcd enabled");
+                    self.current_mode = 0;
+                    self.stat = self.stat & 0xFC;
                 }
             },
             0xFF41 => { self.stat = (self.stat & 0x07) | (p_value & 0x78); },
@@ -479,7 +515,26 @@ impl GbPPU {
             0xFF49 => { self.obp1 = p_value; },
             0xFF4A => { self.wy = p_value; },
             0xFF4B => { self.wx = p_value; },
+            0xFF4D => { },
             // VBK register is CGB only, need to treat as unmapped/open bus on original DMG.
+            0xFF68 => { self.bgpi = p_value; },
+            0xFF69 => { 
+                let index = (self.bgpi & 0x3F) as usize;
+                self.bgpd[index] = p_value;
+                if (self.bgpi & 0x80) != 0 {
+                    let new_idx = (index + 1) & 0x3F;
+                    self.bgpi = (self.bgpi & 0x80) | (new_idx as u8);
+                }
+            },
+            0xFF6A => { self.obpi = p_value; },
+            0xFF6B => { 
+                let index = (self.obpi & 0x3F) as usize;
+                self.obpd[index] = p_value;
+                if (self.obpi & 0x80) != 0 {
+                    let new_idx = (index + 1) & 0x3F;
+                    self.obpi = (self.obpi & 0x80) | (new_idx as u8);
+                }
+            },
             0xFF4F => { 
                 self.vbk = p_value & 0x01;
             },

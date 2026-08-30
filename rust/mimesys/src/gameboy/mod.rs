@@ -10,6 +10,8 @@ mod gb_common;
 mod gb_apu;
 mod gb_ppu;
 mod gb_timer;
+mod gb_dma;
+mod gb_palette;
 #[path = "mbc/gb_mbc0.rs"]
 pub mod gb_mbc0;
 #[path = "mbc/gb_mbc1.rs"]

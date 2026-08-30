@@ -1,9 +1,11 @@
 use crate::common::timed::Timed;
 use crate::gameboy::gb_mbc::Mbc;
 use crate::gameboy::gb_cartridge::GbCartridge;
+use crate::gameboy::gb_palette::DmgPaletteSet;
 use crate::gameboy::gb_common::GbVariant;
 use crate::gameboy::gb_ppu::GbPPU;
 use crate::gameboy::gb_apu::GbAPU;
+use crate::gameboy::gb_dma::DmaState;
 use crate::gameboy::gb_timer::GbTimer;
 use std::cell::{UnsafeCell, Cell};
 use std::sync::Arc;
@@ -29,6 +31,7 @@ pub struct GameBoyBus {
     pub timer: UnsafeCell<GbTimer>,
     pub ie: u8,
     pub iflags: u8,
+    pub dma: DmaState,
     // Input processing fields
     pub pad1_state: u8,
     pub pad1_shift_reg: Cell<u8>,
@@ -46,7 +49,7 @@ unsafe impl Send for GameBoyBus {}
 unsafe impl Sync for GameBoyBus {}
 
 impl GameBoyBus {
-    pub fn new(variant: GbVariant, cartridge: GbCartridge, system_frame_ready: Arc<AtomicBool>) -> Self {
+    pub fn new(variant: GbVariant, cartridge: GbCartridge, system_frame_ready: Arc<AtomicBool>, selected_palette: DmgPaletteSet) -> Self {
         let ram_size: usize = match variant {
             GbVariant::Cgb => 32768,
             _=> 8192,
@@ -54,9 +57,10 @@ impl GameBoyBus {
         Self {
             ram: vec![0; ram_size],
             hram: [0; 0x80],
-            ppu: UnsafeCell::new(GbPPU::new(variant, system_frame_ready)),   // Initialize a fresh PPU 
+            ppu: UnsafeCell::new(GbPPU::new(variant, system_frame_ready, selected_palette)),   // Initialize a fresh PPU 
             apu: UnsafeCell::new(GbAPU::new()),
             timer: UnsafeCell::new(GbTimer::new()),
+            dma: DmaState::new(),
             cartridge,
             ie: 0, iflags: 0,
             last_master: 0,
@@ -145,12 +149,13 @@ impl GameBoyBus {
             0xFF0F => self.iflags = value & 0x1F,
             // APU range $FF10-$FF3F
             // Wave RAM  $FF30-$FF3F
+            0xFF46 => self.dma.start(value, self.master),
             0xFF40..=0xFF4B | 0xFF4F => unsafe { (*self.ppu.get()).write_register(addr, value) },
             _ => { }
         }
     }
 
-    fn read_inner(&mut self, addr: u16) -> u8 {
+    fn read_raw(&mut self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x7FFF | 0xA000..=0xBFFF => unsafe { (*self.cartridge.mbc.get()).read(addr) },
             0x8000..=0x9FFF => unsafe { (&(*self.ppu.get()).vram)[(addr & 0x1FFF) as usize] },
@@ -163,7 +168,7 @@ impl GameBoyBus {
         }
     }
 
-    fn write_inner(&mut self, addr: u16, value: u8) {
+    fn write_raw(&mut self, addr: u16, value: u8) {
         match addr {
             0x0000..=0x7FFF|0xA000..=0xBFFF => unsafe { (*self.cartridge.mbc.get()).write(addr, value); }
             0x8000..=0x9FFF => unsafe { (&mut (*self.ppu.get()).vram)[(addr & 0x1FFF) as usize] = value },
@@ -175,21 +180,63 @@ impl GameBoyBus {
             _ => { }
         }
     }
+
+    fn read_inner(&mut self, addr: u16) -> u8 {
+        if self.dma.active {
+            if addr >= 0xFF80 && addr <= 0xFFFE {
+                return self.hram[(addr - 0xFF80) as usize];
+            }
+            if addr == 0xFF46 {
+                return (self.dma.source_base >> 8) as u8;
+            }
+            return 0xFF;
+        }
+
+        self.read_raw(addr)
+    }
+
+    fn write_inner(&mut self, addr: u16, value: u8) {
+        if self.dma.active {
+            // HRAM is always accessible
+            if addr >= 0xFF80 && addr <= 0xFFFE {
+                self.hram[(addr - 0xFF80) as usize] = value;
+                return;
+            }
+            // Writing to $FF46 while DMA is active restarts the transfer
+            if addr == 0xFF46 {
+                self.dma.start(value, self.master);
+                return;
+            }
+            // All other CPU writes are dropped while DMA is active
+            return;     
+        }
+        self.write_raw(addr, value);
+    }
 }
 
 impl Timed for GameBoyBus {
     fn run_until(&mut self, target_master: u64) {
-        let gb_ppu = self.ppu.get_mut();
-        gb_ppu.run_until(target_master);
+        unsafe {
+            (*self.ppu.get()).run_until(target_master);
+            (*self.apu.get()).run_until(target_master);
+            (*self.timer.get()).run_until(target_master);
+        }
 
-        let gb_apu = self.apu.get_mut();
-        gb_apu.run_until(target_master);
+        while (self.dma.active || self.dma.delay_m_cycles > 0) && self.dma.next_tick_master <= target_master {
+            if let Some((src_addr, oam_offset)) = self.dma.tick_m_cycle() {
+                let byte = self.read_raw(src_addr);
+                unsafe {
+                    (*self.ppu.get()).oam[oam_offset] = byte;
+                }
+            }
+            self.dma.next_tick_master += 4;
+        }
 
-        let gb_timer = self.timer.get_mut();
-        gb_timer.run_until(target_master);
         self.last_master = target_master;
-        self.iflags |= gb_ppu.take_irqs();
-        self.iflags |= gb_timer.take_irqs();
+        unsafe {
+            self.iflags |= (*self.ppu.get()).take_irqs();
+            self.iflags |= (*self.timer.get()).take_irqs();
+        }
     }
 
     fn sync_point(&self) -> u64 {
@@ -228,11 +275,6 @@ impl Bus for GameBoyBus {
     fn write(&mut self, addr: u16, value: u8) {
         self.master += self.access_offset();
         self.run_until(self.master);
-        if addr == 0xDD00 || addr == 0xDD01 {
-            println!("Write to {:04X}: val={:02X}", addr, value);
-//            panic!("C671 or C672 write");
-        }
-
         self.write_inner(addr, value);
         self.master += self.cycle_len() - self.access_offset();
         self.run_until(self.master);

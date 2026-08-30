@@ -2,6 +2,7 @@ use crate::gameboy::gb_cpu::GameBoyCpu;
 use crate::gameboy::gb_bus::GameBoyBus;
 use crate::gameboy::gb_common::GbVariant;
 use crate::gameboy::gb_cartridge::{GbCartridge, CartType};
+use crate::gameboy::gb_palette::*;
 use crate::gameboy::gb_mbc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,6 +18,7 @@ pub struct GbSystem {
     pub save_filename: String,
     pub current_frame: u64,
     pub cgb_mode: bool,
+    pub current_ui_theme: PaletteTheme,
 }
 
 impl GbSystem {
@@ -25,6 +27,7 @@ impl GbSystem {
         let bytes = rom_bytes;
 
         let cart_type_code = bytes[0x147];
+        println!("Cart type code={:02X}", cart_type_code);
         let prg_rom_size = (1 << bytes[0x148]) * 1024 * 32;
         let cart_ram_size = Self::calculate_ram_size(bytes[0x149]) as usize;
         let cart_type = Self::determine_mbc(cart_type_code);
@@ -39,6 +42,8 @@ impl GbSystem {
         } else {
             GbVariant::Dmg
         };
+        let header_title = std::str::from_utf8(&bytes[0x0134..0x0143]).unwrap_or("");
+        let selected_palette = PaletteTheme::to_palette_set(PaletteTheme::Auto, header_title);
         // initialize the mapper
         let mbc = gb_mbc::make_mbc(cart_type.mbc_id, prg_rom.clone(), cart_ram.clone());
         //{
@@ -51,8 +56,8 @@ impl GbSystem {
 
         // initialize cartridge and bus
         let cartridge = GbCartridge::new(prg_rom, cart_ram, mbc?, base_name.to_string());
-        println!("Cartridge created: {0}", cartridge.base_filename);
-        let bus = GameBoyBus::new(variant, cartridge, Arc::clone(&frame_ready));
+        println!("Cartridge created: {0} for {1}", cartridge.base_filename, header_title);
+        let bus = GameBoyBus::new(variant, cartridge, Arc::clone(&frame_ready), selected_palette);
         println!("prg_rom size: {prg_rom_size} ");
         println!("cart ram size: {cart_ram_size} ");
 
@@ -62,12 +67,13 @@ impl GbSystem {
                 cpu: GameBoyCpu::new(variant),
                 save_filename: base_name.to_string(),
                 slice_complete: false, cgb_mode: false,
-                // todo: different path for gameboy color?
+                // todo: different path for gameboy color? allow user to select path?
                 save_battery_path: "user://GD_EMU/Gb/Save".to_string(),
                 save_state_path: "user://GD_EMU/Gb/State".to_string(),
                 is_running: Arc::new(AtomicBool::new(false)),
                 current_frame: 0,
                 frame_published: frame_ready,
+                current_ui_theme: PaletteTheme::Auto,
             }
         })
     }
@@ -94,8 +100,11 @@ impl GbSystem {
             9 => CartType { mbc_id: 0, has_battery: true },
             0x0F|0x11|0x12 => CartType { mbc_id: 3, has_battery: false },
             0x10|0x13 => CartType { mbc_id: 3, has_battery: true },
-
-            _ => CartType { mbc_id: 0, has_battery: false },
+            0x1B => CartType { mbc_id: 5, has_battery: true },
+            _ => {
+                println!("unknown carttype {:02X}, using default of no MBC", cart_type_code);
+                CartType { mbc_id: 0, has_battery: false }
+            },
         }
     }
 

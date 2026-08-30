@@ -7,14 +7,15 @@ pub struct Mbc1 {
     bank_reg_1: u8,    // lower 5 bits of ROM bank
     bank_reg_2: u8,    // upper 2 bits (used for ROM or RAM)
     mode: u8,          // 0 = ROM Banking Mode, 1 = RAM Banking Mode
-    bank_mask: u8,
-    total_banks: u8,
+    bank_mask: usize,
+    total_banks: usize,
     ram_enabled: bool,
 }
 
 impl Mbc1 {
     pub fn new(prg_rom: Vec<u8>, cart_ram: Vec<u8>) -> Self {
-        let total_banks:u8 = (prg_rom.len() / 16384) as u8;
+        let total_banks:usize = (prg_rom.len() / 16384).max(1) as usize;
+        let bank_mask = (total_banks.next_power_of_two() - 1) as usize;
 
         Self {
             prg_rom,
@@ -22,16 +23,16 @@ impl Mbc1 {
             bank_reg_1: 1,       
             bank_reg_2: 0,
             mode: 0,
-            bank_mask: total_banks - 1,
+            bank_mask,
             total_banks,
             ram_enabled: false,
         }
     }
 
-    fn _get_selected_rom_bank(&self) -> u8 {
-        let mut bank = self.bank_reg_1;
+    fn _get_selected_rom_bank(&self) -> usize {
+        let mut bank:usize = self.bank_reg_1 as usize;
         if bank == 0 { bank = 1; }
-        bank |= self.bank_reg_2 << 5;
+        bank |= (self.bank_reg_2 as usize) << 5;
         return bank & self.bank_mask;
     }
 }
@@ -40,7 +41,7 @@ impl Mbc for Mbc1 {
     fn read(&self, addr: u16) -> u8 {
         if addr <= 0x3FFF {
             if self.mode == 1 {
-                let bank = (self.bank_reg_2 << 5) & self.bank_mask;
+                let bank:usize = (self.bank_reg_2 << 5) as usize & self.bank_mask;
                 return self.prg_rom[(bank as usize * 0x4000) + addr as usize];
             }
             return self.prg_rom[addr as usize];
