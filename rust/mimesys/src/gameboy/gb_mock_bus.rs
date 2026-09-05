@@ -67,7 +67,7 @@ impl Bus for MockBus {
         self.ram[addr as usize]
     }
 
-    fn peek(&self, addr: u16) -> u8 {
+    fn peek(&mut self, addr: u16) -> u8 {
         self.ram[addr as usize]
     }
 

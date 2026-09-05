@@ -30,6 +30,7 @@ pub struct GbPPU {
     pub vram: Vec<u8>,
     pub oam: [u8; 160],
     scanline_bg_indices: [u8; 160],
+    scanline_bg_priority: [bool;160],
     // --- Video Buffers ---
     // Double buffering prevents the UI thread from reading half-rendered frames!
     back_buffer: Vec<u8>,       // The frame currently being drawn (Width * Height * 4 bytes RGBA)
@@ -41,7 +42,8 @@ pub struct GbPPU {
 
     pub active_palette: DmgPaletteSet,
     // CGB-only
-    vbk: u8,
+    hdma_pending: bool,
+    pub vbk: u8,
     bgpi: u8,
     obpi: u8,
     bgpd: [u8;64],
@@ -50,44 +52,21 @@ pub struct GbPPU {
 
 impl GbPPU {
     pub fn new(variant: GbVariant, frame_published: Arc<AtomicBool>, active_palette: DmgPaletteSet) -> Self {
-        let buffer_size = 160 * 144 * 4;
-        let vram_size: usize = match variant {
-            GbVariant::Cgb => 16384,
-            _=> 8192,
-        };
-        Self {
-            hardware: variant, cgb_mode: false,
-            last_master: 0, ticks: 0,
-            dot: 0, current_mode: 0,
-            pending_irqs: 0,
-            vram: vec![0;vram_size], oam: [0;160], scanline_bg_indices: [0; 160],
-            back_buffer: vec![0; buffer_size],
-            front_buffer: Arc::new(Mutex::new(vec![0; buffer_size])),
-            frame_published, slice_complete: false,
-            window_line_counter: 0,
-            div: 1,
-            // Registers
-            lcdc: 0x91, scy: 0, scx: 0, bgp: 0xFC, wx: 0, wy: 0,
-            obp0: 0, obp1: 0, stat: 0x85, lyc: 0, ly: 0,
-            active_palette,
-            vbk: 0,
-            bgpi: 0, obpi: 0, bgpd: [0;64], obpd: [0;64],
-        }
+        Self::with_divider(variant, frame_published, active_palette, 1)
     }
 
     pub fn with_divider(variant: GbVariant, frame_published: Arc<AtomicBool>, active_palette: DmgPaletteSet, div: u64) -> Self {
         let buffer_size = 160 * 144 * 4;
-        let vram_size: usize = match variant {
-            GbVariant::Cgb => 16384,
-            _=> 8192,
-        };
+        let in_cgb_mode = matches!(variant, GbVariant::Cgb);
+        let vram_size: usize = if in_cgb_mode { 16384 } else { 8192 };
 
         Self {
-            hardware: variant, cgb_mode: false,
+            hardware: variant, cgb_mode: in_cgb_mode, hdma_pending: false,
             last_master: 0, ticks: 0,
             dot: 0, current_mode: 0,
             pending_irqs: 0,
             vram: vec![0;vram_size], oam: [0;160], scanline_bg_indices: [0; 160],
+            scanline_bg_priority: [false;160],
             back_buffer: vec![0; buffer_size],
             front_buffer: Arc::new(Mutex::new(vec![0; buffer_size])),
             frame_published, slice_complete: false,
@@ -97,7 +76,7 @@ impl GbPPU {
             obp0: 0, obp1: 0, stat: 0x85, lyc: 0, ly: 0,
             active_palette,
             vbk: 0,
-            bgpi: 0, obpi: 0, bgpd: [0;64], obpd: [0;64],
+            bgpi: 0, obpi: 0, bgpd: [0xFF;64], obpd: [0xFF;64],
         }
     }
 
@@ -170,6 +149,7 @@ impl GbPPU {
                     self._render_scanline();
                     self._render_sprites();
                     self._set_mode(0);
+
                 }
             }
 
@@ -195,6 +175,11 @@ impl GbPPU {
         let old_mode = self.current_mode;
         self.current_mode = new_mode;
         self.stat = (self.stat & 0xFC) | (self.current_mode & 0x03);
+
+        if new_mode == 0 && old_mode != 0 && self.ly < 144 {
+            self.hdma_pending = true;
+        }
+
         let mut trigger: bool = false;
         if self.current_mode == 0 && (self.stat & 0x08) != 0 { trigger = true; }
         else if self.current_mode == 1 && (self.stat & 0x10) != 0 { trigger = true; }
@@ -203,6 +188,10 @@ impl GbPPU {
         if trigger {
             self._request_stat_interrupt();
         }
+    }
+
+    pub fn take_hdma_pending(&mut self) -> bool {
+        std::mem::replace(&mut self.hdma_pending, false)
     }
 
     pub fn is_slice_complete(&self) -> bool {
@@ -241,7 +230,7 @@ impl GbPPU {
             let win_x = self.wx.saturating_sub(7);
             let is_win_pixel = is_win_line && x >= win_x;
 
-            if !is_win_pixel && !bg_enabled {
+            if !self.cgb_mode && !is_win_pixel && !bg_enabled {
                 let base_idx:usize = (self.ly as usize * 160 + x as usize) * 4;
                 self.back_buffer[base_idx] = 0xFF;
                 self.back_buffer[base_idx+1] = 0xFF;
@@ -264,21 +253,44 @@ impl GbPPU {
             let tile_id_addr: usize = tile_map_base as usize + (tile_row as usize * 32) + tile_col as usize;
             let tile_id = self.vram[tile_id_addr];
 
-            let tile_data_addr:usize = (self._get_tile_data_address(tile_id) + tile_line as u16) as usize;
+            let attr = if self.cgb_mode {
+                self.vram[0x2000 + tile_id_addr]
+            } else {
+                0
+            };
+            let cgb_palette = attr & 0x07;
+            let vram_bank = if (attr & 0x08) != 0 { 0x2000 } else { 0 };
+            let x_flip = (attr & 0x20) != 0;
+            let y_flip = (attr & 0x40) != 0;
+            let bg_priority = (attr & 0x80) != 0;
+            let effective_tile_line = if y_flip { 7 - (fetch_y % 8) } else { fetch_y % 8 };
+            let tile_data_addr:usize = vram_bank + (self._get_tile_data_address(tile_id) as usize) + (effective_tile_line as usize * 2);
+
             let byte1 = self.vram[tile_data_addr];
             let byte2 = self.vram[tile_data_addr + 1];
             
-            let bit_idx = 7 - (fetch_x % 8);
+//            let bit_idx = 7 - (fetch_x % 8);
+            let bit_idx = if x_flip { fetch_x % 8 } else { 7 - (fetch_x % 8) };
             let bit0 = (byte1 >> bit_idx) & 0x01;
             let bit1 = (byte2 >> bit_idx) & 0x01;
             let color_idx = (bit1 << 1) | bit0;
             self.scanline_bg_indices[x as usize] = color_idx;
-            let color: u32 = self._apply_palette(color_idx, self.bgp, &self.active_palette.bg);
+            self.scanline_bg_priority[x as usize] = bg_priority;
+            let (r,g,b) = if self.cgb_mode {
+                self._get_cgb_color(&self.bgpd, cgb_palette, color_idx)
+            } else {
+                let color: u32 = self._apply_palette(color_idx, self.bgp, &self.active_palette.bg);
+                (
+                    ((color >> 16) & 0xFF) as u8,
+                    ((color >> 8) & 0xFF) as u8,
+                    (color & 0xFF) as u8,
+                )
+            };
             let base_idx: usize = (self.ly as usize * 160 + x as usize) * 4;
-            self.back_buffer[base_idx]     = (color >> 16) as u8 & 0xFF;    // R
-            self.back_buffer[base_idx + 1] = (color >> 8) as u8 & 0xFF; // G
-            self.back_buffer[base_idx + 2] = color as u8 & 0xFF;        // B
-            self.back_buffer[base_idx + 3] = 0xFF;                      // A
+            self.back_buffer[base_idx]     = r;
+            self.back_buffer[base_idx + 1] = g;
+            self.back_buffer[base_idx + 2] = b;
+            self.back_buffer[base_idx + 3] = 0xFF;
         }
     }
 
@@ -314,6 +326,25 @@ impl GbPPU {
         colors[shade as usize]
     }
 
+    fn _get_cgb_color(&self, palette_data: &[u8; 64], palette_num: u8, color_idx: u8) -> (u8, u8, u8) {
+        let base_addr = (palette_num as usize * 8) + (color_idx as usize * 2);
+        let low = palette_data[base_addr] as u16;
+        let high = palette_data[base_addr + 1] as u16;
+        let rgb555 = low | (high << 8);
+
+        // Extract 5-bit channels
+        let r5 = (rgb555 & 0x1F) as u8;
+        let g5 = ((rgb555 >> 5) & 0x1F) as u8;
+        let b5 = ((rgb555 >> 10) & 0x1F) as u8;
+
+        // Expand 5-bit to 8-bit (x * 255 / 31 or bit reflection)
+        let r8 = (r5 << 3) | (r5 >> 2);
+        let g8 = (g5 << 3) | (g5 >> 2);
+        let b8 = (b5 << 3) | (b5 >> 2);
+
+        (r8, g8, b8)
+    }
+
     fn _render_sprites(&mut self) {
         if (self.lcdc & 0x02) == 0 {
             return;
@@ -322,8 +353,10 @@ impl GbPPU {
         let sprite_16 = (self.lcdc & 0x04) != 0;
 
         //sprites.reverse();
+        let mut claimed_pixels = [false;160];
 
-        for sprite_idx in sprites.iter().rev() {
+        //for sprite_idx in sprites.iter().rev() 
+        for sprite_idx in sprites.iter() {
             let oam_base:usize = *sprite_idx as usize * 4;
             let oam_y = self.oam[oam_base] as i16;
             let sprite_height = if (self.lcdc & 0x04) != 0 { 16 } else { 8 };
@@ -337,9 +370,10 @@ impl GbPPU {
 
                 let x_flip = (attributes & 0x20) != 0;
                 let y_flip = (attributes & 0x40) != 0;
-                let priority = (attributes & 0x80) != 0;
-                let palette = if attributes & 0x10 != 0 { self.obp1 } else { self.obp0 };
+                let oam_priority = (attributes & 0x80) != 0;
                 let mut tile_data_addr:usize = 0;
+
+                let palette = if attributes & 0x10 != 0 { self.obp1 } else { self.obp0 };
 
                 if sprite_height == 16 {
                     let actual_tile_id = tile_id & 0xFE;
@@ -368,6 +402,9 @@ impl GbPPU {
                     tile_data_addr = (tile_id as usize * 16) + (tile_line as usize * 2);
                 }
 
+                let vram_bank = if self.cgb_mode && (attributes & 0x08) != 0 { 0x2000 } else { 0 };
+                tile_data_addr += vram_bank;
+
                 let byte1 = self.vram[tile_data_addr];
                 let byte2 = self.vram[tile_data_addr + 1];
 
@@ -387,20 +424,48 @@ impl GbPPU {
                         continue;
                     }
 
+                    let x_idx = screen_x as usize;
+                    if claimed_pixels[x_idx] {
+                        continue;
+                    }
+                    claimed_pixels[x_idx] = true;
+
                     // Check BG priority
-                    let bg_color_idx = self.scanline_bg_indices[screen_x as usize];
-                    if priority && bg_color_idx != 0 {
+                    let bg_color_idx = self.scanline_bg_indices[x_idx];
+                    let bg_priority = self.scanline_bg_priority[x_idx];
+//                    if priority && bg_color_idx != 0 {
+//                        continue;
+//                    }
+
+                    let sprite_hidden = if self.cgb_mode {
+                        let master_priority = (self.lcdc & 0x01) != 0;
+                        master_priority && bg_color_idx != 0 && (bg_priority ||  oam_priority)
+                    } else {
+                        oam_priority && bg_color_idx != 0
+                    };
+
+                    if sprite_hidden {
                         continue;
                     }
 
-                    let mut color = self._apply_palette(color_idx, palette, &self.active_palette.obp0);
-                    if attributes & 0x10 != 0 {
-                        color = self._apply_palette(color_idx, palette, &self.active_palette.obp1);
-                    }
+                    let cgb_palette = attributes & 0x07;
+
+                    let (r, g, b) = if self.cgb_mode {
+                        self._get_cgb_color(&self.obpd, cgb_palette, color_idx)
+                    } else {
+                        let palette_reg = if attributes & 0x10 != 0 { self.obp1 } else { self.obp0 };
+                        let palette_colors = if attributes & 0x10 != 0 { &self.active_palette.obp1 } else { &self.active_palette.obp0 };
+                        let color = self._apply_palette(color_idx, palette_reg, palette_colors);
+                        (
+                            ((color >> 16) & 0xFF) as u8,
+                            ((color >> 8) & 0xFF) as u8,
+                            (color & 0xFF) as u8,
+                        )
+                    };
                     let base_idx: usize = (self.ly as usize * 160 + screen_x as usize) * 4;
-                    self.back_buffer[base_idx]     = (color >> 16) as u8 & 0xFF; // R
-                    self.back_buffer[base_idx + 1] = (color >> 8) as u8 & 0xFF;  // G
-                    self.back_buffer[base_idx + 2] = color as u8 & 0xFF;         // B
+                    self.back_buffer[base_idx]     = r;
+                    self.back_buffer[base_idx + 1] = g;
+                    self.back_buffer[base_idx + 2] = b;
                     self.back_buffer[base_idx + 3] = 0xFF;                       // A
                 }
             }   
@@ -441,15 +506,17 @@ impl GbPPU {
 
         // Sort by X coordinate (ascending), then by OAM index (ascending) for priority
         // Closures capture 'oam' by reference (&)
-        active_sprites.sort_by(|&a, &b| {
-            let x_a = oam[a * 4 + 1];
-            let x_b = oam[b * 4 + 1];
+        if !self.cgb_mode {
+            active_sprites.sort_by(|&a, &b| {
+                let x_a = oam[a * 4 + 1];
+                let x_b = oam[b * 4 + 1];
         
-            // Compare X coordinates
-            x_a.cmp(&x_b)
-                // If X is equal, compare indices (lower index = higher priority)
-                .then_with(|| a.cmp(&b))
-        });
+                // Compare X coordinates
+                x_a.cmp(&x_b)
+                    // If X is equal, compare indices (lower index = higher priority)
+                    .then_with(|| a.cmp(&b))
+            });
+        }
 
         active_sprites
     }
@@ -460,7 +527,7 @@ impl GbPPU {
             0xFF41 => { self.stat | 0x80 },
             0xFF42 => { self.scy },
             0xFF43 => { self.scx },
-            0xFF44 => { self.ly },
+            0xFF44 => { println!("LY read = {}", self.ly); self.ly },
             0xFF45 => { self.lyc },
             0xFF47 => { self.bgp },
             0xFF48 => { self.obp0 },
@@ -471,11 +538,10 @@ impl GbPPU {
                 if self.hardware == GbVariant::Cgb { self.vbk | 0xFE }
                 else { 0xFF }
             },
-            0xFF67 => { self.bgpi },
-            0xFF6A => { self.obpi },
-            // unmapped reads return 0xFF, but I need to remember to review how open bus
-            // actually works on Gameboy and Gameboy Color in case of any exceptions
-            // According to Claude it floats high rather than holding a latch like the NES.
+            0xFF68 => if self.cgb_mode { self.bgpi | 0x40 } else { 0xFF },
+            0xFF69 => if self.cgb_mode { self.bgpd[(self.bgpi & 0x3F) as usize]} else { 0xFF },
+            0xFF6A => if self.cgb_mode { self.obpi | 0x40 } else { 0xFF },
+            0xFF6B => if self.cgb_mode { self.obpd[(self.obpi & 0x3F) as usize]} else { 0xFF },
             _=> { 0xFF },
         }
     }
@@ -516,14 +582,13 @@ impl GbPPU {
             0xFF4A => { self.wy = p_value; },
             0xFF4B => { self.wx = p_value; },
             0xFF4D => { },
-            // VBK register is CGB only, need to treat as unmapped/open bus on original DMG.
             0xFF68 => { self.bgpi = p_value; },
             0xFF69 => { 
                 let index = (self.bgpi & 0x3F) as usize;
                 self.bgpd[index] = p_value;
                 if (self.bgpi & 0x80) != 0 {
                     let new_idx = (index + 1) & 0x3F;
-                    self.bgpi = (self.bgpi & 0x80) | (new_idx as u8);
+                    self.bgpi = (0x80) | (new_idx as u8);
                 }
             },
             0xFF6A => { self.obpi = p_value; },
@@ -532,10 +597,10 @@ impl GbPPU {
                 self.obpd[index] = p_value;
                 if (self.obpi & 0x80) != 0 {
                     let new_idx = (index + 1) & 0x3F;
-                    self.obpi = (self.obpi & 0x80) | (new_idx as u8);
+                    self.obpi = (0x80) | (new_idx as u8);
                 }
             },
-            0xFF4F => { 
+            0xFF4F => {
                 self.vbk = p_value & 0x01;
             },
             _=> { },

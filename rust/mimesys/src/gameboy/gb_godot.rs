@@ -8,6 +8,7 @@ use crate::common::gd_sys_display::SystemDisplayInfo;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc};
 use std::path::PathBuf;
+use std::path::Path;
 
 // only checking a few bytes from logo
 const _NINTENDO_LOGO: [u8; 10] = [0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73];
@@ -21,6 +22,7 @@ pub struct GbSystemNode {
     playback: Option<Gd<AudioStreamGeneratorPlayback>>,
     cached_image: Option<Gd<Image>>,
     cached_texture: Option<Gd<ImageTexture>>,
+    last_sample: Vector2,
 }
 
 #[godot_api]
@@ -32,8 +34,11 @@ impl GbSystemNode {
     }
 
     #[func]
-    pub fn create_from_bytes(rom_bytes: PackedByteArray, base_name: String) -> Option<Gd<Self>> {
-        let core = match GbSystem::from_rom(rom_bytes.as_slice(), &base_name) {
+    pub fn create_from_bytes(rom_bytes: PackedByteArray, base_name: String, bios: PackedByteArray) -> Option<Gd<Self>> {
+//        let boot_rom_path = "user://BIOS/gbc_bios.bin".to_string();
+//        let boot_path = Some(Path::new(&boot_rom_path));
+    //    let boot_path = None;
+        let core = match GbSystem::from_rom(rom_bytes.as_slice(), &base_name, bios.as_slice()) {
             Ok(c) => c,
             Err(e) => { godot_print!("GB load failed: {}", e); return None; }
         };
@@ -45,6 +50,7 @@ impl GbSystemNode {
             playback: None,
             cached_image: None,
             cached_texture: None,
+            last_sample: Vector2::ZERO,
         });
         Some(node)
     }
@@ -53,7 +59,8 @@ impl GbSystemNode {
     pub fn run_slice(&mut self, input_mask: u16) { 
         if let Some(sys) = &mut self.system {
 //            sys.set_input(input_mask as u8);
-            sys.run_frame(input_mask as u8);
+            sys.bus.joypad.set_button_state(input_mask as u8, &mut sys.bus.iflags);
+            sys.run_frame();
 //            self.blit(sys.framebuffer());
 //            self.queue_audio(sys.audio_samples());
         }
@@ -83,21 +90,20 @@ impl GbSystemNode {
             }
         } else { println!("No save file doesn't exist at {save_path}"); }
         println!("Gb System Power On");
+        sys.power_on();
     }
     
     #[func]
     pub fn reset(&mut self) {
-
+        let Some(sys) = &mut self.system else { return; };
     }
 
     #[func]
     pub fn power_off(&mut self) {
-        if self.system.is_none() {
-            return;
-        }
-
-        self.check_and_save_sram();
+        let Some(sys) = &mut self.system else { return; };
         println!("Gb System Power Off: Battery backed SRAM saved to persistent disk space safely.");
+        sys.power_off();
+        self.check_and_save_sram();
     }
 
     #[func]
@@ -110,6 +116,33 @@ impl GbSystemNode {
         let Some(sys) = &mut self.system else {return;};
         if !sys.is_sram_dirty() {
             return;
+        }
+        if let Some(sram_bytes) = sys.bus.get_sram() {
+            let dir_path_str = sys.save_battery_path();
+            let dir_path = GString::from(dir_path_str);
+
+            if !godot::classes::DirAccess::dir_exists_absolute(&dir_path) {
+                let err = godot::classes::DirAccess::make_dir_recursive_absolute(&dir_path);
+                if err != godot::global::Error::OK {
+                    godot_print!("Failed to create save directory '{}'. Error: {:?}", dir_path_str, err);
+                    return;
+                }
+                godot_print!("Created missing save directory: {}", sys.save_battery_path);
+            }
+            let save_path_str = format!("{}/{}.sav", dir_path_str, sys.save_filename());
+            let save_path = GString::from(&save_path_str);
+
+            if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::WRITE) {
+//                let mut packed_array = PackedByteArray::new();
+//                packed_array.extend_from_slice(sram_bytes);
+                let packed_array = PackedByteArray::from(&sram_bytes[..]);
+                file.store_buffer(&packed_array);
+                file.flush();
+                // Reset the flag so we don't save again until the game modifies SRAM again
+                sys.bus.clear_sram_dirty(); 
+                godot_print!("SRAM successfully saved to {save_path_str}");
+            }
+            else { println!("Couldn't open file for saving at {save_path}") }
         }
     }
 
@@ -160,6 +193,42 @@ impl GbSystemNode {
             }
         }
         self.cached_texture.as_ref().unwrap().clone().upcast()
+    }
+
+    #[func]
+    pub fn update_audio_buffer(&mut self) {
+        let Some(playback) = &mut self.playback else { return };
+
+        let avail = playback.get_frames_available();
+        if avail <= 0 {
+            return;
+        }
+
+        let Some(sys) = &mut self.system else { return; };
+        let apu = sys.bus.apu.get_mut();
+        let raw_samples = apu.drain_samples(); // [L, R, L, R, ...]
+        let available_frames = raw_samples.len() / 2;
+
+        let mut frames = PackedVector2Array::new();
+        frames.resize(avail as usize);
+
+        let count = available_frames.min(avail as usize);
+
+        for i in 0..count {
+            let left = raw_samples[i * 2];
+            let right = raw_samples[i * 2 + 1];
+            let sample_vec = Vector2::new(left, right);
+            frames[i] = sample_vec;
+            self.last_sample = sample_vec;
+        }
+
+        // FIXED: Fill remaining available buffer space with silence/last_sample 
+        // to prevent audio stream underflow popping/silence stalls
+        for i in count..(avail as usize) {
+            frames[i] = self.last_sample;
+        }
+
+        playback.push_buffer(&frames);
     }
 }
 

@@ -301,6 +301,11 @@ impl NesSystem {
     }
 
     #[func]
+    pub fn update_audio_buffer(&mut self) {
+        
+    }
+
+    #[func]
     pub fn request_rewind_to_frame(&mut self, target_frame: i64) -> bool {
         let mut buffer = std::mem::take(&mut self.rewind_buffer);
         let result = buffer.rewind_to(target_frame as u64, self);

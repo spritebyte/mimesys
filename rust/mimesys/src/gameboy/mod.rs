@@ -4,6 +4,7 @@ mod gb_cpu;
 mod gb_godot;
 mod gb_system;
 mod gb_bus;
+mod gb_joypad;
 mod gb_mbc;
 mod gb_cartridge;
 mod gb_common;

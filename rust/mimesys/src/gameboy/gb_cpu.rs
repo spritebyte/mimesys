@@ -155,7 +155,7 @@ pub struct GameBoyCpu {
     pub pc: u16,
 
     pub current_opcode: u8,
-    pub instruction_step: u8,
+    pub instruction_step: u16,
     pub current_lsb: u8,       
     pub current_msb: u8,
     pub current_value: u8,
@@ -169,11 +169,15 @@ pub struct GameBoyCpu {
     pub current: Instruction,
     pub double_speed: bool,
     pub variant: GbVariant,
+    pub stop_delay: u16,
+    pub pending_speed_switch: bool,
+    pub serviced_bit: u8,
 }
 
 impl GameBoyCpu {
-    pub fn new(variant: GbVariant) -> Self {
-        let config = GbCpuConfig::for_variant(variant);
+    pub fn new(run_boot_rom: bool, variant: GbVariant) -> Self {
+        let config = if run_boot_rom { GbCpuConfig::power_on_state(variant) }
+            else { GbCpuConfig::skip_boot_state(variant) };
     
         Self {
             a: config.initial_a,
@@ -187,15 +191,16 @@ impl GameBoyCpu {
             pc: config.initial_pc,
             sp: config.initial_sp,
             ime: false, ime_pending: false,
-            instruction_step: 0,
+            instruction_step: 0, serviced_bit: 0,
             current: Instruction::Nop,
             current_msb: 0, current_lsb: 0,
             current_opcode: 0, current_value: 0,
             halted: false, halt_bug: false, stopped: false,
-            double_speed: config.supports_double_speed,
+            double_speed: false,
             cb_prefixed: false,
             config,
             variant,
+            stop_delay: 0, pending_speed_switch: false,
         }
     }
     pub fn bc(&self) -> u16 { ((self.b as u16) << 8) | self.c as u16 }
@@ -240,6 +245,25 @@ impl GameBoyCpu {
 
     // exactly one bus access happens per call
     pub fn step_one_m_cycle(&mut self, bus: &mut dyn Bus) {
+        if self.stopped {
+            if bus.joypad_low_transition() {
+                self.stopped = false;
+            } else {
+                bus.idle_cycle();
+                return;
+            }
+        }
+        let stall_cycles = bus.get_dma_stall_cycles(); 
+        if stall_cycles > 0 {
+            bus.set_dma_stall_cycles(stall_cycles - 1);
+            bus.idle_cycle();
+            return;
+        }
+        if self.pending_speed_switch {
+            self.pending_speed_switch = false;
+            bus.perform_speed_switch();
+            self.double_speed = !self.double_speed;
+        }
         if self.halted {
             if bus.irq_pending() != 0 {
                 self.halted = false;
@@ -249,14 +273,25 @@ impl GameBoyCpu {
             }
         }
         if self.instruction_step == 0 {
+//            println!("step_one_m_cycle. PC={:04X} op={:02X} SP={:04X} HL={:04X} BC={:04X} DE={:04X} AF={:04X}", self.pc, bus.peek(self.pc), self.sp, self.hl(), self.bc(), self.de(), self.af());
             if !self.cb_prefixed && self.check_interrupts(bus) { return; }
             if self.ime_pending {
                 self.ime = true;
                 self.ime_pending = false;
             }
             let opcode = self.fetch_byte(bus);
+//                if self.instruction_step == 0 && self.pc >= 0x8000 && self.pc < 0xFF80 {
+//                    println!("PC LEFT ROM: PC={:04X} op={:02X} SP={:04X} HL={:04X} BC={:04X} DE={:04X} AF={:02X}{:02X}",
+//                        self.pc, bus.peek(self.pc), self.sp, self.hl(), self.bc(), self.de(), self.a, self.f);
+//                        panic!("PC LEFT ROM");
+//                    }
+            
 //                println!("step_one_m_cycle. Fetched new Opcode={:02X} Instruction step={}. PC={:04X} SP={:04X} HL={:04X} BC={:04X} DE={:04X} AF={:04X}", opcode, self.instruction_step, self.pc, self.sp, self.hl(), self.bc(), self.de(), self.af());
-            self.current_opcode = opcode;
+//                if self.pc == 0x0100 {
+//                   println!("step_one_m_cycle. Fetched new Opcode={:02X} Instruction step={}. PC={:04X} SP={:04X} HL={:04X} BC={:04X} DE={:04X} AF={:04X}", opcode, self.instruction_step, self.pc, self.sp, self.hl(), self.bc(), self.de(), self.af());
+                    //                    panic!("Testing");
+//                }
+                self.current_opcode = opcode;
             if self.cb_prefixed {
                 let cb = self.decode_cb(opcode);
                 self.current = Instruction::Cb(cb);
@@ -311,8 +346,17 @@ impl GameBoyCpu {
                 true
             },
             Instruction::Nop => true,
-            Instruction::EI => { self.ime_pending = true; true },
-            Instruction::DI => { self.ime = false; self.ime_pending = false; true },
+            Instruction::EI => { 
+                self.ime_pending = true;
+                println!("IME set via {} at PC={:04X}", "EI", self.pc);
+                true 
+            },
+            Instruction::DI => {
+                self.ime = false;
+                self.ime_pending = false;
+                println!("IME set via {} at PC={:04X}", "DI", self.pc);
+                true
+            },
             Instruction::Halt => {
                 let pending = bus.irq_pending() != 0;
                 if !self.ime && pending {
@@ -629,7 +673,7 @@ impl GameBoyCpu {
                         true
                     }                
                 } else {
-                    println!("DecReg execute microstep dst is not MemHL");
+//                    println!("DecReg execute microstep dst is not MemHL");
                     bus.idle_cycle();
                     true
                 }
@@ -651,36 +695,25 @@ impl GameBoyCpu {
                     }
                     2 => {
                         self.push(bus, (self.pc >> 8) as u8); // M3: Push High PC byte
+                        println!("IRQ push hi: SP={:04X} val={:02X}", self.sp, (self.pc>>8) as u8);
                         false
                     }
                     3 => {
                         self.push(bus, (self.pc & 0xFF) as u8); // M4: Push Low PC byte
+                        println!("IRQ push lo: SP={:04X} val={:02X}", self.sp, (self.pc&0xFF) as u8);
                         false
                     }
                     _ => {
                         bus.idle_cycle();
-                        let pending = bus.irq_pending(); // Reads current (self.ie & self.iflags & 0x1F)
+                        let bit = self.serviced_bit;
+//                        let still_pending = (bus.irq_pending() & (1 << bit)) != 0;
+//                        if still_pending {
+                            bus.ack_irq(bit);
+                            self.pc = 0x0040 + (bit as u16) * 8; // M5: Jump to Interrupt Vector
 
-                        let vector = if (pending & 0x01) != 0 {
-                            bus.ack_irq(0);
-                            0x0040 // VBlank
-                        } else if (pending & 0x02) != 0 {
-                            bus.ack_irq(1);
-                            0x0048 // STAT
-                        } else if (pending & 0x04) != 0 {
-                            bus.ack_irq(2);
-                            0x0050 // Timer
-                        } else if (pending & 0x08) != 0 {
-                            bus.ack_irq(3);
-                            0x0058 // Serial
-                        } else if (pending & 0x10) != 0 {
-                            bus.ack_irq(4);
-                            0x0060 // Joypad
-                        } else {
-                            // CANCELED: If IE/IF was cleared by the push, default to $0000
-                            0x0000
-                        };
-                        self.pc = vector; // M5: Jump to Interrupt Vector
+//                        } else {
+//                            self.pc = 0x0000;
+//                        }
                         true // Done, resets instruction_step to 0
                     }
                 }
@@ -969,6 +1002,7 @@ impl GameBoyCpu {
                         _ => {
                             bus.idle_cycle();
                             self.pc = ((self.current_msb as u16) << 8) | (self.current_lsb as u16);
+                            println!("RET -> {:04X}  SP={:04X}", self.pc, self.sp);
                             true
                         }
                     },
@@ -993,6 +1027,7 @@ impl GameBoyCpu {
                             bus.idle_cycle();
                             let target = ((self.current_msb as u16)<< 8) | (self.current_lsb as u16);
                             self.pc = target;
+                            println!("RET (cond) -> {:04X}  SP={:04X}", self.pc, self.sp);
                             true
                         }
                     },
@@ -1007,6 +1042,7 @@ impl GameBoyCpu {
                         bus.idle_cycle();
                         self.pc = (self.current_msb as u16) << 8 | (self.current_lsb as u16);
                         self.ime = true;
+                        println!("RETI -> {:04X}  SP={:04X} IME={}", self.pc, self.sp, self.ime);
                         true
                     }
                 }
@@ -1033,20 +1069,31 @@ impl GameBoyCpu {
             }
 
             Instruction::Stop => {
-                // CGB speed switch. if KEY1 bit 0 is set, toggle double speed mode
-                // Need to implement glitch case later to pass certain test roms.
-                // if interrupt pending and no speed switch is armed, STOP behaves as
-                // one-byte instruction. Following byte executes as opcode.
-                bus.reset_div();
-                let speed_armed = bus.read(0xFF4D) & 0x01 != 0;
-                if speed_armed && self.variant == GbVariant::Cgb {
-                    bus.perform_speed_switch();        // toggles CPU divider, clears KEY1 bit 0
-                    self.pc = self.pc.wrapping_add(1); // consume the second byte
-                } else {
-                    self.stopped = true;               // DMG low-power; wake on joypad
-                    self.pc = self.pc.wrapping_add(1);
+                match self.instruction_step {
+                    1 => {
+                        bus.reset_div();
+                        let dummy = bus.read(self.pc);
+                        self.pc = self.pc.wrapping_add(1);
+
+                        if self.variant == GbVariant::Cgb && bus.is_speed_switch_prepared() {
+                            self.stop_delay = 2050;
+                            false
+                        } else {
+                            self.stopped = true;
+                            true
+                        }
+                    }
+                    _=> {
+                        bus.idle_cycle();
+                        self.stop_delay -= 1;
+                        if self.stop_delay == 0 {
+                            self.pending_speed_switch = true;
+                            true
+                        } else {
+                            false
+                        }
+                    }
                 }
-                true
             }
 
             _ => {
@@ -1251,8 +1298,10 @@ impl GameBoyCpu {
         if !self.ime { return false; }
         let pending = bus.irq_pending();
         if pending == 0 { return false; }
+        println!("IRQ FIRE: saving PC={:04X} pending={:02X} SP={:04X}", self.pc, pending, self.sp);
 
-//        let index = pending.trailing_zeros() as u8;
+        let index = pending.trailing_zeros() as u8;
+        self.serviced_bit = index;
 //        let vector = 0x0040 + (index as u16) * 8;
         self.ime = false;
         

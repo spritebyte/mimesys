@@ -44,6 +44,10 @@ impl GbTimer {
         self.tac & 0b100 != 0
     }
 
+    pub fn reset_div(&mut self) {
+        self.counter = 0;
+    }
+
     fn tick_one_t_cycle(&mut self) {
         if self.reload_pending {
             self.tima = self.tma;

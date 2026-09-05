@@ -130,7 +130,6 @@ func _exit_tree():
 
 func _process(_delta):
 	var now = Time.get_ticks_msec()
-
 	_real_frame_count += 1
 	if emu_system and (now - _fps_timer_msec >= 1000):
 		_real_fps = _real_frame_count
@@ -195,6 +194,7 @@ func _thread_loop():
 		var input_mask = _get_serialized_input()
 		emu_mutex.lock()
 		emu_system.run_slice(input_mask)
+		emu_system.update_audio_buffer();
 		emu_mutex.unlock()
 		_virtual_frame_count += 1
 		next_frame_time += FRAME_TIME_USEC

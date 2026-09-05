@@ -53,7 +53,22 @@ impl Mbc for Mbc3 {
             return self.prg_rom[bank_offset + (addr as usize - 0x4000)];
         }
         else if addr >= 0xA000 && addr <= 0xBFFF {
-            return self.cart_ram[(addr - 0xA000) as usize];
+            if !self.ram_enabled {
+                return 0xFF;
+            }
+            if self.rtc_selected {
+                return match self.rtc_register {
+                    0x08 => self.rtc_seconds,
+                    0x09 => self.rtc_minutes,
+                    0x0A => self.rtc_hours,
+                    0x0B => self.rtc_days,
+                    0x0C => (if self.rtc_halt { 0x40 } else { 0 }) | (if self.rtc_day_carry { 0x80 } else { 0 }),
+                    _=> 0xFF,
+                };
+            } else if !self.cart_ram.is_empty() {
+                let ram_offset = (self.ram_bank as usize * 0x2000) + (addr as usize - 0xA000);
+                return self.cart_ram[ram_offset % self.cart_ram.len()];
+            }
         }
         0xFF
     }
@@ -77,8 +92,30 @@ impl Mbc for Mbc3 {
                     self.rtc_register = value;
                 }
             },
+            0x6000..0x7FFF => {
+                // RTC latch
+            },
             0xA000..=0xBFFF => {
-                self.cart_ram[(addr - 0xA000) as usize] = value;
+                if !self.ram_enabled {
+                    return;
+                }
+                if self.rtc_selected {
+                    match self.rtc_register {
+                        0x08 => self.rtc_seconds = value,
+                        0x09 => self.rtc_minutes = value,
+                        0x0A => self.rtc_hours = value,
+                        0x0B => self.rtc_days = value,
+                        0x0C => {
+                            self.rtc_halt = (value & 0x40) != 0;
+                            self.rtc_day_carry = (value & 0x80) != 0;
+                        }
+                        _ => {}
+                    }
+                } else if !self.cart_ram.is_empty() {
+                    let ram_offset = (self.ram_bank as usize * 0x2000) + (addr as usize - 0xA000);
+                    let len = self.cart_ram.len();
+                    self.cart_ram[ram_offset % len] = value;
+                }
             },
             _=> { },
         }

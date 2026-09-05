@@ -52,8 +52,10 @@ impl Mbc for Mbc1 {
             return self.prg_rom[offset];
         }
         else if addr >= 0xA000 && addr <= 0xBFFF {
-            if self.ram_enabled && self.cart_ram.len() > 0 {
-                return self.cart_ram[(addr - 0xA000) as usize];
+            if self.ram_enabled && !self.cart_ram.is_empty() {
+                let r_bank = if self.mode == 1 { self.bank_reg_2 as usize } else { 0 };
+                let ram_offset = (r_bank * 0x2000) + (addr as usize - 0xA000);
+                return self.cart_ram[ram_offset % self.cart_ram.len()];
             }
         }
         0xFF

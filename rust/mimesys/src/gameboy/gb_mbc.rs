@@ -34,6 +34,6 @@ pub fn make_mbc(
             Ok(Box::new(super::gb_mbc5::Mbc5::new(prg_rom, chr_ram)))
         }
         // Add future mappers here. The system file never has to change!
-        _ => Err(format!("Mapper {} not implemented yet", mbc_id)),
+        _ => Err(format!("MBC {} not implemented yet", mbc_id)),
     }
 }

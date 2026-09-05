@@ -59,7 +59,7 @@ size = Vector2i(896, 360)
 dialog_hide_on_ok = true
 file_mode = 0
 access = 2
-filters = PackedStringArray("*.col, *.rom", "*.nes", "*.gb", "*.zip")
+filters = PackedStringArray("*.col, *.rom", "*.nes", "*.gb,*gbc", "*.zip")
 use_native_dialog = true
 hidden_files_toggle_enabled = false
 

@@ -21,7 +21,17 @@ pub struct GbCpuConfig {
 }
 
 impl GbCpuConfig {
-    pub fn for_variant(variant: GbVariant) -> Self {
+    pub fn power_on_state(variant: GbVariant) -> Self {
+        Self {
+            variant, initial_a: 0x00, initial_f: 0x00,
+            initial_bc: 0x0000, initial_de: 0x0000,
+            initial_hl: 0x0000, initial_sp: 0x0000,
+            initial_pc: 0x0000,
+            supports_double_speed: variant == GbVariant::Cgb,
+        }
+    }
+
+    pub fn skip_boot_state(variant: GbVariant) -> Self {
         match variant {
             // Starting values assume skipping the BIOS. Want to load bios as an option in the future.
             GbVariant::Dmg => Self {

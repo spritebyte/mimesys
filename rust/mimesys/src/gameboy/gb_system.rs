@@ -6,6 +6,7 @@ use crate::gameboy::gb_palette::*;
 use crate::gameboy::gb_mbc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::path::Path;
 
 pub struct GbSystem {
     pub cpu: GameBoyCpu,
@@ -22,9 +23,10 @@ pub struct GbSystem {
 }
 
 impl GbSystem {
-    pub fn from_rom(rom_bytes: &[u8], base_name: &str) -> Result<Self, String> {
+    pub fn from_rom(rom_bytes: &[u8], base_name: &str, bios: &[u8]) -> Result<Self, String> {
         // Validate header and get sizes
         let bytes = rom_bytes;
+        let run_boot_rom = false;
 
         let cart_type_code = bytes[0x147];
         println!("Cart type code={:02X}", cart_type_code);
@@ -34,14 +36,20 @@ impl GbSystem {
         let prg_start = 0;
         let prg_end = prg_start + prg_rom_size;
 
-        let prg_rom = bytes[prg_start..prg_end].to_vec();
+        let prg_rom = bytes.to_vec();
         let cart_ram = if cart_ram_size > 0 { vec![0; cart_ram_size] } else { vec![] };
-        let color_gb = bytes[0x143];
-        let variant = if color_gb == 0x80 || color_gb == 0xC0 {
+        let cgb_mode = (bytes[0x143] & 0x80) != 0;
+        let variant = if cgb_mode {
+            println!("Loading CGB variant");
             GbVariant::Cgb
         } else {
+            println!("Loading DMG variant");
             GbVariant::Dmg
         };
+        let expected_size = if cgb_mode { 2304 } else { 256 };
+        if bios.len() != expected_size {
+            println!("Boot ROM is {} bytes, expected {}", bios.len(), expected_size);
+        }
         let header_title = std::str::from_utf8(&bytes[0x0134..0x0143]).unwrap_or("");
         let selected_palette = PaletteTheme::to_palette_set(PaletteTheme::Auto, header_title);
         // initialize the mapper
@@ -57,16 +65,16 @@ impl GbSystem {
         // initialize cartridge and bus
         let cartridge = GbCartridge::new(prg_rom, cart_ram, mbc?, base_name.to_string());
         println!("Cartridge created: {0} for {1}", cartridge.base_filename, header_title);
-        let bus = GameBoyBus::new(variant, cartridge, Arc::clone(&frame_ready), selected_palette);
+        let bus = GameBoyBus::new(variant, cartridge, Arc::clone(&frame_ready), selected_palette, run_boot_rom, bios);
         println!("prg_rom size: {prg_rom_size} ");
         println!("cart ram size: {cart_ram_size} ");
 
         Ok( {
             Self {
                 bus,
-                cpu: GameBoyCpu::new(variant),
+                cpu: GameBoyCpu::new(run_boot_rom, variant),
                 save_filename: base_name.to_string(),
-                slice_complete: false, cgb_mode: false,
+                slice_complete: false, cgb_mode: cgb_mode,
                 // todo: different path for gameboy color? allow user to select path?
                 save_battery_path: "user://GD_EMU/Gb/Save".to_string(),
                 save_state_path: "user://GD_EMU/Gb/State".to_string(),
@@ -100,7 +108,8 @@ impl GbSystem {
             9 => CartType { mbc_id: 0, has_battery: true },
             0x0F|0x11|0x12 => CartType { mbc_id: 3, has_battery: false },
             0x10|0x13 => CartType { mbc_id: 3, has_battery: true },
-            0x1B => CartType { mbc_id: 5, has_battery: true },
+            0x19|0x1A|0x1C|0x1D => CartType { mbc_id: 5, has_battery: false },
+            0x1B|0x1E|0x1F => CartType { mbc_id: 5, has_battery: true },
             _ => {
                 println!("unknown carttype {:02X}, using default of no MBC", cart_type_code);
                 CartType { mbc_id: 0, has_battery: false }
@@ -108,10 +117,10 @@ impl GbSystem {
         }
     }
 
-    pub fn run_frame(&mut self, input: u8) {
+    pub fn run_frame(&mut self) {
         unsafe { (*self.bus.ppu.get()).clear_slice_complete_flag() };
         self.current_frame = self.current_frame.wrapping_add(1);
-        self.set_input(input);
+    //    self.set_input(input);
         while !unsafe { (*self.bus.ppu.get()).is_slice_complete() } {
             self.tick();
         }
@@ -123,7 +132,7 @@ impl GbSystem {
 
     // Function is setting bits high for pressed, gameboy expects bits to be low for pressed
     // So reading 0xFF00 needs to invert the result
-    pub fn set_input(&mut self, input_mask: u8) {
+   /* pub fn set_input(&mut self, input_mask: u8) {
         let mut gb_pad_state = 0u8;
 
         // Action Buttons (Bits 0..3 -> P10..P13 when P15 is low)
@@ -138,9 +147,9 @@ impl GbSystem {
         if (input_mask & (1 << 0)) != 0 { gb_pad_state |= 1 << 6; } // Up     -> Bit 6
         if (input_mask & (1 << 1)) != 0 { gb_pad_state |= 1 << 7; } // Down   -> Bit 7
 
-        self.bus.pad1_state = gb_pad_state;
+     //   self.bus.pad1_state = gb_pad_state;
     }
-
+*/
     pub fn tick(&mut self) {
         let before = self.bus.master;
         self.cpu.step_one_m_cycle(&mut self.bus);
@@ -150,6 +159,7 @@ impl GbSystem {
 
     pub fn power_on(&mut self) {
         self.is_running.store(true, Ordering::SeqCst);
+        println!("CPU A at boot={:02X}", self.cpu.a);
     }
 
     pub fn power_off(&mut self) {

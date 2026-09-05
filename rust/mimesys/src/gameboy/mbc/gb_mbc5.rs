@@ -29,6 +29,7 @@ impl Mbc5 {
 
     fn _get_selected_rom_bank(&self) -> u16 {
         let bank = ((self.rom_bank_hi as u16) << 8) | self.rom_bank_lo as u16;
+//        println!("MBC5 DEBUG: using rom bank {:02X}", bank & self.bank_mask);
         bank & self.bank_mask
     }
 }

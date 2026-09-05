@@ -47,6 +47,12 @@ pub const PALETTE_MARIO_LAND: DmgPaletteSet = DmgPaletteSet {
     obp1: [0xFFFFFF, 0xFF0000, 0x00FF00, 0x000000], // Red/Green Items
 };
 
+pub const PALETTE_KIRBYS_DREAMLAND: DmgPaletteSet = DmgPaletteSet {
+    bg:   [0xFFFFFF, 0x7733E7, 0x2C2C96, 0x000000], 
+    obp0: [0xF7BEF7, 0xFF0000, 0x0000FF, 0x000000],
+    obp1: [0xFFFFFF, 0xFF0000, 0xE78686, 0x000000],
+};
+
 pub const PALETTE_MARIO_LAND2: DmgPaletteSet = DmgPaletteSet {
     bg:   [0xFFFFFF, 0x7BFF00, 0x11C600, 0x000000], // Yellow/Green background
     obp0: [0xFFFFFF, 0xDFA677, 0x0000FF, 0x000000], // Red/Blue Mario & Enemies
@@ -74,6 +80,7 @@ impl PaletteTheme {
             PaletteTheme::Auto => match rom_title.trim_end_matches('\0') {
                 "SUPER MARIOLAND" => PALETTE_MARIO_LAND,
                 "MARIOLAND2" => PALETTE_MARIO_LAND2,
+                "KIRBY DREAM LAN" => PALETTE_KIRBYS_DREAMLAND,
                 "METROID2"  => PALETTE_METROID_II,
                 _           => PALETTE_DMG_GREEN, // Fallback default
             },
