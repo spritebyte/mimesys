@@ -6,7 +6,7 @@ const STACK_BASE: u16 = 0x100;
     TG-16 uses HuC6280 not 65C02. It extends the 6502/65C02 instruction set. 
 */
 
-use crate::common::bus::AddressBus;
+use crate::common::bus::bus_6502::AddressBus;
 use serde::{Serialize, Deserialize};
 
 #[cfg(test)]

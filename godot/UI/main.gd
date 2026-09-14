@@ -138,7 +138,7 @@ func _process(_delta):
 		_virtual_frame_count = 0
 		_fps_timer_msec = now
 #		print("Real FPS: %d | Virtual FPS: %d" % [_real_fps, _virtual_fps])
-	if emu_system and emu_system.is_frame_ready():
+	if emu_system: #and emu_system.is_frame_ready():
 		var tex_to_apply = emu_system.get_frame_texture()
 		if tex_to_apply:
 			if EmulatorScreen.texture is AtlasTexture:
@@ -243,7 +243,7 @@ func execute_load(path: String, internal_zip_file: String = "") -> void:
 	var new_system = RomLoader.load_rom(path, internal_zip_file)
 	if new_system:
 		emu_system = new_system
-		emu_system.power_on(audio_player)
+		emu_system.power_on()
 		var playback = audio_player.get_stream_playback()
 		emu_system.set_audio_playback(playback)
 		cpu_thread.start(Callable(self, "_thread_loop"))

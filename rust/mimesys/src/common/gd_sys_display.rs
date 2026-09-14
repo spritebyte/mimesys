@@ -1,5 +1,11 @@
 use godot::prelude::*;
 
+pub enum Rotation {
+    None =  0,
+    CW90 =  1,
+    CCW90 = 2,
+}
+
 #[derive(godot::prelude::GodotClass)]
 #[class(base=RefCounted, no_init)]
 pub struct SystemDisplayInfo {
@@ -12,14 +18,40 @@ pub struct SystemDisplayInfo {
     #[export] pub visible_y: i32,
     #[export] pub visible_width: i32,
     #[export] pub visible_height: i32,
-
     // The intended output aspect ratio (e.g., 4.0/3.0 for NES, 3.0/4.0 for DK)
     #[export] pub target_aspect_ratio: f32,
+    #[export] pub rotation: i32,   // arcade boards: None / CW90/ CCW90
 }
 
 #[godot_api]
 impl SystemDisplayInfo {
-    pub fn new() -> Self {
+    pub fn from_core(info: crate::common::system::DisplayInfo) -> Gd<Self> {
+        Gd::from_object(SystemDisplayInfo {
+            buffer_width: info.buffer_width as i32,
+            buffer_height: info.buffer_height as i32,
+            visible_x: info.visible_x as i32,
+            visible_y: info.visible_y as i32,
+            visible_width: info.visible_width as i32,
+            visible_height: info.visible_height as i32,
+            target_aspect_ratio: info.target_aspect_ratio,
+            rotation: info.rotation as i32,   // when you add it (as i32, per earlier)
+        })
+    }
+
+    pub fn create_new(buffer_width: i32, buffer_height: i32, x: i32, y: i32, width: i32, height: i32, aspect_ratio: f32, rotation: i32) -> Self {
+        SystemDisplayInfo {
+            buffer_width,
+            buffer_height,
+            visible_x: x,
+            visible_y: y,
+            visible_width: width,
+            visible_height: height,
+            target_aspect_ratio: aspect_ratio,
+            rotation,
+        }
+    }
+
+    pub fn new_nes() -> Self {
         SystemDisplayInfo {
             buffer_width: 256,
             buffer_height: 240,
@@ -28,6 +60,7 @@ impl SystemDisplayInfo {
             visible_width: 256,
             visible_height: 240,
             target_aspect_ratio: 4.0/3.0,
+            rotation: 0,
         }
     }
 
@@ -40,6 +73,7 @@ impl SystemDisplayInfo {
             visible_width: 160,
             visible_height: 144,
             target_aspect_ratio: 10.0/9.0,
+            rotation: 0,
         }
     }
 

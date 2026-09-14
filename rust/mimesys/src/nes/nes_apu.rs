@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
-use godot::global::godot_print;
-use std::io::Write;
+//use godot::global::godot_print;
+//use std::io::Write;
 
 const LENGTH_TABLE: [u8; 32] = [
     10, 254, 20,  2, 40,  4, 80,  6, 160,  8, 60, 10, 14, 12, 26, 14,

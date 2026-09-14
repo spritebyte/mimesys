@@ -8,7 +8,7 @@ use crate::gameboy::gb_apu::GbAPU;
 use crate::gameboy::gb_joypad::Joypad;
 use crate::gameboy::gb_dma::DmaState;
 use crate::gameboy::gb_timer::GbTimer;
-use std::cell::{UnsafeCell, Cell};
+use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -64,7 +64,7 @@ unsafe impl Send for GameBoyBus {}
 unsafe impl Sync for GameBoyBus {}
 
 impl GameBoyBus {
-    pub fn new(variant: GbVariant, cartridge: GbCartridge, system_frame_ready: Arc<AtomicBool>, selected_palette: DmgPaletteSet, run_boot_rom: bool, boot_rom_data: &[u8]) -> Self {
+    pub fn new(variant: GbVariant, cartridge: GbCartridge, selected_palette: DmgPaletteSet, run_boot_rom: bool, boot_rom_data: &[u8]) -> Self {
         let ram_size: usize = match variant {
             GbVariant::Cgb => 32768,
             _=> 8192,
@@ -78,7 +78,7 @@ impl GameBoyBus {
             boot_rom_mapped: boot_mapped,
             ram: vec![0; ram_size],
             hram: [0; 0x80],
-            ppu: UnsafeCell::new(GbPPU::new(variant, system_frame_ready, selected_palette)),   // Initialize a fresh PPU 
+            ppu: UnsafeCell::new(GbPPU::new(variant, selected_palette)),   // Initialize a fresh PPU 
             apu: UnsafeCell::new(GbAPU::new(44100.0)),
             timer: UnsafeCell::new(GbTimer::new()),
             dma: DmaState::new(),
@@ -130,9 +130,15 @@ impl GameBoyBus {
             // APU Sound registers ($FF10-$FF3F)
             0xFF10..=0xFF3F => unsafe { (*self.apu.get()).read_register(addr) },
             0xFF46 => (self.dma.source_base >> 8) as u8,
-            0xFF40..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => unsafe { (*self.ppu.get()).read_register(addr) },
+            0xFF40..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6C => {
+                let ly = unsafe { (*self.ppu.get()).get_ly() };
+//                if addr == 0xFF44 {
+//                    println!("read LY={} at master={}", ly, self.master);
+//                }
+                unsafe { (*self.ppu.get()).read_register(addr) }
+            },
             0xFF4C => {
-                println!("Read from 0xFF4C returning {:02X}", self.key0);
+//                println!("Read from 0xFF4C returning {:02X}", self.key0);
                 self.key0
             },
             0xFF4D => self.read_key1(),
@@ -166,7 +172,7 @@ impl GameBoyBus {
             // APU range $FF10-$FF3F
             0xFF10..=0xFF3F => unsafe { (*self.apu.get()).write_register(addr, value) },
             0xFF46 => self.dma.start(value, self.master),
-            0xFF40..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6B => {
+            0xFF40..=0xFF4B | 0xFF4F | 0xFF68..=0xFF6C => {
                 unsafe { (*self.ppu.get()).write_register(addr, value) }
             },
             0xFF4C => {
@@ -345,7 +351,7 @@ impl GameBoyBus {
 
         self.hdma_active = false;
         self.hdma_len = 0;
-        self.dma_stall_m_cycles = (blocks as u64) * 32;
+        self.dma_stall_m_cycles = (blocks as u64) * 8;
     }
 
     pub fn tick_hdma_block(&mut self) {

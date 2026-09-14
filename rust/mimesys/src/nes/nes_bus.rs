@@ -1,5 +1,5 @@
 use godot::global::godot_print;
-use crate::common::bus::AddressBus;
+use crate::common::bus::bus_6502::AddressBus;
 //use crate::nes::mappers::Mapper;
 use crate::nes::cartridge::Cartridge;
 use crate::nes::nes_ppu::NesPPU;

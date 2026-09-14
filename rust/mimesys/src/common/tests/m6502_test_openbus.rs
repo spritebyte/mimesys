@@ -16,7 +16,7 @@ macro_rules! emu_print {
 mod tests {
     use super::*;
     use crate::common::m6502::{M6502Cpu,Operation,CpuVariant};
-    use crate::common::bus::AddressBus;
+    use crate::common::bus::bus_6502::AddressBus;
     use crate::nes::nes_ppu::NesPPU;
     use crate::nes::mappers::{Mapper,Mirroring};
     use crate::nes::mapper0::Mapper0;

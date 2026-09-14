@@ -1,3 +1,4 @@
+
 pub struct CpuConfig {
     has_bcd: bool,
     has_jmp_bug: bool,

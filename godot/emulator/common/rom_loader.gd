@@ -87,12 +87,16 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 #			return ColecoSystem.new(bus)
 
 		"gb", "gbc":
+			# TODO: let user select if BIOS should be skipped
+			#       and if specific system should be forced.
 			var bios_path="user://BIOS/gbc_bios.bin"
 			var bios: PackedByteArray = load_bios(bios_path)
 			print("Loaded BIOS '%s': %d bytes" % [bios_path, bios.size()])
 			if bios.is_empty():
 				print("Warning: Boot ROM is empty! Emulation will fall back or skip boot ROM.")
-			var gb_system = GbSystemNode.create_from_bytes(data, base_name.validate_filename(), bios)
+#			var gb_system = GbSystemNode.create_from_bytes(data, base_name.validate_filename(), bios)
+			var gb_system = EmuSystem.new()
+			gb_system.load_cartridge(0, data, base_name.validate_filename(), bios)
 			return gb_system
 
 #			print("TODO: Rewriting in rust...")

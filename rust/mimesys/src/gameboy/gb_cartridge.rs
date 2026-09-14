@@ -1,5 +1,5 @@
 use crate::gameboy::gb_mbc::Mbc;
-use std::cell::{UnsafeCell, Cell};
+use std::cell::UnsafeCell;
 
 pub struct GbCartridge {
     pub prg_rom: Vec<u8>,

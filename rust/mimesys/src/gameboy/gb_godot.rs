@@ -2,13 +2,14 @@ use godot::prelude::*;
 use godot::classes::{AudioStreamGeneratorPlayback};
 use godot::classes::{AudioStreamPlayer,Image,ImageTexture,Texture2D};
 use godot::classes::image::Format;
+use crate::common::system::System;
 use crate::gameboy::gb_system::GbSystem;
-use crate::gameboy::gb_bus::GameBoyBus;
+//use crate::gameboy::gb_bus::GameBoyBus;
 use crate::common::gd_sys_display::SystemDisplayInfo;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc};
-use std::path::PathBuf;
-use std::path::Path;
+use std::sync::atomic::Ordering;
+//use std::sync::{Arc};
+//use std::path::PathBuf;
+//use std::path::Path;
 use std::collections::VecDeque;
 
 // only checking a few bytes from logo
@@ -59,14 +60,21 @@ impl GbSystemNode {
     }
 
     #[func]
-    pub fn run_slice(&mut self, input_mask: u16) { 
+    pub fn run_slice(&mut self, input_mask: u32) { 
         if let Some(sys) = &mut self.system {
-//            sys.set_input(input_mask as u8);
             sys.bus.joypad.set_button_state(input_mask as u8, &mut sys.bus.iflags);
-            sys.run_frame();
-//            self.blit(sys.framebuffer());
-//            self.queue_audio(sys.audio_samples());
+            sys.run_frame(input_mask);
         }
+    }
+
+    #[func]
+    pub fn save_state_to_file(slot: u8) {
+
+    }
+
+    #[func]
+    pub fn load_state_from_file(slot: u8) {
+
     }
 
     #[func]
@@ -74,15 +82,10 @@ impl GbSystemNode {
         self.sys_display.clone()
     }
 
-    fn blit(&mut self, buffer: Vec<u8>) {
-        
-    }
-
     #[func]
     pub fn power_on(&mut self, audio_player: Gd<AudioStreamPlayer>) {
         let Some(sys) = &mut self.system else { return; };
         sys.is_running.store(true, Ordering::SeqCst);
-//        let _playback = audio_player.get_stream_playback();
         let save_path = format!("{}/{}.sav", sys.save_battery_path(), sys.save_filename());
         if sys.has_battery() && godot::classes::FileAccess::file_exists(&save_path) {
             if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::READ) {
@@ -136,25 +139,23 @@ impl GbSystemNode {
             let save_path = GString::from(&save_path_str);
 
             if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::WRITE) {
-//                let mut packed_array = PackedByteArray::new();
-//                packed_array.extend_from_slice(sram_bytes);
+
                 let packed_array = PackedByteArray::from(&sram_bytes[..]);
                 file.store_buffer(&packed_array);
                 file.flush();
-                // Reset the flag so we don't save again until the game modifies SRAM again
                 sys.bus.clear_sram_dirty(); 
                 godot_print!("SRAM successfully saved to {save_path_str}");
             }
             else { println!("Couldn't open file for saving at {save_path}") }
         }
     }
-
+/*
     #[func]
     pub fn is_frame_ready(&self) -> bool {
         let Some(sys) = &self.system else { return false;};
         sys.frame_published.load(Ordering::Acquire)
     }
-
+*/
     #[func]
     pub fn get_current_frame(&self) -> i64 {
         let Some(sys) = &self.system else { return 0;};
@@ -174,7 +175,7 @@ impl GbSystemNode {
     #[func]
     pub fn get_frame_texture(&mut self) -> Gd<Texture2D>  {
         let Some(sys) = &mut self.system else { return Default::default(); };
-        sys.frame_published.store(false, Ordering::Release);
+//        sys.frame_published.store(false, Ordering::Release);
         let pixel_data = {
             let ppu = sys.bus.ppu.get_mut();
             let front_guard = ppu.front_buffer.lock().unwrap();

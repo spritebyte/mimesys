@@ -2,7 +2,7 @@ pub mod gb_dummy;
 pub mod gb_mock_bus;
 mod gb_cpu;
 mod gb_godot;
-mod gb_system;
+pub mod gb_system;
 mod gb_bus;
 mod gb_joypad;
 mod gb_mbc;

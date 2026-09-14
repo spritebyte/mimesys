@@ -1,7 +1,7 @@
 use crate::common::timed::Timed;
 use crate::gameboy::gb_common::GbVariant;
 use crate::gameboy::gb_palette::{DmgPaletteSet,PaletteTheme};
-use crate::gameboy::gb_bus::GameBoyBus;
+//use crate::gameboy::gb_bus::GameBoyBus;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -27,7 +27,7 @@ pub struct GbPPU {
     obp1: u8,
     stat: u8,
     lyc: u8,
-    ly: u8,
+    pub ly: u8,
     pub vram: Vec<u8>,
     pub oam: [u8; 160],
     scanline_bg_indices: [u8; 160],
@@ -38,14 +38,20 @@ pub struct GbPPU {
     pub front_buffer: Arc<Mutex<Vec<u8>>>, // The last fully completed frame, safe for sharing across threads
     
     // Frame published
-    frame_published: Arc<AtomicBool>,
+//    frame_published: Arc<AtomicBool>,
     slice_complete: bool,
     pub frame: u64,
     pub active_palette: DmgPaletteSet,
+    mode3_len: u16,
+    line_sprite_count: u8,
+    lcd_was_on: bool,
+    dots_done: u64,
+    window_drew_this_line: bool,
     // CGB-only
     //hdma_pending: bool,
     hdma_hblank_count: u8,
     pub vbk: u8,
+    opri: u8,             // $FF6C bit 0: 0= OAM-index priority (CGB), 1=X-coord priority (DMG)
     bgpi: u8,
     obpi: u8,
     bgpd: [u8;64],
@@ -53,35 +59,172 @@ pub struct GbPPU {
 }
 
 impl GbPPU {
-    pub fn new(variant: GbVariant, frame_published: Arc<AtomicBool>, active_palette: DmgPaletteSet) -> Self {
-        Self::with_divider(variant, frame_published, active_palette, 1)
+    pub fn new(variant: GbVariant, active_palette: DmgPaletteSet) -> Self {
+        Self::with_divider(variant, active_palette, 1)
     }
 
-    pub fn with_divider(variant: GbVariant, frame_published: Arc<AtomicBool>, active_palette: DmgPaletteSet, div: u64) -> Self {
+    pub fn with_divider(variant: GbVariant, active_palette: DmgPaletteSet, div: u64) -> Self {
         let buffer_size = 160 * 144 * 4;
         let in_cgb_mode = matches!(variant, GbVariant::Cgb);
         let vram_size: usize = if in_cgb_mode { 16384 } else { 8192 };
 
         Self {
             hardware: variant, cgb_mode: in_cgb_mode, hdma_hblank_count: 0,
-            last_master: 0, ticks: 0,
-            dot: 0, current_mode: 0,
+            last_master: 0, ticks: 0, dots_done: 0,
+            dot: 0, current_mode: 0, lcd_was_on: false,
             pending_irqs: 0, frame: 0, prev_stat_line: false,
             vram: vec![0;vram_size], oam: [0;160], scanline_bg_indices: [0; 160],
             scanline_bg_priority: [false;160],
             back_buffer: vec![0; buffer_size],
             front_buffer: Arc::new(Mutex::new(vec![0; buffer_size])),
-            frame_published, slice_complete: false,
-            window_line_counter: 0,
-            div,
+            // frame_published,
+            slice_complete: false,
+            window_line_counter: 0, mode3_len: 0, line_sprite_count: 0,
+            div, window_drew_this_line: false,
             lcdc: 0x91, scy: 0, scx: 0, bgp: 0xFC, wx: 0, wy: 0,
             obp0: 0, obp1: 0, stat: 0x85, lyc: 0, ly: 0,
             active_palette,
-            vbk: 0,
+            vbk: 0, opri: 0,
             bgpi: 0, obpi: 0, bgpd: [0xFF;64], obpd: [0xFF;64],
         }
     }
 
+    pub fn tick(&mut self, elapsed: u64) {
+        // ---- LCD off: PPU is held in reset, no interrupts, LY=0 ----
+        if (self.lcdc & 0x80) == 0 {
+            self.current_mode = 0;
+            self.ly = 0;
+            self.stat &= 0xFC;
+            self.window_line_counter = 0;
+            self.prev_stat_line = false;
+ 
+            // Still pace whole frames so the system keeps advancing while off.
+            // (Reuse self.dot as a free-running accumulator here; it's reset to 0
+            //  the moment the LCD turns back on.)
+            self.dot += elapsed;
+            if self.dot >= 70224 {
+                self.dot -= 70224;
+                self.slice_complete = true;
+            }
+            self.lcd_was_on = false;
+            return;
+        }
+ 
+        // ---- LCD just turned on: restart at line 0, dot 0 ----
+        if !self.lcd_was_on {
+            self.lcd_was_on = true;
+            self.dot = 0;
+            self.ly = 0;
+            self.window_line_counter = 0;
+            self.prev_stat_line = false;
+            self.mode3_len = 172; // provisional; recomputed at first mode-3 entry
+            // NOTE: real hardware makes the first frame after enable slightly
+            // short (mode 3 is a few dots shorter on the very first line). That
+            // only matters for lcdon_timing / lcdon_write_timing — handle later.
+        }
+ 
+        // ---- Normal running: advance dot-by-chunk, never past a line end ----
+        let mut remaining = elapsed;
+        while remaining > 0 {
+            let old_mode = self.current_mode;
+ 
+            // Cap the step at the end of the current line so wraps are clean.
+            let to_line_end = 456 - self.dot;
+            let step = remaining.min(to_line_end);
+            self.dot += step;
+            remaining -= step;
+ 
+            // Completed a line?
+            if self.dot >= 456 {
+                self.dot -= 456;
+//                println!("LY++ at dot={} (was {})", self.dot, self.ly);
+                self.advance_line();
+            }
+ 
+            // Recompute mode from the new absolute position and fire any edges.
+            self.update_mode_and_edges(old_mode);
+        }
+    }
+
+    /// Mode is a pure function of (ly, dot, mode3_len).
+    #[inline]
+    fn derive_mode(&self) -> u8 {
+        if self.ly >= 144 {
+            1 // VBlank
+        } else if self.dot < 80 {
+            2 // OAM scan
+        } else if self.dot < 80 + self.mode3_len as u64 {
+            3 // Drawing
+        } else {
+            0 // HBlank
+        }
+    }
+ 
+    /// Apply the derived mode; fire render / vblank / STAT edges on transitions.
+    fn update_mode_and_edges(&mut self, old_mode: u8) {
+        let new_mode = self.derive_mode();
+ 
+        if new_mode != old_mode {
+            self.current_mode = new_mode;
+            self.stat = (self.stat & 0xFC) | new_mode; // mode bits in STAT
+ 
+            match new_mode {
+                0 => {
+                    if self.ly < 144 {
+                        self.hdma_hblank_count = self.hdma_hblank_count.saturating_add(1);
+                    }
+                }
+                3 => {
+                    // Entering Drawing: latch mode-3 length for THIS line, then
+                    // render. Rendering here (not at HBlank) means each line
+                    // captures palette/scroll as they stand at draw start — the
+                    // fix for the Tiny Toon / Xena per-line palette streaming.
+                    self.mode3_len = self.compute_mode3_len();
+                    self._render_scanline();
+                    self._render_sprites();
+                }
+                1 => {
+                    // Entering VBlank at ly==144.
+                    self._request_vblank_interrupt();
+                    if let Ok(mut front) = self.front_buffer.lock() {
+                        std::mem::swap(&mut self.back_buffer, &mut *front);
+                    }
+//                    self.frame_published.store(true, Ordering::Release);
+                }
+                _ => {}
+            }
+        }
+ 
+        // STAT line (mode sources + LYC coincidence) — rising-edge detected
+        // inside update_stat_line via prev_stat_line. Call every step because
+        // LYC coincidence can change independently of mode.
+        self.update_stat_line();
+    }
+ 
+    /// End-of-line bookkeeping: advance LY, wrap the frame, update coincidence.
+    fn advance_line(&mut self) {
+        self.ly += 1;
+ 
+        if self.ly > 153 {
+            self.ly = 0;
+            self.frame = self.frame.wrapping_add(1);
+            self.slice_complete = true; // one full frame done
+        }
+ 
+        // Window internal line counter: reset at the top of the frame, and
+        // advance on lines where the window is active. (Preserves your previous
+        // semantics; still worth revisiting against a window test ROM.)
+        if self.ly == 0 {
+            self.window_line_counter = 0;
+        } else if self.window_drew_this_line {
+            self.window_line_counter = self.window_line_counter.wrapping_add(1);
+        }
+        self.window_drew_this_line = false;
+        self._update_stat_coincidence();
+        // mode3_len is recomputed when this new line re-enters mode 3.
+    }
+
+    /*
     fn tick_one_dot(&mut self) {
         let buffer_size = 160 * 144 * 4;
 
@@ -99,13 +242,14 @@ impl GbPPU {
         match self.current_mode {
             // HBlank
             0 => {
-                if self.dot >= 204 {
-                    self.dot -= 204;
+                let hblank_len = 456 - 80 - self.mode3_len as u64;
+                if self.dot >= hblank_len {
+                    self.dot -= hblank_len;
+                    println!("LY++ at dot={} (was {})", self.dot, self.ly);
                     self.ly = self.ly.wrapping_add(1);
                     self._update_stat_coincidence();
+
                     if (self.lcdc & 0x20) != 0 && self.ly >= self.wy && self.wx <= 166 {
-                        // increments only when window was actually rendered on that line.
-                        // I need to review this once renderer is in place.
                         self.window_line_counter = self.window_line_counter.wrapping_add(1);
                     }
                     if self.ly == 144 {
@@ -118,6 +262,7 @@ impl GbPPU {
                     } else {
                         self._set_mode(2);    
                     }
+                    println!("STAT mode0 at dot={}", self.dot);
                     self.update_stat_line();
                 }
             }
@@ -143,6 +288,8 @@ impl GbPPU {
             2 => {
                 if self.dot >= 80 {
                     self.dot -= 80;
+                    self.line_sprite_count = self._get_active_sprites().len() as u8;
+                    self.mode3_len = self.compute_mode3_len(); 
                     self._set_mode(3);
                     self._render_scanline();
                     self._render_sprites();
@@ -151,8 +298,8 @@ impl GbPPU {
             }
 
             3 => {
-                if self.dot >= 172 {
-                    self.dot -= 172;
+                if self.dot >= self.mode3_len as u64 {
+                    self.dot -= self.mode3_len as u64;
                     self._set_mode(0);
                     self.update_stat_line();
                 }
@@ -161,9 +308,14 @@ impl GbPPU {
             _ => { }
         }
     }
+    */
 
     pub fn take_irqs(&mut self) -> u8 {
         std::mem::replace(&mut self.pending_irqs, 0)
+    }
+
+    pub fn get_ly(&self) -> u8 {
+        self.ly
     }
 
     pub fn get_front_buffer_ref(&self) -> Arc<Mutex<Vec<u8>>> {
@@ -184,6 +336,7 @@ impl GbPPU {
         if new_mode == 0 && old_mode != 0 && self.ly < 144 {
             self.hdma_hblank_count = self.hdma_hblank_count.saturating_add(1);
         }
+
 /*
         let mut trigger: bool = false;
         if self.current_mode == 0 && (self.stat & 0x08) != 0 { trigger = true; }
@@ -194,6 +347,20 @@ impl GbPPU {
             self._request_stat_interrupt();
         }
 */
+    }
+
+    fn compute_mode3_len(&mut self) -> u16 {
+        let mut len: u16 = 172;
+
+        len += (self.scx & 7) as u16;
+
+        let window_active = 
+            (self.lcdc & 0x20) != 0 && self.ly >= self.wy && self.wx <= 166;
+        if window_active {
+            len += 6;
+        }
+
+        len
     }
 
     pub fn take_hdma_hblanks(&mut self) -> u8 {
@@ -227,6 +394,7 @@ impl GbPPU {
         let line = mode_irq || lyc_irq;
 
         if line && !self.prev_stat_line {   // rising edge only
+//            println!("STAT IRQ raised: dot={} ly={} mode={}", self.dot, self.ly, self.current_mode);
             self._request_stat_interrupt();
         }
         self.prev_stat_line = line;
@@ -250,7 +418,11 @@ impl GbPPU {
 
         for x in 0..160 {
             let win_x = self.wx.saturating_sub(7);
-            let is_win_pixel = is_win_line && x >= win_x;
+//            let is_win_pixel = is_win_line && x >= win_x;
+            let is_win_pixel = is_win_line && win_enabled && self.wx <= 166 && x >= win_x;
+            if is_win_pixel {
+                self.window_drew_this_line = true;
+            }
 
             if !self.cgb_mode && !is_win_pixel && !bg_enabled {
                 let base_idx:usize = (self.ly as usize * 160 + x as usize) * 4;
@@ -430,10 +602,11 @@ impl GbPPU {
                 let byte1 = self.vram[tile_data_addr];
                 let byte2 = self.vram[tile_data_addr + 1];
 
-                if *sprite_idx == 12 {  // mid-screen, once per frame
+/*                if *sprite_idx == 12 {  // mid-screen, once per frame
                    println!("spr{} x={} xflip={} | SCX={} SCY={} LY={}",
                     sprite_idx, x_pos, x_flip, self.scx, self.scy, self.ly);
                 }
+*/
                 for x in 0..8 {
                     let screen_x = x_pos + x;
                     if screen_x < 0 || screen_x >= 160 {
@@ -530,9 +703,11 @@ impl GbPPU {
             }
         }
 
+        let use_x_priority = self.hardware == GbVariant::Dmg || (self.opri & 1) != 0;
+
         // Sort by X coordinate (ascending), then by OAM index (ascending) for priority
         // Closures capture 'oam' by reference (&)
-        if !self.cgb_mode {
+        if use_x_priority {
             active_sprites.sort_by(|&a, &b| {
                 let x_a = oam[a * 4 + 1];
                 let x_b = oam[b * 4 + 1];
@@ -568,6 +743,7 @@ impl GbPPU {
             0xFF69 => if self.cgb_mode { self.bgpd[(self.bgpi & 0x3F) as usize]} else { 0xFF },
             0xFF6A => if self.cgb_mode { self.obpi | 0x40 } else { 0xFF },
             0xFF6B => if self.cgb_mode { self.obpd[(self.obpi & 0x3F) as usize]} else { 0xFF },
+            0xFF6C => if self.hardware == GbVariant::Cgb { self.opri | 0xFE } else { 0xFF },
             _=> { 0xFF },
         }
     }
@@ -600,7 +776,7 @@ impl GbPPU {
             0xFF41 => { self.stat = (self.stat & 0x07) | (p_value & 0x78); },
             0xFF42 => { self.scy = p_value; },
             0xFF43 => { self.scx = p_value;
-                println!("SCX write LY={} val={}", self.ly, p_value); 
+//                println!("SCX write LY={} val={}", self.ly, p_value); 
             },
             0xFF44 => { },
             0xFF45 => { self.lyc = p_value;
@@ -613,9 +789,10 @@ impl GbPPU {
             0xFF4A => { self.wy = p_value; },
             0xFF4B => { self.wx = p_value; },
             0xFF4D => { },
+            0xFF4F => { self.vbk = p_value & 0x01; },
             0xFF68 => { 
                 self.bgpi = p_value;
-                println!("BGP write LY={} val={:02X}", self.ly, p_value);
+//                println!("BGP write LY={} val={:02X}", self.ly, p_value);
             },
             0xFF69 => { 
                 let index = (self.bgpi & 0x3F) as usize;
@@ -624,7 +801,7 @@ impl GbPPU {
                     let new_idx = (index + 1) & 0x3F;
                     self.bgpi = (0x80) | (new_idx as u8);
                 }
-                println!("BGPI write LY={} val={:02X}", self.ly, p_value);
+//                println!("BGPI write LY={} val={:02X}", self.ly, p_value);
             },
             0xFF6A => { self.obpi = p_value; },
             0xFF6B => { 
@@ -635,21 +812,31 @@ impl GbPPU {
                     self.obpi = (0x80) | (new_idx as u8);
                 }
             },
-            0xFF4F => {
-                self.vbk = p_value & 0x01;
-            },
+            0xFF6C => { self.opri = p_value & 0x01; },
             _=> { },
         }
     }
 }
 
 impl Timed for GbPPU {
+    
+    /*
     fn run_until(&mut self, target_master: u64) {
+    
         let target_dot = target_master / self.div;
         while self.ticks < target_dot {
             self.ticks = self.ticks.wrapping_add(1);
             self.dot = self.dot.wrapping_add(1);
             self.tick_one_dot();
+        }
+        self.last_master = target_master;
+    }
+    */
+    fn run_until(&mut self, target_master: u64) {
+        let target_dot = target_master / self.div;
+        if target_dot > self.dots_done {
+            self.tick(target_dot - self.dots_done);
+            self.dots_done = target_dot;
         }
         self.last_master = target_master;
     }
