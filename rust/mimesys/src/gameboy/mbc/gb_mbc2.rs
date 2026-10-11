@@ -7,6 +7,7 @@ pub struct Mbc2 {
     rom_bank: usize,
     ram_enabled: bool,
     bank_mask: usize,
+    sram_dirty: bool,
 }
 
 impl Mbc2 {
@@ -20,6 +21,7 @@ impl Mbc2 {
             rom_bank: 1,
             ram_enabled: false,
             bank_mask,
+            sram_dirty: false,
         }
     }
 }
@@ -44,7 +46,7 @@ impl Mbc for Mbc2 {
     }
 
     fn write(&mut self, addr: u16, value: u8) {
-        if addr >= 0x0000 && addr <= 0x3FFF {
+        if addr <= 0x3FFF {
             if (addr & 0x0100) == 0 {
                 self.ram_enabled = (value & 0x0F) == 0x0A;
             } else {
@@ -54,8 +56,18 @@ impl Mbc for Mbc2 {
         }
         else if addr >= 0xA000 && addr <= 0xBFFF {
             if self.ram_enabled && self.cart_ram.len() > 0 {
+                self.sram_dirty = true;
                 self.cart_ram[(addr & 0x01FF) as usize] = value;
             }
         }
     }
+
+    fn get_sram(&self) -> Option<&[u8]> { Some(&self.cart_ram) }
+    fn load_sram(&mut self, data: &[u8]) {
+        if data.len() == self.cart_ram.len() {
+            self.cart_ram.copy_from_slice(data);
+        }
+    }
+    fn is_sram_dirty(&self) -> bool { self.sram_dirty }
+    fn clear_sram_dirty(&mut self) { self.sram_dirty = false; }
 }

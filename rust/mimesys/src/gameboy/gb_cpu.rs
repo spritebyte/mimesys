@@ -1,4 +1,3 @@
-use crate::gameboy::gb_bus::Bus;
 use crate::gameboy::gb_common::{GbVariant, GbCpuConfig};
 
 const FLAG_Z:u8 = 0x80;
@@ -1415,4 +1414,21 @@ impl GameBoyCpu {
             self.a = res;
         }
     }
+}
+
+pub trait Bus {
+    fn read(&mut self, addr: u16) -> u8;
+    fn write(&mut self, addr: u16, value: u8);
+    fn peek(&mut self, addr: u16) -> u8;
+    fn irq_pending(&self) -> u8;
+    fn reset_div(&mut self) { }
+    fn ack_irq(&mut self, which: u8);
+    fn idle_cycle(&mut self);
+    fn perform_speed_switch(&mut self);
+    fn is_speed_switch_prepared(&self) -> bool {
+        false
+    }
+    fn joypad_low_transition(&mut self) -> bool { false }
+    fn get_dma_stall_cycles(&self) -> u64 { 0 }
+    fn set_dma_stall_cycles(&mut self, value: u64) { }
 }

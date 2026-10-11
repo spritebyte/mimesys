@@ -4,6 +4,7 @@ use crate::gameboy::gb_mbc::Mbc;
 pub struct Mbc0 {
     prg_rom: Vec<u8>,
     cart_ram: Vec<u8>,
+    sram_dirty: bool,
 }
 
 impl Mbc0 {
@@ -11,6 +12,7 @@ impl Mbc0 {
         Self {
             prg_rom,
             cart_ram,
+            sram_dirty: false,
         }
     }
 }
@@ -31,8 +33,18 @@ impl Mbc for Mbc0 {
     fn write(&mut self, addr: u16, value: u8) {
         if addr >= 0xA000 && addr <= 0xBFFF {
             if self.cart_ram.len() > 0 {
+                self.sram_dirty = true;
                 self.cart_ram[(addr - 0xA000) as usize] = value;
             }
         }
     }
+
+    fn get_sram(&self) -> Option<&[u8]> { Some(&self.cart_ram) }
+    fn load_sram(&mut self, data: &[u8]) {
+        if data.len() == self.cart_ram.len() {
+            self.cart_ram.copy_from_slice(data);
+        }
+    }
+    fn is_sram_dirty(&self) -> bool { self.sram_dirty }
+    fn clear_sram_dirty(&mut self) { self.sram_dirty = false; }
 }

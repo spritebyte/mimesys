@@ -1,5 +1,5 @@
 use crate::common::timed::Timed;
-use crate::gameboy::gb_bus::Bus;
+use crate::gameboy::gb_cpu::Bus;
 /*
 pub trait MockBus {
     fn read(&mut self, addr: u16) -> u8;

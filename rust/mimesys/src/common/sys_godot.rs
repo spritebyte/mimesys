@@ -276,7 +276,9 @@ fn kind_from_i32(v: i32) -> SystemKind {
         0 => SystemKind::GameBoy,
         1 => SystemKind::GameBoyColor,
         2 => SystemKind::Gba,
-        3 => SystemKind::Pacman,
+        3 => SystemKind::Coleco,
+        4 => SystemKind::Pacman,
+        5 => SystemKind::DonkeyKong,
         _ => SystemKind::GameBoy,
     }
 }

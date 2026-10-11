@@ -19,7 +19,7 @@ pub struct CartType {
 }
 
 impl GbCartridge {
-    pub fn new(prg_rom: Vec<u8>, chr_rom: Vec<u8>, mbc: Box<dyn Mbc>, base_name:String) -> GbCartridge {
+    pub fn new(prg_rom: Vec<u8>, chr_rom: Vec<u8>, mbc: Box<dyn Mbc>, base_name:String, has_battery: bool) -> GbCartridge {
         Self {
             prg_rom,
             mbc: UnsafeCell::new(mbc),
@@ -28,7 +28,7 @@ impl GbCartridge {
             base_filename: base_name,
             backwards_compatible: false,
             supports_gbc: false,
-            has_battery: false,
+            has_battery,
         }
     }
 

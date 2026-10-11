@@ -1,10 +1,9 @@
-use godot::global::godot_print;
-use crate::common::bus::bus_6502::AddressBus;
+//use godot::global::godot_print;
+use crate::common::cpu::m6502::{M6502Cpu,AddressBus};
 //use crate::nes::mappers::Mapper;
 use crate::nes::cartridge::Cartridge;
 use crate::nes::nes_ppu::NesPPU;
 use crate::nes::nes_apu::NesAPU;
-use crate::common::m6502::M6502Cpu;
 //use serde::{Serialize, Deserialize};
 use std::cell::{UnsafeCell, Cell};
 use std::sync::Arc;
@@ -181,7 +180,6 @@ impl NesBus {
             0x4020..=0xFFFF => self.cartridge.mapper().cpu_read(addr),
             _ => {
                 let val = self.open_bus.get();
-                godot_print!("read open_bus {:02X}", val); 
                 val
             }
         };

@@ -9,6 +9,7 @@ pub struct Mbc3 {
     ram_bank: u8,
     ram_enabled: bool,
     bank_mask: usize,
+    sram_dirty: bool,
     // RTC registers and variables
     rtc_register: u8,
     rtc_seconds: u8,
@@ -33,6 +34,7 @@ impl Mbc3 {
             rom_bank: 1,
             ram_bank: 0,
             ram_enabled: false,
+            sram_dirty: false,
             rtc_register: 0,
             rtc_seconds: 0, rtc_minutes: 0, rtc_hours: 0, rtc_days: 0,
             rtc_halt: false, rtc_day_carry: false, last_system_time: 0,
@@ -112,6 +114,7 @@ impl Mbc for Mbc3 {
                         _ => {}
                     }
                 } else if !self.cart_ram.is_empty() {
+                    self.sram_dirty = true;
                     let ram_offset = (self.ram_bank as usize * 0x2000) + (addr as usize - 0xA000);
                     let len = self.cart_ram.len();
                     self.cart_ram[ram_offset % len] = value;
@@ -120,4 +123,12 @@ impl Mbc for Mbc3 {
             _=> { },
         }
     }
+    fn get_sram(&self) -> Option<&[u8]> { Some(&self.cart_ram) }
+    fn load_sram(&mut self, data: &[u8]) {
+        if data.len() == self.cart_ram.len() {
+            self.cart_ram.copy_from_slice(data);
+        }
+    }
+    fn is_sram_dirty(&self) -> bool { self.sram_dirty }
+    fn clear_sram_dirty(&mut self) { self.sram_dirty = false; }
 }

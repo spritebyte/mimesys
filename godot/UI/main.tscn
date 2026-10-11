@@ -22,19 +22,17 @@ layout_mode = 2
 [node name="FileMenu" type="PopupMenu" parent="MainVerticalStack/TopMenuBar" unique_id=684819892]
 oversampling_override = 1.0
 size = Vector2i(135, 116)
-visible = true
+
+[node name="SettingsMenu" type="PopupMenu" parent="MainVerticalStack/TopMenuBar" unique_id=2133986329]
 
 [node name="EmulationMenu" type="PopupMenu" parent="MainVerticalStack/TopMenuBar" unique_id=1255017904]
 oversampling_override = 1.0
-visible = true
 
 [node name="DebugMenu" type="PopupMenu" parent="MainVerticalStack/TopMenuBar" unique_id=1380072654]
 oversampling_override = 1.0
-visible = true
 
 [node name="ViewMenu" type="PopupMenu" parent="MainVerticalStack/TopMenuBar" unique_id=305318371]
 oversampling_override = 1.0
-visible = true
 
 [node name="ScreenContainer" type="AspectRatioContainer" parent="MainVerticalStack" unique_id=871644046]
 unique_name_in_owner = true
@@ -64,12 +62,34 @@ use_native_dialog = true
 hidden_files_toggle_enabled = false
 
 [node name="RomItemList" type="ItemList" parent="RomDialog" unique_id=392094491]
-offset_right = 40.0
-offset_bottom = 40.0
+offset_left = 8.0
+offset_top = 8.0
+offset_right = 888.0
+offset_bottom = 311.0
 
 [node name="DebugWindow" parent="." unique_id=983059263 instance=ExtResource("3_uw6j2")]
 unique_name_in_owner = true
 visible = false
+
+[node name="NesSettingsWindow" type="Window" parent="." unique_id=177773859]
+oversampling_override = 1.0
+initial_position = 5
+size = Vector2i(400, 300)
+visible = false
+
+[node name="GbSettingsWindow" type="Window" parent="." unique_id=1319007589]
+oversampling_override = 1.0
+initial_position = 5
+size = Vector2i(400, 300)
+visible = false
+
+[node name="Button" type="Button" parent="GbSettingsWindow" unique_id=24472045]
+visible = false
+offset_left = 334.0
+offset_top = 258.0
+offset_right = 384.0
+offset_bottom = 289.0
+text = "Close"
 
 [connection signal="confirmed" from="RomDialog" to="." method="_on_rom_selection_dialog_confirmed"]
 [connection signal="file_selected" from="RomDialog" to="." method="_on_rom_dialog_file_selected"]

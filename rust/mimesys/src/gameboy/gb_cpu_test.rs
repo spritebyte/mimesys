@@ -3,7 +3,7 @@ mod tests {
     use super::*;
     use crate::gameboy::gb_cpu::GameBoyCpu;
     use crate::gameboy::gb_common::GbVariant;
-    use crate::gameboy::gb_bus::Bus;
+    use crate::gameboy::gb_cpu::Bus;
     use crate::gameboy::gb_mock_bus::MockBus;
 
     const FLAG_Z:u8 = 0x80;
@@ -13,7 +13,7 @@ mod tests {
 
     #[test]
     fn test_ld_reg_reg_and_immediate_execution() {
-        let mut cpu = GameBoyCpu::new(GbVariant::Dmg);
+        let mut cpu = GameBoyCpu::new(false, GbVariant::Dmg);
         let mut bus = MockBus::new();
 
         // --- CASE 1: Load Immediate (2 M-Cycles) ---

@@ -11,14 +11,14 @@ pub struct Cartridge {
 }
 
 impl Cartridge {
-    pub fn new(prg_rom: Vec<u8>, chr_rom: Vec<u8>, mapper: Box<dyn Mapper>, base_name:String) -> Cartridge {
+    pub fn new(prg_rom: Vec<u8>, chr_rom: Vec<u8>, mapper: Box<dyn Mapper>, base_name:String, has_battery: bool) -> Cartridge {
         Self {
             prg_rom,
             chr_rom,
             mapper: UnsafeCell::new(mapper),
             mapper_id: 0,
             base_filename: base_name,
-            has_battery: false,
+            has_battery,
         }
     }
 

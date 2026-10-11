@@ -1,6 +1,6 @@
 //use crate::common::m6502::StatusFlags;
 use serde::{Serialize, Deserialize};
-use crate::common::m6502::CpuState;
+use crate::common::cpu::m6502::CpuState;
 use crate::nes::nes_ppu::PpuState;
 use crate::nes::nes_apu::ApuState;
 //use crate::nes::mappers::Mapper;

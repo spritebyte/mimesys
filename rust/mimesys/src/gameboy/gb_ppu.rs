@@ -442,7 +442,7 @@ impl GbPPU {
 
             let tile_row = fetch_y / 8;
             let tile_col = fetch_x / 8;
-            let tile_line = (fetch_y % 8) * 2;
+//            let tile_line = (fetch_y % 8) * 2;
 
             let tile_id_addr: usize = tile_map_base as usize + (tile_row as usize * 32) + tile_col as usize;
             let tile_id = self.vram[tile_id_addr];

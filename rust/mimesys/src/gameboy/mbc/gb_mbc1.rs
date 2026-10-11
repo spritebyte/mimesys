@@ -10,6 +10,7 @@ pub struct Mbc1 {
     bank_mask: usize,
     total_banks: usize,
     ram_enabled: bool,
+    sram_dirty: bool,
 }
 
 impl Mbc1 {
@@ -26,6 +27,7 @@ impl Mbc1 {
             bank_mask,
             total_banks,
             ram_enabled: false,
+            sram_dirty: false,
         }
     }
 
@@ -77,8 +79,8 @@ impl Mbc for Mbc1 {
                 self.mode = value & 0x01;
             }
             0xA000..=0xBFFF => {
-                // TODO: finish this part
                 if self.ram_enabled && self.cart_ram.len() > 0 {
+                    self.sram_dirty = true;
                     let r_bank = if self.mode == 1 { self.bank_reg_2 } else { 0 };
                     let ram_offset = (r_bank as usize * 0x2000) + (addr as usize - 0xA000);
                     let offset:usize = ram_offset % self.cart_ram.len();
@@ -92,4 +94,13 @@ impl Mbc for Mbc1 {
             _=> { }
         }
     }
+
+    fn get_sram(&self) -> Option<&[u8]> { Some(&self.cart_ram) }
+    fn load_sram(&mut self, data: &[u8]) {
+        if data.len() == self.cart_ram.len() {
+            self.cart_ram.copy_from_slice(data);
+        }
+    }
+    fn is_sram_dirty(&self) -> bool { self.sram_dirty }
+    fn clear_sram_dirty(&mut self) { self.sram_dirty = false; }
 }

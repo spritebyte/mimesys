@@ -243,7 +243,7 @@ impl Mapper for Mapper64 {
         if addr >= 0x6000 && addr <= 0x7FFF {
             return self.prg_ram[(addr - 0x6000) as usize];
         }
-        if addr >= 0x8000 && addr <= 0xFFFF {
+        if addr >= 0x8000 {
             // Find which 8KB bank is targeted
             let bank = ((addr - 0x8000) / 0x2000) as usize;
             let offset = self.prg_offsets[bank] + ((addr - 0x8000) & 0x1FFF) as usize;
@@ -297,7 +297,7 @@ impl Mapper for Mapper64 {
                 self.cpu_cycle_prescaler = 0;
             }
         }
-        else if addr >= 0xE000 && addr <= 0xFFFF {
+        else if addr >= 0xE000 {
             if (addr & 1) == 0 {
                 self.irq_enabled.set(false);
                 self.irq_active.set(false);

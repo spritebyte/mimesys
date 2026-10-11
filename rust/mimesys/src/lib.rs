@@ -7,5 +7,10 @@ unsafe impl ExtensionLibrary for GDEmulatorExtension {}
 
 mod nes;
 mod gameboy;
-pub mod common;
+mod common;
+mod coleco;
+mod arcade {
+    pub mod donkey_kong;
+    pub mod pacman;
+}
 

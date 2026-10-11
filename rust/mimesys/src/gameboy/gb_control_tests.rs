@@ -3,7 +3,7 @@ mod control_flow_and_stack_tests {
     use super::*;
     use crate::gameboy::gb_cpu::GameBoyCpu;
     use crate::gameboy::gb_common::GbVariant;
-    use crate::gameboy::gb_bus::Bus;
+    use crate::gameboy::gb_cpu::Bus;
     use crate::gameboy::gb_mock_bus::MockBus;
 
     const FLAG_Z: u8 = 0x80;

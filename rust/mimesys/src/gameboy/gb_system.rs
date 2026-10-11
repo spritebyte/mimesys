@@ -69,7 +69,7 @@ impl GbSystem {
         // let frame_ready = Arc::new(AtomicBool::new(false));
 
         // initialize cartridge and bus
-        let cartridge = GbCartridge::new(prg_rom, cart_ram, mbc?, base_name.to_string());
+        let cartridge = GbCartridge::new(prg_rom, cart_ram, mbc?, base_name.to_string(), cart_type.has_battery);
         println!("Cartridge created: {0} for {1}", cartridge.base_filename, header_title);
         let bus = GameBoyBus::new(variant, cartridge, selected_palette, run_boot_rom, bios);
         println!("prg_rom size: {prg_rom_size} ");
@@ -82,8 +82,8 @@ impl GbSystem {
                 save_filename: base_name.to_string(),
                 slice_complete: false, cgb_mode: cgb_mode,
                 // todo: different path for gameboy color? allow user to select path?
-                save_battery_path: "user://GD_EMU/Gb/Save".to_string(),
-                save_state_path: "user://GD_EMU/Gb/State".to_string(),
+                save_battery_path: "user://GD_EMU/GB/Save".to_string(),
+                save_state_path: "user://GD_EMU/GB/State".to_string(),
                 is_running: Arc::new(AtomicBool::new(false)),
                 current_frame: 0,
 //                frame_published: frame_ready,

@@ -957,7 +957,7 @@ impl NesPPU {
     pub fn cpu_write_reg(&mut self, mapper: &mut dyn crate::nes::mappers::Mapper, reg: u16, value: u8) {
 //        self.decay_timer_upper = 89342;
 //        self.decay_timer_lower = 89342;
-        if self.scanline >= 0 && self.scanline < 240 && self.cycle > 0 && self.cycle < 256 {
+        if self.scanline < 240 && self.cycle > 0 && self.cycle < 256 {
             if reg == 0 || reg == 1 || reg == 5 || reg == 6 {
                 self.mid_scanline_write = true;
             }

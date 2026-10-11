@@ -88,7 +88,7 @@ impl Mapper for Mapper2 {
             let target = (bank * 0x4000) as usize + offset;
             return self.prg_rom[target];
         }
-        else if addr >= 0xC000 && addr <= 0xFFFF {
+        else if addr >= 0xC000 {
             // FIXED bank (always the last bank)
             let bank = (self.prg_banks - 1) as usize;
             let offset = (addr - 0xC000) as usize;

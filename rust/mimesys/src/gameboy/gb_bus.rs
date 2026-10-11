@@ -5,29 +5,13 @@ use crate::gameboy::gb_palette::DmgPaletteSet;
 use crate::gameboy::gb_common::GbVariant;
 use crate::gameboy::gb_ppu::GbPPU;
 use crate::gameboy::gb_apu::GbAPU;
+use crate::gameboy::gb_cpu::Bus;
 use crate::gameboy::gb_joypad::Joypad;
 use crate::gameboy::gb_dma::DmaState;
 use crate::gameboy::gb_timer::GbTimer;
 use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-
-pub trait Bus {
-    fn read(&mut self, addr: u16) -> u8;
-    fn write(&mut self, addr: u16, value: u8);
-    fn peek(&mut self, addr: u16) -> u8;
-    fn irq_pending(&self) -> u8;
-    fn reset_div(&mut self) { }
-    fn ack_irq(&mut self, which: u8);
-    fn idle_cycle(&mut self);
-    fn perform_speed_switch(&mut self);
-    fn is_speed_switch_prepared(&self) -> bool {
-        false
-    }
-    fn joypad_low_transition(&mut self) -> bool { false }
-    fn get_dma_stall_cycles(&self) -> u64 { 0 }
-    fn set_dma_stall_cycles(&mut self, value: u64) { }
-}
 
 pub struct GameBoyBus {
     pub variant: GbVariant,
@@ -335,7 +319,7 @@ impl GameBoyBus {
     // Immediate GDMA Transfer
     fn perform_gdma(&mut self, blocks: u16) {
         let total_bytes = blocks * 16;
-        println!("GDMA {} blocks", blocks);
+//        println!("GDMA {} blocks", blocks);
 
         for _ in 0..total_bytes {
             let byte = self.read_raw(self.hdma_src);
@@ -355,7 +339,7 @@ impl GameBoyBus {
     }
 
     pub fn tick_hdma_block(&mut self) {
-        println!("HDMA block src={:04X} dst={:04X}", self.hdma_src, self.hdma_dst);
+//        println!("HDMA block src={:04X} dst={:04X}", self.hdma_src, self.hdma_dst);
 
         if !self.hdma_active {
             return;

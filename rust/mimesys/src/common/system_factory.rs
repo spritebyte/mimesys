@@ -1,22 +1,23 @@
 use crate::common::system::System;
 use crate::gameboy::gb_system::GbSystem;
-
+use crate::coleco::coleco_system::ColecoSystem;
+use crate::arcade::donkey_kong::dk_system::DKSystem;
 use std::collections::HashMap;
  
 // use crate::gameboy::load_gameboy;
 // use crate::gba::load_gba;
 // use crate::arcade::load_pacman;
  
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemKind {
     GameBoy,
-    GameBoyColor, // same core, variant flag — see note below
+    GameBoyColor,
     Gba,
+    Coleco,
     Pacman,
+    DonkeyKong,
 }
  
-/// Where a system's ROM data comes from. Single cartridge file vs. a named
-/// set of chips (arcade boards are defined by multiple ROMs, usually a zip).
 pub enum RomSource {
     SingleFile(Vec<u8>),
     FileSet(HashMap<String, Vec<u8>>),
@@ -30,7 +31,6 @@ pub struct LoadRequest {
 }
  
 /// Single entry point the Godot layer calls. Returns a boxed trait object;
-/// the caller never sees a concrete system type again.
 pub fn load_system(req: LoadRequest) -> Result<Box<dyn System>, String> {
     match req.kind {
         SystemKind::GameBoy | SystemKind::GameBoyColor => {
@@ -44,17 +44,28 @@ pub fn load_system(req: LoadRequest) -> Result<Box<dyn System>, String> {
         }
         SystemKind::Gba => {
             let rom = req.rom.single().ok_or("GBA needs a single ROM file")?;
-            // BIOS required (games call SWI BIOS routines). Enforce it HERE,
-            // in the constructor path — not on the trait.
             let bios = req.bios.ok_or("GBA requires a BIOS image")?;
             let _ = (rom, bios);
             todo!("call load_gba")
         }
         SystemKind::Pacman => {
             let files = req.rom.file_set().ok_or("Pac-Man needs a ROM set (zip)")?;
-            // Arcade: no BIOS concept; ignore req.bios.
             let _ = files;
             todo!("call load_pacman")
+        }
+
+        SystemKind::DonkeyKong => {
+            let files = req.rom.file_set().ok_or("Donkey Kong needs a ROM set (zip)")?;
+            let _ = files;
+            todo!("call load_dkong")
+        }
+
+        SystemKind::Coleco => {
+            let rom = req.rom.single().ok_or("Colecovision needs a single ROM file")?;
+            let bios: &[u8] = req.bios.as_deref().unwrap_or(&[]);
+            let core = ColecoSystem::from_rom(rom.as_slice(), &req.filename, bios)
+                .map_err(|e| format!("Colecovision from_rom failed: {e}"))?;
+            Ok(Box::new(core))
         }
     }
 }

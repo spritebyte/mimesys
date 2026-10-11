@@ -1,5 +1,3 @@
-use crate::common::bus::arm7t_bus::Bus;
-
 // ---- CPSR bit layout ----
 //  31 30 29 28 ... 7 6 5     4-0
 //   N  Z  C  V      I F T   mode
@@ -118,4 +116,13 @@ impl Arm7T {
         let _ = opcode;
         todo!("decode Thumb instruction")
     }
+}
+
+pub trait Bus {
+    fn read8(&mut self, addr: u32) -> u8;
+    fn read16(&mut self, addr: u32) -> u16;
+    fn read32(&mut self, addr: u32) -> u32;
+    fn write8(&mut self, addr: u32, val: u8);
+    fn write16(&mut self, addr: u32, val: u16);
+    fn write32(&mut self, addr: u32, val: u32);
 }

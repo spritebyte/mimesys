@@ -94,7 +94,7 @@ impl GbSystemNode {
                 sys.load_sram(buffer.as_slice());
                 godot_print!("SRAM loaded successfully during power_on.");
             }
-        } else { println!("No save file doesn't exist at {save_path}"); }
+        } else { println!("No save file exists at {save_path}"); }
         println!("Gb System Power On");
         sys.power_on();
     }
@@ -117,6 +117,8 @@ impl GbSystemNode {
         self.playback = Some(playback);
     }
 
+    //TODO: Doesn't seem to be creating folder if it doesn't already exist.
+    //      Need to dig into that.
     #[func]
     pub fn check_and_save_sram(&mut self) {
         let Some(sys) = &mut self.system else {return;};
@@ -130,10 +132,10 @@ impl GbSystemNode {
             if !godot::classes::DirAccess::dir_exists_absolute(&dir_path) {
                 let err = godot::classes::DirAccess::make_dir_recursive_absolute(&dir_path);
                 if err != godot::global::Error::OK {
-                    godot_print!("Failed to create save directory '{}'. Error: {:?}", dir_path_str, err);
+                    println!("Failed to create save directory '{}'. Error: {:?}", dir_path_str, err);
                     return;
                 }
-                godot_print!("Created missing save directory: {}", sys.save_battery_path);
+                println!("Created missing save directory: {}", sys.save_battery_path);
             }
             let save_path_str = format!("{}/{}.sav", dir_path_str, sys.save_filename());
             let save_path = GString::from(&save_path_str);
@@ -144,7 +146,7 @@ impl GbSystemNode {
                 file.store_buffer(&packed_array);
                 file.flush();
                 sys.bus.clear_sram_dirty(); 
-                godot_print!("SRAM successfully saved to {save_path_str}");
+                println!("SRAM successfully saved to {save_path_str}");
             }
             else { println!("Couldn't open file for saving at {save_path}") }
         }

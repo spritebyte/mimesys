@@ -1,8 +1,5 @@
 class_name RomLoader
 
-# TODO: need better path for default and accept setting to override
-static var bios_path: String = 'res://Tests/Roms/coleco/colecovision.rom'
-
 # Loads a ROM from a file path.
 # - Non-zip files: detected directly by extension.
 # - Single-file zips: the contained file is extracted and detected by its extension.
@@ -73,18 +70,19 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 			var nes_system = NesSystem.create_from_bytes(data, base_name.validate_filename())
 			return nes_system
 
+		# "A26" = Atari 2600
+		# "A52" = Atari 5200
+		# "BIN" = Atari 7800?
+		# TODO: should rely on file structure rather than extension
 		"col", "cv", "rom":
-			print("TODO: Rewriting coleco code...")
-			return null
-#			var bus := ColecoBus.new()
-#			bus.initialize(load_coleco(data))
-#			if bus.rom_data != null:
-#				var _b := bus.rom_data.bios
-#				print("Coleco BIOS loaded")
-#				print("BIOS: %s" % ("%02X " * 16 % [b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7],b[8],b[9],b[10],b[11],b[12],b[13],b[14],b[15]]).strip_edges())
-#			else:
-#				print("Error: Failed to load Coleco ROM")
-#			return ColecoSystem.new(bus)
+			var bios_path="user://BIOS/colecovision.rom"
+			var bios: PackedByteArray = load_bios(bios_path)
+			print("Loaded BIOS '%s': %d bytes" % [bios_path, bios.size()])
+			if bios.is_empty():
+				print("Warning: Boot ROM is empty! Emulation will fall back or skip boot ROM.")
+			var coleco_system = EmuSystem.new()
+			coleco_system.load_cartridge(3, data, base_name.validate_filename(), bios)
+			return coleco_system
 
 		"gb", "gbc":
 			# TODO: let user select if BIOS should be skipped
@@ -180,8 +178,9 @@ static func load_arcade_donkey_kong(zip_path: String) -> Variant:
 	
 #	var bus = DKBus.new(prg_rom, tile_rom_1, tile_rom_2, spr_top1, spr_top2, spr_bot1, spr_bot2, color_prom_2j, color_prom_2k, color_prom_v5e, sound_rom)
 #	return DKSystem.new(bus)
-	print("TODO: Redoing in Rust...")
-	return null
+	var dk_system = EmuSystem.new()
+#	dk_system.load_romset(5, , "dkong")
+	return dk_system
 
 static func load_arcade_pacman(zip_path: String) -> Variant:
 	print("\n--- [ Arcade: Pacman ] ---")

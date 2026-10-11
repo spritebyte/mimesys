@@ -54,7 +54,7 @@ impl Mapper for Mapper3 {
     }
 
     fn cpu_read(&self, addr: u16) -> u8 {
-        if addr >= 0x8000 && addr <= 0xFFFF {
+        if addr >= 0x8000 {
             let mask = if self.prg_banks > 1 { 0x7FFF } else { 0x3FFF };
             return self.prg_rom[(addr & mask) as usize];
         }

@@ -5,6 +5,7 @@ var emu_system: Variant
 @onready var ScreenContainer = %ScreenContainer
 @onready var file_dialog = $RomDialog
 @onready var file_menu = $MainVerticalStack/TopMenuBar/FileMenu
+@onready var settings_menu = $MainVerticalStack/TopMenuBar/SettingsMenu
 @onready var emu_menu = $MainVerticalStack/TopMenuBar/EmulationMenu
 @onready var debug_menu = $MainVerticalStack/TopMenuBar/DebugMenu
 @onready var frame_control = $MainVerticalStack/FrameControl
@@ -38,7 +39,7 @@ var local_input: Dictionary = {}
 enum FileMenuID { LOAD_ROM, RELOAD_ROM, SAVE_STATE, LOAD_STATE, QUIT }
 enum EmuMenuID { RESET, PAUSE, RESUME, STEP_CPU }
 enum DebugMenuID { CPU_REGISTERS, AUDIO_REGISTERS, VDP_REGISTERS, MEMORY_VIEWER, DISASSEMBLY }
-
+enum SettingsMenuID { NES, GB }
 # Called when the node enters the scene tree for the first time.
 func _ready() -> void:
 	get_tree().set_auto_accept_quit(false)
@@ -68,6 +69,11 @@ func init_menus():
 	file_menu.add_item("Quit", FileMenuID.QUIT)
 
 	file_menu.id_pressed.connect(_on_file_menu)
+	
+	# SETTINGS
+	settings_menu.add_item("NES", SettingsMenuID.NES)
+	settings_menu.add_item("Gameboy/GBC", SettingsMenuID.GB)
+	settings_menu.id_pressed.connect(_on_settings_menu)
 
 	# EMULATION
 	emu_menu.add_item("Reset", EmuMenuID.RESET)
@@ -83,6 +89,15 @@ func init_menus():
 	debug_menu.add_item("Audio Registers", DebugMenuID.AUDIO_REGISTERS)
 
 	debug_menu.id_pressed.connect(_on_debug_menu)
+
+func _on_settings_menu(id):
+	match id:
+		SettingsMenuID.NES:
+			#TODO: Show NES Settings
+			pass
+		SettingsMenuID.GB:
+			#TODO: Show GB/GBC Settings
+			pass
 
 func _on_file_menu(id):
 	match id:

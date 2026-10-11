@@ -1,5 +1,4 @@
-use crate::common::m6502::{M6502Cpu, CpuVariant};
-use crate::common::bus::bus_6502::AddressBus;
+use crate::common::cpu::m6502::{M6502Cpu, CpuVariant, AddressBus};
 use crate::nes::nes_bus::NesBus;
 use crate::nes::cartridge::Cartridge;
 use crate::nes::mappers::{self, Mirroring};
@@ -137,6 +136,7 @@ impl NesSystem {
 
         // initialize the mapper
         let mirroring_bit = (header[6] & 0x01) != 0;
+        let has_battery = (header[6] & 0x02) != 0;
         let initial_mirroring:Mirroring = if mirroring_bit { Mirroring::Vertical } else { Mirroring::Horizontal };
         let prg_bank_size = match mapper_id {
             4|206 => 8192,   // MMC3, DxROM: 8KB banks
@@ -161,7 +161,7 @@ impl NesSystem {
         let frame_ready = Arc::new(AtomicBool::new(false));
 
         // initialize cartridge and bus
-        let cartridge = Cartridge::new(prg_rom, chr_rom, mapper, base_name.clone());
+        let cartridge = Cartridge::new(prg_rom, chr_rom, mapper, base_name.clone(), has_battery);
         godot_print!("Cartridge created: {0}", cartridge.base_filename);
         let bus = NesBus::new(cartridge, Arc::clone(&frame_ready));
         let rewind_buffer = RewindBuffer::new(60, 60);
@@ -188,6 +188,20 @@ impl NesSystem {
                 current_frame: 0,
             }
         }))
+    }
+
+    #[func]
+    pub fn load_save(&mut self) {
+        let save_path = format!("{}/{}.sav", self.save_battery_path, self.save_filename);
+        if self.bus.cartridge.has_battery && godot::classes::FileAccess::file_exists(&save_path) {
+            if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::READ) {
+                let file_length = file.get_length() as i64;
+                let buffer = file.get_buffer(file_length);
+                self.bus.load_sram(buffer.as_slice());
+                godot_print!("SRAM loaded successfully during power_on.");
+                println!("SRAM loaded successfully during power_on.");
+            }
+        } else { println!("File doesn't exist at {save_path}"); }
     }
 
     #[func]
@@ -339,6 +353,7 @@ impl NesSystem {
                 let buffer = file.get_buffer(file_length);
                 self.bus.load_sram(buffer.as_slice());
                 godot_print!("SRAM loaded successfully during power_on.");
+                println!("SRAM loaded succesfully during power_on");
             }
         } else { println!("File doesn't exist at {save_path}"); }
         println!("NES System Power On: Audio streams mapped and checked for SRAM");
@@ -413,7 +428,7 @@ impl NesSystem {
     pub fn load_state_from_bytes(&mut self, data: &[u8]) -> Result<(), String> {
         let config = bincode::config::standard().with_fixed_int_encoding();
         match bincode::serde::decode_from_slice::<NesSaveState, _>(data, config) {
-            Ok((state, _)) => { self.apply_save_state(&state); Ok(()) }
+            Ok((state, _)) => { let _ = self.apply_save_state(&state); Ok(()) }
             Err(e) => Err(format!("Failed to decode save state: {:?}", e)),
         }
     }
@@ -475,10 +490,10 @@ impl NesSystem {
 //                packed_array.extend_from_slice(sram_bytes);
                 let packed_array = PackedByteArray::from(&sram_bytes[..]);
                 file.store_buffer(&packed_array);
-                
+                file.flush();
                 // Reset the flag so we don't save again until the game modifies SRAM again
                 self.bus.clear_sram_dirty(); 
-                godot_print!("SRAM auto-flushed to disk safely.");
+                godot_print!("SRAM auto-flushed to disk safely. {save_path}", );
             }
             else { println!("Couldn't open file for saving at {save_path}") }
         }

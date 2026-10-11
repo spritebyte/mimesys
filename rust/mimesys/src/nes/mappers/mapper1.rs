@@ -120,7 +120,7 @@ impl Mapper for Mapper1 {
             return 0x00;
         }
 
-        if addr >= 0x8000 && addr <= 0xFFFF {
+        if addr >= 0x8000 {
             let prg_mode = (self.control >> 2) & 0x03;
 //            godot_print!("prg_mode={:02X}, control={:02X}", prg_mode, self.control);
             let _bank_size: usize = 16384;
