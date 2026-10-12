@@ -162,38 +162,33 @@ func _process(_delta):
 				# Fallback if a frame arrives before setup_screen executes
 				EmulatorScreen.texture = tex_to_apply
 
+const INPUT_BITS := {
+	"c1_up": 0, "c1_down": 1, "c1_left": 2, "c1_right": 3,
+	"c1_b": 4, "c1_a": 5, "c1_select": 6, "c1_start": 7,
+	"coin": 16, "c2_start": 17,
+}
+
+const KEYPAD_ACTIONS := ["c1_0", "c1_1", "c1_2", "c1_3", "c1_4", "c1_5",
+	"c1_6", "c1_7", "c1_8", "c1_9", "c1_star", "c1_hash"]
+
 func _get_serialized_input() -> int:
 	var mask = 0x00
 	# --- Low Byte (Bits 0-7): Joystick & Fire Buttons ---
-	if Input.is_action_pressed("c1_up"):     mask |= (1 << 0)
-	if Input.is_action_pressed("c1_down"):   mask |= (1 << 1)
-	if Input.is_action_pressed("c1_left"):   mask |= (1 << 2)
-	if Input.is_action_pressed("c1_right"):  mask |= (1 << 3)
-	if Input.is_action_pressed("c1_b"): mask |= (1 << 4)
-	if Input.is_action_pressed("c1_a"): mask |= (1 << 5)
-	if Input.is_action_pressed("c1_select"): mask |= (1 << 6)
-	if Input.is_action_pressed("c1_start"): mask |= (1 << 7)
+	for action in INPUT_BITS:
+		if Input.is_action_pressed(action):
+			mask |= 1 << INPUT_BITS[action]
 
 	# --- High Byte (Bits 8-15): Keypad (Serialized as a 4-bit nibble) ---
 	# Instead of giving each key its own bit, compress the pressed key 
 	# into a standard 4-bit number (0-15), just like real hardware does!
 	var key_value = 0x0F # 0x0F means no key is pressed
-	if Input.is_action_pressed("c1_0"):    key_value = 0x00
-	elif Input.is_action_pressed("c1_1"):  key_value = 0x01
-	elif Input.is_action_pressed("c1_2"):  key_value = 0x02
-	elif Input.is_action_pressed("c1_3"):  key_value = 0x03
-	elif Input.is_action_pressed("c1_4"):  key_value = 0x04
-	elif Input.is_action_pressed("c1_5"):  key_value = 0x05
-	elif Input.is_action_pressed("c1_6"):  key_value = 0x06
-	elif Input.is_action_pressed("c1_7"):  key_value = 0x07
-	elif Input.is_action_pressed("c1_8"):  key_value = 0x08
-	elif Input.is_action_pressed("c1_9"):  key_value = 0x09
-	elif Input.is_action_pressed("c1_star"): key_value = 0x0A
-	elif Input.is_action_pressed("c1_hash"): key_value = 0x0B
-	
+	for i in KEYPAD_ACTIONS.size():
+		if Input.is_action_pressed(KEYPAD_ACTIONS[i]):
+			key_value = i
+			break
 	mask |= (key_value << 8)
-#	print("Mask=%02X" % mask)
 	return mask
+	
 const FRAME_TIME_USEC := 16743
 
 func _thread_loop():
@@ -262,7 +257,7 @@ func execute_load(path: String, internal_zip_file: String = "") -> void:
 		var playback = audio_player.get_stream_playback()
 		emu_system.set_audio_playback(playback)
 		cpu_thread.start(Callable(self, "_thread_loop"))
-		var display_info = emu_system.get_display_info()
+		var display_info = emu_system.display_info()
 		if display_info:
 			setup_screen(display_info)
 		else:

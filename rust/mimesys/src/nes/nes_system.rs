@@ -210,6 +210,11 @@ impl NesSystem {
     }
 
     #[func]
+    pub fn display_info(&self) -> Gd<SystemDisplayInfo> {
+        self.sys_display.clone()
+    }
+
+    #[func]
     pub fn run_slice(&mut self, input_mask: u16) {   
         if !self.is_running.load(Ordering::Relaxed) {
             return;

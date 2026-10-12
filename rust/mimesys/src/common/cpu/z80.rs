@@ -877,6 +877,15 @@ impl Z80Cpu {
         }
     }
 
+    pub fn nmi(&mut self, bus: &mut dyn Bus) -> u32 {
+        self.halted = false;
+        self.iff1 = false;
+        self.inc_r();
+        self.push16(bus, self.pc);
+        self.pc = 0x0066;
+        11
+    }
+
     fn inc_r(&mut self) {
         self.r = (self.r & 0x80) | self.r.wrapping_add(1) & 0x7F;
     }

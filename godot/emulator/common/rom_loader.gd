@@ -1,5 +1,7 @@
 class_name RomLoader
 
+const ARCADE_DB_PATH := "user://arcade_games.json"
+
 # Loads a ROM from a file path.
 # - Non-zip files: detected directly by extension.
 # - Single-file zips: the contained file is extracted and detected by its extension.
@@ -40,7 +42,8 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 				# Multi-file zip = arcade ROM set. Match by zip name.
 				print("More than 1 file in zip")
 				
-				return check_and_load_arcade(path)
+				return load_arcade(path)
+#				return check_and_load_arcade(path)
 
 			elif valid_rom_files.size() == 1:
 				# Single-file zip = console ROM. Extract and detect by extension.
@@ -81,7 +84,7 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 			if bios.is_empty():
 				print("Warning: Boot ROM is empty! Emulation will fall back or skip boot ROM.")
 			var coleco_system = EmuSystem.new()
-			coleco_system.load_cartridge(3, data, base_name.validate_filename(), bios)
+			coleco_system.load_cartridge("coleco", data, base_name.validate_filename(), bios)
 			return coleco_system
 
 		"gb", "gbc":
@@ -94,7 +97,10 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 				print("Warning: Boot ROM is empty! Emulation will fall back or skip boot ROM.")
 #			var gb_system = GbSystemNode.create_from_bytes(data, base_name.validate_filename(), bios)
 			var gb_system = EmuSystem.new()
-			gb_system.load_cartridge(0, data, base_name.validate_filename(), bios)
+			if actual_ext == "gb":
+				gb_system.load_cartridge("gb", data, base_name.validate_filename(), bios)
+			else:
+				gb_system.load_cartridge("gbc", data, base_name.validate_filename(), bios)				
 			return gb_system
 
 #			print("TODO: Rewriting in rust...")
@@ -116,6 +122,7 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 			return null
 
 
+# deprecated
 # Matches a multi-file zip against known arcade game sets by the zip's base name.
 # Add new arcade systems to the match block here.
 static func check_and_load_arcade(zip_path: String) -> Variant:
@@ -124,7 +131,7 @@ static func check_and_load_arcade(zip_path: String) -> Variant:
 
 	match zip_name:
 		"dkong", "dkongjr":
-			return load_arcade_donkey_kong(zip_path)
+			return load_arcade_donkey_kong(zip_path, zip_name)
 		"invaders":
 			return load_arcade_space_invaders(zip_path)
 		# Add more here as you implement them:
@@ -137,7 +144,7 @@ static func check_and_load_arcade(zip_path: String) -> Variant:
 			return null
 
 
-static func load_arcade_donkey_kong(zip_path: String) -> Variant:
+static func load_arcade_donkey_kong(zip_path: String, zip_name: String) -> Variant:
 	print("\n--- [ Arcade: Donkey Kong ] ---")
 	print("Zip: %s" % zip_path.get_file())
 	var zip := ZIPReader.new()
@@ -145,6 +152,7 @@ static func load_arcade_donkey_kong(zip_path: String) -> Variant:
 	print("Files in zip:")
 	for f in zip.get_files():
 		print("  %s (%d bytes)" % [f, zip.read_file(f).size()])
+	var files_dict = {}
 	# Load Program ROMs into a flat 16KB buffer
 	var prg_rom = PackedByteArray()
 	prg_rom.resize(0x4000)
@@ -155,6 +163,7 @@ static func load_arcade_donkey_kong(zip_path: String) -> Variant:
 		for j in range(data.size()):
 			prg_rom[(i * 0x1000) + j] = data[j]
 
+	files_dict["prg_rom"] = prg_rom
 	# Load Sprite data
 	var sprite_rom = PackedByteArray()
 	sprite_rom.resize(0x2000)
@@ -162,6 +171,8 @@ static func load_arcade_donkey_kong(zip_path: String) -> Variant:
 	var spr_top2 = zip.read_file("l_4r_b.bin")  # plane 1, top half
 	var spr_bot1 = zip.read_file("l_4n_b.bin")  # plane 0, bottom half (y=8-15)
 	var spr_bot2 = zip.read_file("l_4s_b.bin")  # plane 1, bottom half
+	files_dict["sprite_rom"] = sprite_rom
+	
 	# Load Graphics ROMs (keeping separate for the Video Hardware)
 	var tile_rom_1 = zip.read_file("v_5h_b.bin")
 	var tile_rom_2 = zip.read_file("v_3pt.bin")
@@ -171,15 +182,19 @@ static func load_arcade_donkey_kong(zip_path: String) -> Variant:
 	var color_prom_2k = zip.read_file("c-2k.bpr")
 	var color_prom_v5e = zip.read_file("v-5e.bpr")
 
+	files_dict["tile_rom_1"] = tile_rom_1
+	files_dict["tile_rom_2"] = tile_rom_2
+	files_dict["color_prom_2j"] = color_prom_2j
+	files_dict["color_prom_2k"] = color_prom_2k
+	files_dict["color_prom_v5e"] = color_prom_v5e
 	var sound_rom_1 = zip.read_file("s_3i_b.bin")
 	var sound_rom_2 = zip.read_file("s_3j_b.bin")
 	var sound_rom = sound_rom_1 + sound_rom_2
+	files_dict["sound_rom"] = sound_rom
 	zip.close()
 	
-#	var bus = DKBus.new(prg_rom, tile_rom_1, tile_rom_2, spr_top1, spr_top2, spr_bot1, spr_bot2, color_prom_2j, color_prom_2k, color_prom_v5e, sound_rom)
-#	return DKSystem.new(bus)
 	var dk_system = EmuSystem.new()
-#	dk_system.load_romset(5, , "dkong")
+	dk_system.load_romset(5, files_dict, zip_name)
 	return dk_system
 
 static func load_arcade_pacman(zip_path: String) -> Variant:
@@ -236,7 +251,6 @@ static func load_arcade_space_invaders(zip_path: String) -> Variant:
 #	rom.cartridge = data
 #	return rom
 
-
 static func load_bios(p_path: String) -> PackedByteArray:
 	if not FileAccess.file_exists(p_path):
 		print("Warning: BIOS not found at '%s'" % p_path)
@@ -245,3 +259,84 @@ static func load_bios(p_path: String) -> PackedByteArray:
 	var data := file.get_buffer(file.get_length())
 	file.close()
 	return data
+
+static func load_arcade(zip_path: String) -> EmuSystem:
+	var set_id := zip_path.get_file().get_basename().to_lower()   # "dkong.zip" -> "dkong"
+	var db := _load_arcade_db()
+	if not db.has(set_id):
+		push_error("Unknown arcade set '%s' (not in %s)" % [set_id, ARCADE_DB_PATH])
+		return null
+	var game: Dictionary = db[set_id]
+	print("\n--- [ Arcade: %s ] ---" % game.get("title", set_id))
+
+	# Open this set's zip, then its parent's, and so on.
+	# (Variant zips often hold only the files that differ.)
+	var zips: Array[ZIPReader] = []
+	var id := set_id
+	while id != "":
+		var zip := ZIPReader.new()
+		if zip.open(zip_path.get_base_dir().path_join(id + ".zip")) == OK:
+			zips.append(zip)
+		id = db.get(id, {}).get("parent", "")
+
+	var regions := _resolve_regions(db, set_id)
+	var out := {}
+	var ok := true
+	for region_name in regions:
+		var region: Dictionary = regions[region_name]
+		var buf := PackedByteArray()
+		buf.resize(region["size"].hex_to_int())
+		for rom in region["roms"]:
+			var data := _read_from_zips(zips, rom["name"])
+			var expected: int = rom["size"].hex_to_int()
+			if data.is_empty():
+				push_error("%s: missing %s" % [set_id, rom["name"]])
+				ok = false
+				continue
+			if data.size() != expected:
+				push_error("%s: %s is %d bytes, expected %d" % [set_id, rom["name"], data.size(), expected])
+				ok = false
+				continue
+			for off in [rom["offset"]] + rom.get("reload", []):
+				_copy_into(buf, off.hex_to_int(), data)
+		out[region_name] = buf
+
+	for z in zips:
+		z.close()
+	if not ok:
+		return null
+
+	var sys := EmuSystem.new()
+	if not sys.load_arcade(_driver_of(db, set_id), set_id, out):
+		return null
+	return sys
+
+# A variant's regions replace its parent's, one whole region at a time
+static func _resolve_regions(db: Dictionary, set_id: String) -> Dictionary:
+	var game: Dictionary = db[set_id]
+	var regions := {}
+	if game.has("parent"):
+		regions = _resolve_regions(db, game["parent"])
+	regions.merge(game.get("regions", {}), true)
+	return regions
+
+# Variants inherit "driver" (and anything else) from the parent if they don't set it
+static func _driver_of(db: Dictionary, set_id: String) -> String:
+	var game: Dictionary = db[set_id]
+	if game.has("driver"):
+		return game["driver"]
+	return _driver_of(db, game["parent"])
+
+static func _read_from_zips(zips: Array[ZIPReader], file: String) -> PackedByteArray:
+	for zip in zips:
+		if zip.get_files().has(file):
+			return zip.read_file(file)
+	return PackedByteArray()
+
+static func _copy_into(dst: PackedByteArray, offset: int, src: PackedByteArray) -> void:
+	for i in src.size():
+		dst[offset + i] = src[i]
+
+static func _load_arcade_db() -> Dictionary:
+	var parsed = JSON.parse_string(FileAccess.get_file_as_string(ARCADE_DB_PATH))
+	return parsed if parsed is Dictionary else {}

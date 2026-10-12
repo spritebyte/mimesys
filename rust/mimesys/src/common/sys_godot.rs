@@ -4,10 +4,12 @@ use godot::classes::{Image,ImageTexture,Texture2D};
 use godot::classes::image::Format;
 use crate::common::system::{System,DisplayInfo};
 use crate::common::gd_sys_display::SystemDisplayInfo;
+use crate::common::rotate::rotate_rgba;
+use crate::common::system::Rotation;
 //use std::sync::atomic::Ordering;
 use std::collections::VecDeque;
 use std::collections::HashMap;
-use crate::common::system_factory::{load_system, LoadRequest, RomSource, SystemKind};
+use crate::common::system_factory::{ CartSystem, load_system, LoadRequest };
 
 #[derive(GodotClass)]
 #[class(base=RefCounted)]
@@ -36,32 +38,28 @@ impl IRefCounted for EmuSystem {
 #[godot_api]
 impl EmuSystem {
     #[func]
-    fn load_cartridge(&mut self, kind: i32, rom: PackedByteArray, filename: String, bios: PackedByteArray) -> bool {
-        let bios_opt = if bios.is_empty() { None } else { Some(bios.to_vec()) };
-        let req = LoadRequest {
-            kind: kind_from_i32(kind),
-            rom: RomSource::SingleFile(rom.to_vec()),
-            filename,
-            bios: bios_opt,
+    fn load_cartridge(&mut self, system_id: GString, rom: PackedByteArray, filename: String, bios: PackedByteArray) -> bool {
+        let system = match CartSystem::from_id(&system_id.to_string()) {
+            Ok(s) => s,
+            Err(e) => { godot_error!("{e}"); return false; }
         };
-        self.finish_load(req)
+        let bios = if bios.is_empty() { None } else { Some(bios.to_vec()) };
+        self.finish_load(LoadRequest::Cartridge { system, rom: rom.to_vec(), filename, bios })
     }
 
     #[func]
-    fn load_romset(&mut self, kind: i32, files: VarDictionary, filename: String) -> bool {
-        let mut set: HashMap<String, Vec<u8>> = HashMap::new();
-        for (k, v) in files.iter_shared() {
+    fn load_arcade(&mut self, driver: GString, set_name: GString, regions: VarDictionary) -> bool {
+        let mut map = HashMap::new();
+        for (k, v) in regions.iter_shared() {
             let name: GString = k.to();
             let bytes: PackedByteArray = v.to();
-            set.insert(name.to_string(), bytes.to_vec());
+            map.insert(name.to_string(), bytes.to_vec());
         }
-        let req = LoadRequest {
-            kind: kind_from_i32(kind),
-            rom: RomSource::FileSet(set),
-            filename,
-            bios: None,
-        };
-        self.finish_load(req)
+        self.finish_load(LoadRequest::Arcade {
+            driver: driver.to_string(),
+            set_name: set_name.to_string(),
+            regions: map,
+        })
     }
  
     fn finish_load(&mut self, req: LoadRequest) -> bool {
@@ -82,10 +80,15 @@ impl EmuSystem {
 
     #[func]
     fn display_info(&self) -> Gd<SystemDisplayInfo> {
-        let info = match &self.system {
-            Some(sys) => sys.display_info(),
-            None => return SystemDisplayInfo::from_core(DisplayInfo::default()),
+        let Some(sys)= &self.system else {
+            return SystemDisplayInfo::from_core(DisplayInfo::default());
         };
+        let mut info = sys.display_info();
+        if !matches!(info.rotation, Rotation::None) {
+            std::mem::swap(&mut info.buffer_width, &mut info.buffer_height);
+            std::mem::swap(&mut info.visible_x, &mut info.visible_y);
+            std::mem::swap(&mut info.visible_width, &mut info.visible_height);
+        }
         SystemDisplayInfo::from_core(info)
     }
 
@@ -200,10 +203,18 @@ impl EmuSystem {
     #[func]
     pub fn get_frame_texture(&mut self) -> Gd<Texture2D>  {
         let Some(sys) = &mut self.system else { return Default::default(); };
-//        sys.set_frame_published(false);
+        //        sys.set_frame_published(false);
         //        sys.frame_published.store(false, Ordering::Release);
-        let (w, h) = { let d = sys.display_info(); (d.visible_width, d.visible_height) };
-        let pixel_data = PackedByteArray::from(sys.framebuffer());
+        let info = sys.display_info();
+        let (pixels, w, h) = rotate_rgba(
+            sys.framebuffer(),
+            info.visible_width as usize,
+            info.visible_height as usize,
+            info.rotation,
+        );
+        let pixel_data = PackedByteArray::from(pixels.as_slice());
+        //        let (w, h) = { let d = sys.display_info(); (d.visible_width, d.visible_height) };
+//        let pixel_data = PackedByteArray::from(sys.framebuffer());
 
         if self.cached_image.is_none() {
             let image = Image::create_from_data(w as i32, h as i32, false, Format::RGBA8, &pixel_data).unwrap();
@@ -271,14 +282,14 @@ impl EmuSystem {
     }
 }
 
+/*
 fn kind_from_i32(v: i32) -> SystemKind {
     match v {
         0 => SystemKind::GameBoy,
         1 => SystemKind::GameBoyColor,
         2 => SystemKind::Gba,
         3 => SystemKind::Coleco,
-        4 => SystemKind::Pacman,
-        5 => SystemKind::DonkeyKong,
         _ => SystemKind::GameBoy,
     }
 }
+*/

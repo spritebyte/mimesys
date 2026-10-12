@@ -1,47 +1,88 @@
 use crate::common::cpu::z80::Bus;
-use crate::arcade::donkey_kong::dk_vdp::DKVDP;
-use crate::arcade::donkey_kong::dk_psg::DKPSG;
-use crate::arcade::donkey_kong::dk_input::Joypad;
-use std::cell::UnsafeCell;
+use crate::arcade::donkey_kong::dk_video::DKVideo;
+use crate::arcade::donkey_kong::dk_dma::I8257;
 
 pub struct DKBus {
-    pub ram: Vec<u8>,
-    pub vdp: UnsafeCell<DKVDP>,
-    pub psg: UnsafeCell<DKPSG>,
-    pub joypad: Joypad,
-    last_master: u64,
-    pub master: u64,
-    open_bus: u8,
+    rom: Vec<u8>,
+    ram: Vec<u8>,
+    pub video: DKVideo,
+    dma: I8257,
+
+    pub in0: u8,
+    pub in1: u8,
+    pub in2: u8,
+    pub dsw0: u8,
+
+    pub nmi_mask: bool,
+
+    pub sound_latch: u8,
+    pub sound_bits: u8,
 }
 
-unsafe impl Send for DKBus {}
-unsafe impl Sync for DKBus {}
-
 impl DKBus {
-    pub fn new() -> Self {
-        let ram_size = 8192;
+    pub fn new(rom: Vec<u8>, video: DKVideo) -> Self {
         Self {
-            ram: vec![0; ram_size],
-            vdp: UnsafeCell::new(DKVDP::new()),
-            psg: UnsafeCell::new(DKPSG::new(44100.0)),
-            joypad: Joypad::new(),
-            last_master: 0, master: 0,
-            open_bus: 0,
+            rom,
+            ram: vec![0; 0x0C00],
+            video,
+            dma: I8257::default(),
+            in0: 0, in1: 0, in2: 0,
+            dsw0: 0x80,
+            nmi_mask: false,
+            sound_latch: 0,
+            sound_bits: 0,
+        }
+    }
+
+    fn run_dma(&mut self) {
+        let len = self.dma.length(0);
+        let (src, dst) = (self.dma.addr[0], self.dma.addr[1]);
+        for i in 0..len {
+            let v = self.read(src.wrapping_add(i));
+            self.write(dst.wrapping_add(i), v);
         }
     }
 }
 
 impl Bus for DKBus {
     fn read(&mut self, addr: u16) -> u8 {
-        0
+        match addr {
+            0x0000..=0x4FFF => self.rom.get(addr as usize).copied().unwrap_or(0),
+            0x6000..=0x6BFF => self.ram[(addr - 0x6000) as usize],
+            0x7000..=0x73FF => self.video.sprite_ram[(addr - 0x7000) as usize],
+            0x7400..=0x77FF => self.video.video_ram[(addr - 0x7400) as usize],
+            0x7C00 => self.in0,
+            0x7C80 => self.in1,
+            0x7D00 => self.in2,
+            0x7D80 => self.dsw0,
+            _ => 0,
+        }
     }
+
     fn write(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x6000..=0x6BFF => self.ram[(addr - 0x6000) as usize] = val,
+            0x7000..=0x73FF => self.video.sprite_ram[(addr - 0x7000) as usize] = val,
+            0x7400..=0x77FF => self.video.video_ram[(addr - 0x7400) as usize] = val,
+            0x7800..=0x780F => self.dma.write((addr & 0x0F) as u8, val),
+            0x7C00 => self.sound_latch = val,
+            0x7D00..=0x7D07 => {
+                let bit = 1 << (addr & 7);
+                if val & 1 != 0 { self.sound_bits |= bit } else { self.sound_bits &= !bit }
+            }
+            0x7D80 => {}
+            0x7D82 => self.video.flip = val & 1 != 0,
+            0x7D83 => self.video.sprite_bank = val & 1,
+            0x7D84 => self.nmi_mask = val & 1 != 0,
+            0x7D85 => if val & 1 != 0 { self.run_dma() },
+            0x7D86 | 0x7D87 => {
+                let bit = 1 << (addr & 1);
+                if val & 1 != 0 { self.video.palette_bank |= bit } else { self.video.palette_bank &= !bit }
+            }
+            _ => {}
+        }
+    }
 
-    }
-    fn port_in(&mut self, port: u16) -> u8 {
-        0
-    }
-    fn port_out(&mut self, port: u16, val: u8) {
-
-    }
+    fn port_in(&mut self, port: u16) -> u8 { 0 }
+    fn port_out(&mut self, port: u16, val: u8) { }
 }

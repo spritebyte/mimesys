@@ -9,8 +9,5 @@ mod nes;
 mod gameboy;
 mod common;
 mod coleco;
-mod arcade {
-    pub mod donkey_kong;
-    pub mod pacman;
-}
+mod arcade;
 

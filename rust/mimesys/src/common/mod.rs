@@ -5,3 +5,5 @@ pub mod sys_godot;
 pub mod system_factory;
 pub mod system;
 pub mod cpu;
+pub mod input;
+pub mod rotate;
