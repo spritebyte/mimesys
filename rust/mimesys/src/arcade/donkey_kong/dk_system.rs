@@ -1,5 +1,6 @@
 use crate::common::cpu::z80::Z80Cpu;
 use crate::arcade::donkey_kong::dk_bus::DKBus;
+use crate::arcade::donkey_kong::dk_sound::{SoundCpu, Mcs48, DacResampler, DkSfx, run_sound_line};
 use crate::arcade::donkey_kong::dk_video::{DKVideo, SCREEN_W, SCREEN_H, FIRST_VISIBLE_LINE, VBLANK_START};
 use crate::common::system::{System,DisplayInfo,Rotation};
 use crate::common::snapshot::Snapshot;
@@ -20,7 +21,10 @@ pub struct DKSystem {
     current_frame: u64,
     save_filename: String,
     save_path: String,
-    sound_rom: Vec<u8>,
+    sound_cpu: Option<Box<dyn SoundCpu>>, // None until 8035 core exists
+    resampler: DacResampler,
+    sfx: DkSfx,
+    sound_budget: i32,
 }
 
 impl DKSystem {
@@ -30,18 +34,30 @@ impl DKSystem {
         let gfx2  = take_region(&mut regions, "gfx2")?;
         let proms = take_region(&mut regions, "proms")?;
         let sound_rom = regions.remove("soundcpu").unwrap_or_default();
+        let has_sound = !sound_rom.is_empty();
 
         let video = DKVideo::new(&gfx1, &gfx2, &proms)?;
-
-        Ok(Self {
+        let mut dk = Self {
             cpu: Z80Cpu::new(),
-            bus: DKBus::new(rom, video),
+            bus: DKBus::new(rom, video, sound_rom),
             line_cycles: 0,
             current_frame: 0,
             save_filename: set_name.to_string(),
             save_path: "user://Arcade/DK/State".to_string(),
-            sound_rom,
-        })
+            sound_cpu: None,
+            resampler: DacResampler::new(44100),
+            sfx: DkSfx::new(44100),
+            sound_budget: 0,
+        };
+        if has_sound {
+            dk.attach_sound_cpu(Box::new(Mcs48::new()));
+        }
+        Ok(dk)
+    }
+
+    pub fn attach_sound_cpu(&mut self, cpu: Box<dyn SoundCpu>) {
+        self.sound_cpu = Some(cpu);
+        self.bus.sound.cpu_attached = true;
     }
 }
 
@@ -56,6 +72,10 @@ impl System for DKSystem {
                 self.line_cycles += self.cpu.step(&mut self.bus) as i32;
             }
             self.line_cycles -= CYCLES_PER_LINE;
+
+            if let Some(cpu) = self.sound_cpu.as_mut() {
+                run_sound_line(cpu.as_mut(), &mut self.bus.sound, &mut self.resampler, &mut self.sfx, &mut self.sound_budget);
+            }
 
             if (FIRST_VISIBLE_LINE..VBLANK_START).contains(&line) {
                 self.bus.video.render_line(line);
@@ -81,7 +101,7 @@ impl System for DKSystem {
         self.bus.in2 = in2;
     }
 
-    fn drain_audio(&mut self) -> Vec<f32> { Vec::new() } // silent for now
+    fn drain_audio(&mut self) -> Vec<f32> { std::mem::take(&mut self.resampler.out) } // silent for now
     fn sample_rate(&self) -> u32 { 44100 }
     fn power_on(&mut self) { }
     fn power_off(&mut self) { }
@@ -99,6 +119,9 @@ impl System for DKSystem {
     fn reset(&mut self) {
         self.cpu = Z80Cpu::new();
         self.line_cycles = 0;
+        if self.sound_cpu.is_some() {
+            self.attach_sound_cpu(Box::new(Mcs48::new()))
+        }
     }
 
     fn display_info(&self) -> DisplayInfo {

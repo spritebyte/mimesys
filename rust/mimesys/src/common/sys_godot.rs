@@ -243,7 +243,7 @@ impl EmuSystem {
         if let Some(sys) = &mut self.system {
 //            let apu = sys.bus.apu.get_mut();
 //            self.audio_fifo.extend(apu.drain_samples());
-            sys.drain_audio();
+            self.audio_fifo.extend(sys.drain_audio());
         } else { return; };
 //        let raw_samples = apu.drain_samples(); // [L, R, L, R, ...]
 //        let available_frames = raw_samples.len() / 2;

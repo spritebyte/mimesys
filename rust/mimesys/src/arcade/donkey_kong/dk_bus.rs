@@ -1,6 +1,7 @@
 use crate::common::cpu::z80::Bus;
 use crate::arcade::donkey_kong::dk_video::DKVideo;
 use crate::arcade::donkey_kong::dk_dma::I8257;
+use crate::arcade::donkey_kong::dk_sound::DkSoundIo;
 
 pub struct DKBus {
     rom: Vec<u8>,
@@ -15,12 +16,11 @@ pub struct DKBus {
 
     pub nmi_mask: bool,
 
-    pub sound_latch: u8,
-    pub sound_bits: u8,
+    pub sound: DkSoundIo,
 }
 
 impl DKBus {
-    pub fn new(rom: Vec<u8>, video: DKVideo) -> Self {
+    pub fn new(rom: Vec<u8>, video: DKVideo, sound_rom: Vec<u8>) -> Self {
         Self {
             rom,
             ram: vec![0; 0x0C00],
@@ -29,8 +29,7 @@ impl DKBus {
             in0: 0, in1: 0, in2: 0,
             dsw0: 0x80,
             nmi_mask: false,
-            sound_latch: 0,
-            sound_bits: 0,
+            sound: DkSoundIo::new(sound_rom),
         }
     }
 
@@ -53,7 +52,7 @@ impl Bus for DKBus {
             0x7400..=0x77FF => self.video.video_ram[(addr - 0x7400) as usize],
             0x7C00 => self.in0,
             0x7C80 => self.in1,
-            0x7D00 => self.in2,
+            0x7D00 => (self.in2 & !0x40) | if self.sound.status_bit() { 0x40 } else { 0 },
             0x7D80 => self.dsw0,
             _ => 0,
         }
@@ -65,12 +64,12 @@ impl Bus for DKBus {
             0x7000..=0x73FF => self.video.sprite_ram[(addr - 0x7000) as usize] = val,
             0x7400..=0x77FF => self.video.video_ram[(addr - 0x7400) as usize] = val,
             0x7800..=0x780F => self.dma.write((addr & 0x0F) as u8, val),
-            0x7C00 => self.sound_latch = val,
+            0x7C00 => self.sound.cmd_latch = val,
             0x7D00..=0x7D07 => {
                 let bit = 1 << (addr & 7);
-                if val & 1 != 0 { self.sound_bits |= bit } else { self.sound_bits &= !bit }
+                if val & 1 != 0 { self.sound.sound_bits |= bit } else { self.sound.sound_bits &= !bit }
             }
-            0x7D80 => {}
+            0x7D80 => self.sound.irq = val != 0 ,
             0x7D82 => self.video.flip = val & 1 != 0,
             0x7D83 => self.video.sprite_bank = val & 1,
             0x7D84 => self.nmi_mask = val & 1 != 0,
