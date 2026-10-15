@@ -1,4 +1,3 @@
-//use godot::global::godot_print;
 use crate::common::cpu::m6502::{M6502Cpu,AddressBus};
 //use crate::nes::mappers::Mapper;
 use crate::nes::cartridge::Cartridge;
@@ -160,7 +159,6 @@ impl NesBus {
             0x4015 => {
                 let apu_val = unsafe { (*self.apu.get()).read_4015() };
                 let val = (apu_val & 0xDF) | (self.open_bus.get() & 0x20);
-//                godot_print!("4015 read: {}", val);
                 val
             }
             0x4016 => {
@@ -183,7 +181,6 @@ impl NesBus {
                 val
             }
         };
-//        godot_print!("read_byte set open_bus value: {:02X}", value);
         self.open_bus.set(value);
         value
     }
@@ -238,7 +235,6 @@ impl AddressBus for NesBus {
                 let mapper_ref = self.cartridge.mapper_mut();
 
                 let ppu_mut = self.ppu.get_mut();
-//                godot_print!("calling cpu_write_reg. Reg={} value={}", register, value);
                 ppu_mut.cpu_write_reg(mapper_ref, register, value);
             }
             0x4014 => {
@@ -259,18 +255,15 @@ impl AddressBus for NesBus {
             0x4020..=0xFFFF => {
                 if addr == 0x5104 {
                     let ppu = self.ppu.get_mut();
-//                    godot_print!("Scanline={}, cycle={}", ppu.scanline, ppu.cycle);
                 }
                 if addr == 0x5104 || (addr >= 0x5126 && addr <= 0x512A) {
                     let ppu = self.ppu.get_mut();
-//                    godot_print!("Current scanline={} cycle={}", ppu.scanline, ppu.cycle);
                 } 
                 self.cartridge.mapper_mut().cpu_write(addr, value); }
         }
         self.accesses_this_cycle += 1;
         self.step_ppu_dots(2);
         self.open_bus.set(value);
-//        godot_print!("open bus set value: {:02X}", value);
     }
 
     fn step_cycles(&mut self, cycles: u64) {
@@ -295,6 +288,5 @@ impl AddressBus for NesBus {
         let apu_ptr = self.apu.get();
         unsafe { (*apu_ptr).step_one_cycle(); }
         self.total_cpu_cycles += 1;
-//        godot_print!("begin_cpu_cycle: total cpu now {}", self.total_cpu_cycles);
     }
 }

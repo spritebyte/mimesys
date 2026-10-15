@@ -105,7 +105,6 @@ impl Mapper for Mapper2 {
             if self.has_bus_conflicts {
                 let rom_value = self.prg_rom[self.get_rom_index(addr)];
                 let effective_value = value & rom_value;
-            //            println!("CPU_WRITE: {addr}, {value}. {num_banks}");
 //            self.prg_bank = value % (self.prg_banks as u8);
                 self.prg_bank = effective_value % num_banks as u8;
             } else {

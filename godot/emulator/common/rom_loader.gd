@@ -70,8 +70,13 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 
 	match actual_ext:
 		"nes":
-			var nes_system = NesSystem.create_from_bytes(data, base_name.validate_filename())
+			var nes_system = EmuSystem.new()
+			var bios: PackedByteArray = PackedByteArray()
+			nes_system.load_cartridge("nes", data, base_name.validate_filename(), bios)
 			return nes_system
+
+#			var nes_system = NesSystem.create_from_bytes(data, base_name.validate_filename())
+#			return nes_system
 
 		# "A26" = Atari 2600
 		# "A52" = Atari 5200
@@ -121,136 +126,6 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 			print("Error: Unrecognized file extension '.%s' for %s" % [actual_ext, base_name])
 			return null
 
-
-# deprecated
-# Matches a multi-file zip against known arcade game sets by the zip's base name.
-# Add new arcade systems to the match block here.
-static func check_and_load_arcade(zip_path: String) -> Variant:
-	var zip_name: String = zip_path.get_file().get_basename().to_lower()
-	print("Checking arcade zip: '%s'" % zip_name)
-
-	match zip_name:
-		"dkong", "dkongjr":
-			return load_arcade_donkey_kong(zip_path, zip_name)
-		"invaders":
-			return load_arcade_space_invaders(zip_path)
-		# Add more here as you implement them:
-		"pacman", "mspacman":
-			return load_arcade_pacman(zip_path)
-		# "galaga":
-		#     return load_arcade_galaga(zip_path)
-		_:
-			print("Error: Unrecognized arcade zip '%s'" % zip_path.get_file())
-			return null
-
-
-static func load_arcade_donkey_kong(zip_path: String, zip_name: String) -> Variant:
-	print("\n--- [ Arcade: Donkey Kong ] ---")
-	print("Zip: %s" % zip_path.get_file())
-	var zip := ZIPReader.new()
-	zip.open(zip_path)
-	print("Files in zip:")
-	for f in zip.get_files():
-		print("  %s (%d bytes)" % [f, zip.read_file(f).size()])
-	var files_dict = {}
-	# Load Program ROMs into a flat 16KB buffer
-	var prg_rom = PackedByteArray()
-	prg_rom.resize(0x4000)
-	var prg_files = ["c_5et_g.bin", "c_5ct_g.bin", "c_5bt_g.bin", "c_5at_g.bin"]
-	for i in range(prg_files.size()):
-		var data = zip.read_file(prg_files[i])
-		# Copy data into the correct 4KB offset
-		for j in range(data.size()):
-			prg_rom[(i * 0x1000) + j] = data[j]
-
-	files_dict["prg_rom"] = prg_rom
-	# Load Sprite data
-	var sprite_rom = PackedByteArray()
-	sprite_rom.resize(0x2000)
-	var spr_top1 = zip.read_file("l_4m_b.bin")  # plane 0, top half (y=0-7)
-	var spr_top2 = zip.read_file("l_4r_b.bin")  # plane 1, top half
-	var spr_bot1 = zip.read_file("l_4n_b.bin")  # plane 0, bottom half (y=8-15)
-	var spr_bot2 = zip.read_file("l_4s_b.bin")  # plane 1, bottom half
-	files_dict["sprite_rom"] = sprite_rom
-	
-	# Load Graphics ROMs (keeping separate for the Video Hardware)
-	var tile_rom_1 = zip.read_file("v_5h_b.bin")
-	var tile_rom_2 = zip.read_file("v_3pt.bin")
-	
-	# Load Color PROMs
-	var color_prom_2j = zip.read_file("c-2j.bpr")
-	var color_prom_2k = zip.read_file("c-2k.bpr")
-	var color_prom_v5e = zip.read_file("v-5e.bpr")
-
-	files_dict["tile_rom_1"] = tile_rom_1
-	files_dict["tile_rom_2"] = tile_rom_2
-	files_dict["color_prom_2j"] = color_prom_2j
-	files_dict["color_prom_2k"] = color_prom_2k
-	files_dict["color_prom_v5e"] = color_prom_v5e
-	var sound_rom_1 = zip.read_file("s_3i_b.bin")
-	var sound_rom_2 = zip.read_file("s_3j_b.bin")
-	var sound_rom = sound_rom_1 + sound_rom_2
-	files_dict["sound_rom"] = sound_rom
-	zip.close()
-	
-	var dk_system = EmuSystem.new()
-	dk_system.load_romset(5, files_dict, zip_name)
-	return dk_system
-
-static func load_arcade_pacman(zip_path: String) -> Variant:
-	print("\n--- [ Arcade: Pacman ] ---")
-	print("Zip: %s" % zip_path.get_file())
-	var zip := ZIPReader.new()
-	zip.open(zip_path)
-	print("Files in zip:")
-	for f in zip.get_files():
-		print("  %s (%d bytes)" % [f, zip.read_file(f).size()])
-	# Load Program ROMs into a flat 16KB buffer
-	var prg_rom = PackedByteArray()
-	prg_rom.resize(0x4000)
-	var prg_files = ["pacman.6e", "pacman.6f", "pacman.6h", "pacman.6j"]
-	for f in ["pacman.6e", "pacman.6f", "pacman.6h", "pacman.6j"]:
-		var d = zip.read_file(f)
-		print("AUDIT -> ROM Name: ", f, " | Actual Size in ZIP: ", d.size(), " bytes")
-		
-	for i in range(prg_files.size()):
-		var data = zip.read_file(prg_files[i])
-		# Copy data into the correct 4KB offset
-		for j in range(data.size()):
-			prg_rom[(i * 0x1000) + j] = data[j]
-
-	var tile_rom = zip.read_file("pacman.5e")
-	var sprite_rom = zip.read_file("pacman.5f")
-	
-	var color_rom = zip.read_file("82s126.4a")
-	var palette_rom = zip.read_file("82s123.7f")
-
-	var sound_rom_1 = zip.read_file("82s126.1m")
-	var sound_rom_2 = zip.read_file("82s126.3m")
-	var sound_rom = sound_rom_1 + sound_rom_2
-	zip.close()
-	
-#	var bus = PacBus.new(prg_rom, tile_rom, sprite_rom, color_rom, palette_rom, sound_rom)
-#	return PacSystem.new(bus)
-	print("TODO: Pacman support in future")
-	return null
-
-static func load_arcade_space_invaders(zip_path: String) -> Variant:
-	print("\n--- [ Arcade: Space Invaders ] ---")
-	print("Zip: %s" % zip_path.get_file())
-	print("STATUS: Intel 8080 CPU + hardware not yet implemented.")
-	print("----------------------------------\n")
-	return null
-
-#static func load_coleco(data: PackedByteArray) -> GameROM:
-#	var rom := GameROM.new()
-#	rom.bios = load_bios(bios_path)
-#	if data != null and data.size() % 1024 == 512:
-#		print("Detected 512-byte header. Skipping...")
-#		data = data.slice(512)
-#	rom.cartridge = data
-#	return rom
-
 static func load_bios(p_path: String) -> PackedByteArray:
 	if not FileAccess.file_exists(p_path):
 		print("Warning: BIOS not found at '%s'" % p_path)
@@ -288,17 +163,20 @@ static func load_arcade(zip_path: String) -> EmuSystem:
 		buf.resize(region["size"].hex_to_int())
 		for rom in region["roms"]:
 			var data := _read_from_zips(zips, rom["name"])
-			var expected: int = rom["size"].hex_to_int()
 			if data.is_empty():
 				push_error("%s: missing %s" % [set_id, rom["name"]])
 				ok = false
 				continue
-			if data.size() != expected:
-				push_error("%s: %s is %d bytes, expected %d" % [set_id, rom["name"], data.size(), expected])
+			var file_off: int = rom.get("file_offset", "0x0").hex_to_int()
+			var size: int = rom["size"].hex_to_int()
+			if data.size() < file_off + size:
+				push_error("%s: %s is %d bytes, need at least %d" % [set_id, rom["name"], data.size(), file_off + size])
 				ok = false
 				continue
+			var chunk := data.slice(file_off, file_off + size)
+			var nibble: String = rom.get("nibble", "")
 			for off in [rom["offset"]] + rom.get("reload", []):
-				_copy_into(buf, off.hex_to_int(), data)
+				_copy_into(buf, off.hex_to_int(), chunk, nibble)
 		out[region_name] = buf
 
 	for z in zips:
@@ -333,10 +211,38 @@ static func _read_from_zips(zips: Array[ZIPReader], file: String) -> PackedByteA
 			return zip.read_file(file)
 	return PackedByteArray()
 
-static func _copy_into(dst: PackedByteArray, offset: int, src: PackedByteArray) -> void:
+static func _copy_into(dst: PackedByteArray, offset: int, src: PackedByteArray, nibble: String = "") -> void:
 	for i in src.size():
-		dst[offset + i] = src[i]
+		match nibble:
+			"low":  dst[offset + i] |= src[i] & 0x0F
+			"high": dst[offset + i] |= (src[i] & 0x0F) << 4
+			_:      dst[offset + i] = src[i]
 
 static func _load_arcade_db() -> Dictionary:
 	var parsed = JSON.parse_string(FileAccess.get_file_as_string(ARCADE_DB_PATH))
 	return parsed if parsed is Dictionary else {}
+
+static func detect_systems(path: String, data: PackedByteArray, ext: String) -> Array[String]:
+	# 1. Header sniff: a confident answer wins outright
+	if data.size() >= 4 and data.slice(0, 4) == PackedByteArray([0x4E, 0x45, 0x53, 0x1A]):
+		return ["nes"]
+	if data.size() > 0x150 and _has_gb_logo(data):
+		return ["gbc"] if data[0x143] & 0x80 else ["gb"]
+	if data.size() >= 2 and ((data[0] == 0xAA and data[1] == 0x55) or (data[0] == 0x55 and data[1] == 0xAA)):
+		return ["coleco"]
+
+	# 2. Extension: may return several
+	var by_ext := {"nes": ["nes"], "gb": ["gb"], "gbc": ["gbc"], "col": ["coleco"],
+				   "rom": ["coleco", "msx"], "bin": ["a2600", "a7800", "genesis"]}
+	var candidates: Array[String] = []
+	candidates.assign(by_ext.get(ext, []))
+
+	# 3. Folder hint: narrows the list when it matches a candidate
+	for part in path.get_base_dir().to_lower().split("/"):
+		if part in candidates:
+			return [part]
+	return candidates   # 0 = unknown, 1 = load it, 2+ = prompt the user
+
+# TODO: need to complete function
+static func _has_gb_logo(data: PackedByteArray) -> bool:
+	return false

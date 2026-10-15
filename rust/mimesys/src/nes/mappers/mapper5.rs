@@ -1,7 +1,6 @@
 use crate::nes::mappers::{Mapper, Mirroring};
 use serde::{Serialize, Deserialize};
 use std::cell::Cell;
-use godot::global::godot_print;
 // Mapper 5 (MMC5)
 // Used in games like Castlevania 3 and Romance of the 3 Kingdoms 2.
 
@@ -337,14 +336,12 @@ impl Mapper for Mapper5 {
             0x5103 => self.ram_protect_2 = value & 0x03,
             0x5104 => {
                 self.exram_mode = value & 0x03;
-                godot_print!("ExRAM mode write: value={:02X} -> mode={}", value, self.exram_mode);
             }
             0x5105 => {
                 self.nt_map[0] = value & 0x03;
                 self.nt_map[1] = (value >> 2) & 0x03;
                 self.nt_map[2] = (value >> 4) & 0x03;
                 self.nt_map[3] = (value >> 6) & 0x03;
-                godot_print!("Nametable map write: value={:02X} -> nt_map={:?}", value, self.nt_map);
             }
             0x5106 => self.fill_tile = value,
             0x5107 => {
@@ -355,11 +352,9 @@ impl Mapper for Mapper5 {
                 self.prg_regs[(addr - 0x5113) as usize] = value;
             }
             0x5120..=0x5127 => {
-                godot_print!("CHR reg a write: addr={:04X} value={:02X}", addr, value);
                 self.chr_regs_a[(addr - 0x5120) as usize] = value as u16;
             }
             0x5128..=0x512B => {
-                godot_print!("CHR reg b write: addr={:04X} value={:02X}", addr, value);
                 self.chr_regs_b[(addr - 0x5128) as usize] = value as u16;
             }
             0x5130 => self.chr_upper_bits = (value & 0x03) as u16,

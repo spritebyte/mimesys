@@ -1,7 +1,7 @@
 use crate::common::system::System;
 use crate::gameboy::gb_system::GbSystem;
 use crate::coleco::coleco_system::ColecoSystem;
-//use crate::arcade::donkey_kong::dk_system::DKSystem;
+use crate::nes::nes_system::NesSystem;
 use std::collections::HashMap;
  
 // use crate::gameboy::load_gameboy;
@@ -58,10 +58,9 @@ fn load_cartridge(system: CartSystem, rom: &[u8], filename: &str, bios: Option<V
             Ok(Box::new(core))
         }
         CartSystem::Nes => {
-//            let core = NesSystem::from_rom(rom, filename, bios_or_empty)
-//                .map_err(|e| format!("GB from_rom failed: {e}"))?;
-//            Ok(Box::new(core)) 
-            Err("NES core needs rework".into())
+            let core = NesSystem::from_rom(rom, filename, bios_or_empty)
+                .map_err(|e| format!("GB from_rom failed: {e}"))?;
+            Ok(Box::new(core)) 
         }
     }
 }

@@ -124,7 +124,6 @@ impl Mapper for Mapper206 {
         else if addr >= 0x8000 && addr <= 0x9FFF {
             if (addr & 1) == 0 {
                 // $8000: Bank Select configuration
-                println!("{value} to {addr}, {0}", self.bank_registers[0]);
                 self.bank_select = value & 0x07;
                 self.prg_mode = (value >> 6) & 1;
                 self.chr_mode = (value >> 7) & 1;

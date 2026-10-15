@@ -235,7 +235,7 @@ impl GbSystemNode {
 
         // FIXED: Fill remaining available buffer space with silence/last_sample 
         // to prevent audio stream underflow popping/silence stalls
- //       for i in count..(avail as usize) {
+//       for i in count..(avail as usize) {
 //            frames[i] = self.last_sample;
 //        }
         if to_write > 0 {

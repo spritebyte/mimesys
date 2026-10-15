@@ -50,7 +50,7 @@ func _ready() -> void:
 	debug_window.main_ui = self
 
 	audio_gen = AudioStreamGenerator.new()
-	audio_gen.mix_rate = 44100
+#	audio_gen.mix_rate = 44100
 	audio_gen.buffer_length = 0.1
 	audio_player = AudioStreamPlayer.new()
 	audio_player.stream = audio_gen

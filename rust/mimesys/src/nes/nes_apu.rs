@@ -1,6 +1,4 @@
 use serde::{Serialize, Deserialize};
-//use godot::global::godot_print;
-//use std::io::Write;
 
 const LENGTH_TABLE: [u8; 32] = [
     10, 254, 20,  2, 40,  4, 80,  6, 160,  8, 60, 10, 14, 12, 26, 14,
@@ -125,11 +123,19 @@ pub struct NesAPU {
     // Audio Tracking
     audio_buffer: Vec<f32>,
     sample_clock: f32,
-    sample_rate_ratio: f32,
+    pub sample_rate_ratio: f32,
     p1_output: f32,
     p2_output: f32,
     pub total_apu_cycles: u64,
     pub even_cycle: bool,
+
+    pulse_table: [f32; 31],
+    tnd_table: [f32; 203],
+    acc: f32,
+    acc_n: u32,
+    hp90: (f32, f32),
+    hp440: (f32, f32),
+    lp14k: f32,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -331,6 +337,9 @@ impl NesAPU {
             n_env_start: false,
             total_apu_cycles: 0,
             even_cycle: true,
+            pulse_table: std::array::from_fn(|i| if i == 0 { 0.0 } else { 95.52 / (8128.0 / i as f32 + 100.0) }),
+            tnd_table: std::array::from_fn(|i| if i == 0 { 0.0 } else {163.67 / (24329.0 / i as f32 + 100.0) }),
+            acc: 0.0, acc_n: 0, hp90: (0.0, 0.0), hp440: (0.0, 0.0), lp14k: 0.0,
         }
     }
 
@@ -581,7 +590,6 @@ impl NesAPU {
                 self.p1_halt = (data & 0x20) > 0;
                 self.p1_constant_volume = (data & 0x10) != 0;
                 self.p1_volume = data & 0x0F;
-                self.p1_env_start = true;
             }
             0x4001 => {
                 self.p1_sweep_enabled = (data & 0x80) > 0;
@@ -597,7 +605,6 @@ impl NesAPU {
                 self.p1_timer_reload = (self.p1_timer_reload & 0x00FF) | (((data & 0x07) as u16) << 8); 
                 self.p1_sequence_step = 0; 
                 self.write_p1_length(data);
-                self.p1_sweep_reload = true;
                 self.p1_env_start = true;
             }
             
@@ -607,7 +614,6 @@ impl NesAPU {
                 self.p2_halt = (data & 0x20) > 0;
                 self.p2_constant_volume = (data & 0x10) != 0;
                 self.p2_volume = data & 0x0F;
-                self.p2_env_start = true;
             }
             0x4005 => {
                 self.p2_sweep_enabled = (data & 0x80) > 0;
@@ -623,7 +629,6 @@ impl NesAPU {
                 self.p2_timer_reload = (self.p2_timer_reload & 0x00FF) | (((data & 0x07) as u16) << 8);
                 self.p2_sequence_step = 0;
                 self.write_p2_length(data);
-                self.p2_sweep_reload = true;
                 self.p2_env_start = true;
             }
 
@@ -637,7 +642,6 @@ impl NesAPU {
                 self.n_halt = (data & 0x20) > 0;
                 self.n_constant_volume = (data & 0x10) > 0;
                 self.n_volume = data & 0x0F;
-                self.n_env_start = true;
             }
             0x400E => {
                 self.n_mode = (data & 0x80) > 0;
@@ -655,7 +659,7 @@ impl NesAPU {
                 self.dmc_irq_enabled = (data & 0x80) > 0;
                 self.dmc_loop = (data & 0x40) > 0;
                 self.dmc_rate_index = data & 0x0F;
-                self.dmc_timer = DMC_RATE_TABLE[self.dmc_rate_index as usize] - 1;
+//                self.dmc_timer = DMC_RATE_TABLE[self.dmc_rate_index as usize] - 1;
                 if !self.dmc_irq_enabled {
                     self.dmc_interrupt_flag = false;
                 }
@@ -758,7 +762,6 @@ impl NesAPU {
         self.frame_irq_flag = false;
         // Note: reading $4015 does NOT clear the DMC IRQ flag (it's cleared by
         // disabling the channel via $4015 write, or by $4010 clearing IRQ enable).
-//        godot_print!("apu debug: read_4015 returning {:02X}", status);
         status
     }
 
@@ -1042,9 +1045,13 @@ impl NesAPU {
             if bit > 0 { vol as f32 } else { 0.0 }
         } else { 0.0 };
 
-        let tri_output = if self.tri_length_counter > 0 && self.tri_linear_counter > 0 {
-            TRI_SEQUENCE[self.tri_sequence_step as usize] as f32
-        } else { 0.0 };
+//        let tri_output = if self.tri_length_counter > 0 && self.tri_linear_counter > 0 {
+//            TRI_SEQUENCE[self.tri_sequence_step as usize] as f32
+//        } else { 0.0 };
+        let tri_output = TRI_SEQUENCE[self.tri_sequence_step as usize] as f32;
+        if self.tri_length_counter > 0 && self.tri_linear_counter > 0 && self.tri_timer_reload >= 2 {
+            self.tri_sequence_step = (self.tri_sequence_step + 1) & 31;
+        }
 
         let n_output = if self.noise_length_counter > 0 && (self.n_shift_register & 1) == 0 {
             let vol = if self.n_constant_volume { self.n_volume } else { self.n_env_volume };
@@ -1108,7 +1115,34 @@ impl NesAPU {
 
     (env_clock, len_clock)
 }
+fn extract_sample(&mut self, tri_output: f32, n_output: f32) {
+    let pulse = self.pulse_table[(self.p1_output + self.p2_output) as usize];
+    let tnd_i = 3 * tri_output as usize + 2 * n_output as usize + self.dmc_output_level as usize;
+    self.acc += pulse + self.tnd_table[tnd_i];
+    self.acc_n += 1;
 
+    self.sample_clock += 1.0;
+    if self.sample_clock < self.sample_rate_ratio { return; }
+    self.sample_clock -= self.sample_rate_ratio;
+
+    let x = self.acc / self.acc_n as f32;
+    self.acc = 0.0;
+    self.acc_n = 0;
+
+    // Coefficients for 44100 Hz output
+    let y = Self::high_pass(&mut self.hp90, x, 0.98734);
+    let y = Self::high_pass(&mut self.hp440, y, 0.94100);
+    self.lp14k += 0.66610 * (y - self.lp14k);
+    self.audio_buffer.push(self.lp14k);
+}
+
+fn high_pass(state: &mut (f32, f32), x: f32, a: f32) -> f32 {
+    let y = a * (state.1 + x - state.0);
+    *state = (x, y);
+    y
+}
+
+/*
     fn extract_sample(&mut self, tri_output: f32, n_output: f32) {
         self.sample_clock += 1.0;
         if self.sample_clock < self.sample_rate_ratio { return; }
@@ -1126,4 +1160,5 @@ impl NesAPU {
 
         self.audio_buffer.push(pulse_out + tnd_out);   // ~0.0..1.0
     }
+*/
 }

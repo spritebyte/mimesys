@@ -218,7 +218,7 @@ impl DkSfx {
         }
         self.noise_lp += 0.04 * (self.noise_hold - self.noise_lp);
         self.stomp.t = Some(t + dt);
-        self.noise_lp * 1.6 * (-t / 0.12).exp()
+        self.noise_lp * 0.16 * (-t / 0.12).exp()
     }
 }
 

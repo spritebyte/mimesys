@@ -1,6 +1,5 @@
 use crate::nes::mappers::{Mapper,Mirroring};
 use serde::{Serialize, Deserialize};
-//use godot::global::godot_print;
 
 // Mapper 1 (MMC1) 
 pub struct Mapper1 {
@@ -122,7 +121,6 @@ impl Mapper for Mapper1 {
 
         if addr >= 0x8000 {
             let prg_mode = (self.control >> 2) & 0x03;
-//            godot_print!("prg_mode={:02X}, control={:02X}", prg_mode, self.control);
             let _bank_size: usize = 16384;
 
             let mut surom_bank_ext = 0;
@@ -205,10 +203,6 @@ impl Mapper for Mapper1 {
             self.last_write_cycle = self.current_cycle;
             suppressed = true;
         }
-/*        godot_print!("MMC1 write: cycle={} last_write_cycle={} addr={:04X} val={:02X} suppressed={} write_count={} -> control={:02X} chr0={:02X} chr1={:02X} prg={:02X}",
-            self.current_cycle, self.last_write_cycle, addr, value, suppressed, self.write_count,
-            self.control, self.chr_bank_0, self.chr_bank_1, self.prg_bank);
-*/
 
         if suppressed {
             return; 
@@ -237,7 +231,6 @@ impl Mapper for Mapper1 {
 
             match target_reg {
                 0 => { // $8000-$9FFF: Control Register
-//                    godot_print!("Updating control register from {:02X} to {:02X}", self.control, self.shift_reg);
                     self.control = self.shift_reg;
                     self.update_mirroring();
                 }
@@ -248,7 +241,6 @@ impl Mapper for Mapper1 {
                     self.chr_bank_1 = self.shift_reg;
                 }
                 3 => { // $E000-$FFFF: PRG Bank
-//                    godot_print!("prg_bank updated from {:02X} to {:02X}", self.prg_bank, self.shift_reg);
                     self.prg_bank = self.shift_reg;
                 }
                 _ => unreachable!(),

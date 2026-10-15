@@ -1,10 +1,7 @@
-//use godot::prelude::*;
-//use godot::classes::ImageTexture;
-use godot::global::godot_print;
 use crate::nes::mappers::Mapper;
 use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Serialize, Deserialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // The standard 64-color original NES system hardware color palette
 const NES_PALETTE: [(u8, u8, u8); 64] = [
@@ -80,7 +77,7 @@ pub struct NesPPU {
     // --- Video Buffers ---
     // Double buffering prevents the UI thread from reading half-rendered frames!
     back_buffer: Vec<u8>,       // The frame currently being drawn (Width * Height * 4 bytes RGBA)
-    front_buffer: Arc<Vec<u8>>, // The last fully completed frame, safe for sharing across threads
+    pub front_buffer: Arc<Mutex<Vec<u8>>>, // The last fully completed frame, safe for sharing across threads
     
     // Direct shared reference to the system's atomic sync flag
     system_frame_ready: Arc<AtomicBool>,
@@ -162,7 +159,7 @@ impl NesPPU {
             vram: [0;4096], palette_ram: [0;32], oam: [0;256],
             scanline_bg: [(0, 0, 0); 33], scanline_sprites: Vec::with_capacity(8),
             back_buffer: vec![0; buffer_size],
-            front_buffer: Arc::new(vec![0; buffer_size]),
+            front_buffer: Arc::new(Mutex::new(vec![0; buffer_size])),
             system_frame_ready,
             total_ppu_cycles:0, frame_number: 0, last_2002: 0, last_2005: 0, last_2006: 0,
             last_2005_2: 0, last_2006_2: 0,
@@ -244,7 +241,6 @@ impl NesPPU {
 
     pub fn toggle_debug_trace(&mut self) {
         self.debug_trace_bg = !self.debug_trace_bg;
-        godot_print!("DEBUG_TRACE={}", self.debug_trace_bg);
     }
 
     pub fn is_frame_complete(&self) -> bool {
@@ -309,7 +305,6 @@ impl NesPPU {
                             self.increment_coarse_x();
                             self.increment_vertical_scroll();
                             if self.scanline == 175 {
-//                                godot_print!("[{}] PPU dot 256 incremented coarse x and y. scanline={}, cycle={}. Total Cycles={ }. V={} T={}. frame parity={}", self.frame_number, self.scanline, self.cycle, self.total_ppu_cycles, self.v_addr, self.t_addr, self.frame_number % 2);
                             }
                         }
                         257 => {
@@ -339,7 +334,6 @@ impl NesPPU {
                        self.oam_addr = 0;
                     }
                     let first_sprite_dot = 256 + SPRITE_A12_PHASE;
-//                    godot_print!("First sprite dot={}",first_sprite_dot);
                     let in_sprite_region = (257..=320).contains(&self.cycle);
                     let phase = if in_sprite_region { SPRITE_A12_PHASE } else { BG_A12_PHASE };
 
@@ -370,8 +364,11 @@ impl NesPPU {
                     if rendering_enabled {
                         self.evaluate_sprite_overflow(240);
                     }
-                    let completed_buffer = std::mem::replace(&mut self.back_buffer, vec![0; 256 * 240 * 4]);
-                    self.front_buffer = Arc::new(completed_buffer);
+//                    let completed_buffer = std::mem::replace(&mut self.back_buffer, vec![0; 256 * 240 * 4]);
+//                    self.front_buffer = Arc::new(completed_buffer);
+                    if let Ok(mut front) = self.front_buffer.lock() {
+                        std::mem::swap(&mut self.back_buffer, &mut *front);
+                    }
                     self.system_frame_ready.store(true, Ordering::Release);
                 }
             }
@@ -390,7 +387,6 @@ impl NesPPU {
 
 //        if rendering_enabled && ((1..=256).contains(&self.cycle) || (321..=335).contains(&self.cycle)) {
         if rendering_enabled && ((1..=256).contains(&self.cycle)) {
-//            godot_print!("{} shifting registers for next cycle. Scanline={}, cycle={}", self.frame_number, self.scanline, self.cycle);
             self.bg_shift_low <<= 1;
             self.bg_shift_high <<= 1;
             self.attr_shift_low <<= 1;
@@ -496,12 +492,6 @@ impl NesPPU {
             self.v_addr += 1;             // Increment coarse X
         }
         let after_nt_x = (self.v_addr >> 10) & 1;
-/*        if before_nt_x != after_nt_x {
-            godot_print!(
-                "[nt-x flip] scanline={} cycle={} v_addr={:04X} coarse_x={}",
-                self.scanline, self.cycle, self.v_addr, self.v_addr & 0x1F
-            );
-        } */
     }
 
     // deprecated
@@ -523,12 +513,6 @@ impl NesPPU {
             self.v_addr = (self.v_addr & !0x03E0) | (y << 5);
         }
         let after_nt_y = (self.v_addr >> 11) & 1;
-/*        if before_nt_y != after_nt_y {
-            godot_print!(
-                "[nt-y flip] scanline={} cycle={} v_addr={:04X} coarse_y={} fine_y={}",
-                self.scanline, self.cycle, self.v_addr, (self.v_addr >> 5) & 0x1F, (self.v_addr >> 12) & 7
-            );
-        } */
     }
 
     fn copy_horizontal(&mut self) {
@@ -536,7 +520,6 @@ impl NesPPU {
         // Mask: 0x041F
         let old_v_addr = self.v_addr;
         self.v_addr = (self.v_addr & !0x041F) | (self.t_addr & 0x041F);
-//        godot_print!("{} copy_horizontal: v_addr={}, was {}. t_addr={}", self.frame_number, self.v_addr, old_v_addr, self.t_addr);
     }
 
     fn copy_vertical(&mut self) {
@@ -621,8 +604,6 @@ impl NesPPU {
             // Sprite 0 cannot hit at x=255 or if either side is clipped in the left 8 pixels
             if x < 255 {
                 if self.status & 0x40 == 0 {
-//                  godot_print!("[{}] Sprite 0 hit detected", self.total_ppu_cycles);
-//                    godot_print!("[{}] ->Position: x={}. y={} Scanline={}, PPU cycle={}. V={}, T={}, Fine_X={}", self.frame_number, x, y, self.scanline, self.cycle, self.v_addr, self.t_addr, self.fine_x);
                 }
 //                self.status |= 0x40;
                 self.sprite_0_delay = 1;
@@ -651,23 +632,6 @@ impl NesPPU {
         self.back_buffer[pixel_index + 1] = g;
         self.back_buffer[pixel_index + 2] = b;
         self.back_buffer[pixel_index + 3] = 255;
-/*
-        if self.debug_trace_bg && self.scanline == TARGET_SCANLINE && x >= 232 {
-            godot_print!(
-                "({}) [pixel] x={} bg_shift_low={:04X} bg_shift_high={:04X} bg_pixel={} bg_palette={}",
-                self.frame_number, x, self.bg_shift_low, self.bg_shift_high, bg_pixel, bg_palette_idx); 
-        } */
-/*
-    // ---- 5. SHIFT REGISTERS FOR THE NEXT CYCLE ----
-    if (self.cycle >= 1 && self.cycle <= 256) || (self.cycle >= 321 && self.cycle <= 336) {
-        if (self.mask & 0x18) != 0 {
-            self.bg_shift_low <<= 1;
-            self.bg_shift_high <<= 1;
-            self.attr_shift_low <<= 1;
-            self.attr_shift_high <<= 1;
-        }
-    }
-*/
     }
 
     pub fn is_bg_fetch(&self) -> bool {
@@ -685,14 +649,6 @@ impl NesPPU {
         // 1. Fetch Tile ID from the PPU's internal VRAM (Not the mapper!)
         let nt_addr = 0x2000 | (self.v_addr & 0x0FFF);
         let tile_id = mapper.read_nametable_byte(nt_addr, &self.vram, false);
-/*
-    if self.debug_trace_bg && self.scanline == TARGET_SCANLINE && self.cycle == 240 {
-        godot_print!(
-            "({}) [last-tile fetch] scanline={} cycle={} v_addr={:04X} coarse_x={} nt_select_x={} tile_id={:02X}",
-            self.frame_number, self.scanline, self.cycle, self.v_addr, self.v_addr & 0x1F, (self.v_addr >> 10) & 1, tile_id
-        );
-    }
-*/
         // 2. Fetch Attribute Byte from the PPU's internal VRAM
         let attr_addr = 0x23C0 | (self.v_addr & 0x0C00) | ((self.v_addr >> 4) & 0x38) | ((self.v_addr >> 2) & 0x07);
 //    let attr_vram_index = mapper.mirror_vram_address(attr_addr) as u16;
@@ -839,7 +795,7 @@ impl NesPPU {
     }
 
     /// Exposes a thread-safe read clone of the completed pixel array
-    pub fn get_front_buffer(&self) -> Arc<Vec<u8>> {
+    pub fn get_front_buffer_ref(&self) -> Arc<Mutex<Vec<u8>>> {
         Arc::clone(&self.front_buffer)
     }
 
@@ -899,9 +855,6 @@ impl NesPPU {
             2 => { // $2002 - PPUSTATUS
                 let _is_currently_vblank = self.scanline >= 241 && self.scanline <= 260;
                 let res = (self.status & 0xE0) | (open_bus & 0x1F);
-//                if self.scanline == 241 && self.cycle < 6 {
-//                    godot_print!("status={}. cycle={}", self.status,self.cycle);
-//                }
                 if self.scanline == 241 && self.cycle == 1 {
                     self.vbl_suppressed = true;
                 }
@@ -912,7 +865,6 @@ impl NesPPU {
                 self.w_latch = false;    // And resets scroll/address double-write latch
 
                 if (res & 0x40 != 0) && self.frame_number != self.last_2002 {
-//                    godot_print!("[{}]. PPUSTATUS read returned bit 6 set. scanline={}|cycle={}", self.frame_number, self.scanline, self.cycle);
                     self.last_2002 = self.frame_number;
                 }
                 res
@@ -966,16 +918,8 @@ impl NesPPU {
             0 => { // $2000 - PPUCTRL
                 let old_nmi_enabled = (self.ctrl & 0x80) != 0;
                 let vblank_flag_active = (self.status & 0x80) != 0;
-                //                godot_print!("PPUCTRL write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
                 self.ctrl = value;
                 let new_nmi_enabled = (self.ctrl & 0x80) != 0;
-/*                if !old_nmi_enabled && new_nmi_enabled && vblank_flag_active {
-                    godot_print!("nmi_enabled. Trigger NMI");
-
-                }
-                if old_nmi_enabled && !new_nmi_enabled {
-                    godot_print!("nmi_disabled");
-                } */
                 // Extract bits to configure scrolling targets
                 self.t_addr = (self.t_addr & 0xF3FF) | (((value & 0x03) as u16) << 10);
                 self.vram_increment = if (value & 0x04) == 0x04 { 32 } else { 1 };
@@ -984,7 +928,6 @@ impl NesPPU {
                 self.sprite_size = if (value & 0x20) == 0x20 { 16 } else { 8 };
             }
             1 => { // $2001 - PPUMASK
-//                godot_print!("PPUMASK write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
                 self.mask = value;
             }
             3 => { // $2003 - OAMADDR
@@ -997,7 +940,6 @@ impl NesPPU {
             5 => { // $2005 - PPUSCROLL
                 if self.w_latch == false {
                     if self.frame_number != self.last_2005 {
-  //                      godot_print!("PPUSCROLL first write {value}. scanline={}, cycle={}", self.scanline, self.cycle);
                         self.last_2005 = self.frame_number;
                     }
                     // First write: Coarse X and Fine X scrolling values
@@ -1007,7 +949,6 @@ impl NesPPU {
 
                 } else {
                     if self.frame_number != self.last_2005_2 {
-//                        godot_print!("PPUSCROLL second write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
                         self.last_2005_2 = self.frame_number;
                     }
                     // Second write: Coarse Y and Fine Y scrolling values
@@ -1019,7 +960,6 @@ impl NesPPU {
             
                 if self.w_latch == false {
                     if self.frame_number != self.last_2006 {
-//                        godot_print!("PPUADDR first write  {value}. scanline={}, cycle={}", self.scanline, self.cycle);
                         self.last_2006 = self.frame_number;
                     }
                     // First write: High byte of the 14-bit destination target address
@@ -1028,7 +968,6 @@ impl NesPPU {
                 } else {
                     let old_v = self.v_addr;
                     if self.frame_number != self.last_2006_2 {
-//                        godot_print!("PPUADDR second write {value}. scanline={}, cycle={}. Total Cycles={ }. V={} T={}", self.scanline, self.cycle, self.total_ppu_cycles, self.v_addr, self.t_addr);
                         self.last_2006_2 = self.frame_number;
                     }
                     // Second write: Low byte of destination target address

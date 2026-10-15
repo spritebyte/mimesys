@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use crate::nes::nes_system::NesSystem;
+use crate::common::system::System;
 
 pub struct RewindBuffer {
     checkpoints: VecDeque<(u64, Vec<u8>)>,
@@ -65,7 +66,7 @@ impl RewindBuffer {
             .collect();
 
         for input in inputs_to_replay {
-            system.run_slice(input);
+            system.run_frame(input as u32);
         }
 
         // The user has committed to this point in time — discard everything

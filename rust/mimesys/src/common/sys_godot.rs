@@ -208,15 +208,17 @@ impl EmuSystem {
         let info = sys.display_info();
         let (pixels, w, h) = rotate_rgba(
             sys.framebuffer(),
-            info.visible_width as usize,
-            info.visible_height as usize,
+            info.buffer_width as usize,
+            info.buffer_height as usize,
             info.rotation,
         );
         let pixel_data = PackedByteArray::from(pixels.as_slice());
         //        let (w, h) = { let d = sys.display_info(); (d.visible_width, d.visible_height) };
 //        let pixel_data = PackedByteArray::from(sys.framebuffer());
+        let size_changed = self.cached_image.as_ref()
+            .map_or(true, |img| img.get_width() != w as i32 || img.get_height() != h as i32);
 
-        if self.cached_image.is_none() {
+        if self.cached_image.is_none() || size_changed {
             let image = Image::create_from_data(w as i32, h as i32, false, Format::RGBA8, &pixel_data).unwrap();
             let texture = ImageTexture::create_from_image(&image).unwrap();
             self.cached_image = Some(image);
@@ -265,12 +267,14 @@ impl EmuSystem {
             frames[i] = sample_vec;
             self.last_sample = sample_vec;
         }
-
-        // FIXED: Fill remaining available buffer space with silence/last_sample 
-        // to prevent audio stream underflow popping/silence stalls
- //       for i in count..(avail as usize) {
-//            frames[i] = self.last_sample;
-//        }
+/*
+        let target = 2048.0;
+        let fill = (self.audio_fifo.len() / 2) as f32;
+        let factor = (1.0 + 0.005 * (target - fill) / target).clamp(0.995, 1.005);
+        if let Some(sys) = &mut self.system {
+            sys.set_audio_rate_adjust(factor);
+        } else { };
+*/
         if to_write > 0 {
             playback.push_buffer(&frames);
         }

@@ -36,5 +36,6 @@ pub trait System: Send {
     fn is_sram_dirty(&self) -> bool;
     fn clear_sram_dirty(&mut self);
     fn get_current_frame(&self) -> i64;
+    fn set_audio_rate_adjust(&mut self, _factor: f32) {}
 //    fn is_frame_ready(&self) -> bool;
 }

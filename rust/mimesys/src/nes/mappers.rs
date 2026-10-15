@@ -1,5 +1,4 @@
 use serde::{Serialize, Deserialize};
-use godot::global::godot_print;
 
 pub trait Mapper {
     fn cpu_read(&self, addr: u16) -> u8;
@@ -48,69 +47,69 @@ pub fn make_mapper(
 ) -> Result<Box<dyn Mapper>, String> {
     match mapper_id {
         0 => {
-            godot_print!("Mapper0 (Nrom) created");
+            println!("Mapper0 (Nrom) created");
             Ok(Box::new(super::mapper0::Mapper0::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring)))
         }
         1 => {
-            godot_print!("Mapper1 (MMC1) created");
+            println!("Mapper1 (MMC1) created");
             Ok(Box::new(super::mapper1::Mapper1::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen)))
         }
         2 => {
-            godot_print!("Mapper2 (UxROM) created");
+            println!("Mapper2 (UxROM) created");
             Ok(Box::new(super::mapper2::Mapper2::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
         }
         3 => {
-            godot_print!("Mapper3 (CNROM) created");
+            println!("Mapper3 (CNROM) created");
             Ok(Box::new(super::mapper3::Mapper3::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen)))
         }
         4 => {
-            godot_print!("Mapper4 (MMC3) created");
+            println!("Mapper4 (MMC3) created");
             Ok(Box::new(super::mapper4::Mapper4::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, 4, submapper_id)))
         }
         5 => {
-            godot_print!("Mapper5 (MMC5) created");
+            println!("Mapper5 (MMC5) created");
             Ok(Box::new(super::mapper5::Mapper5::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen)))
         }
         7 => {
-            godot_print!("Mapper7 (AxROM) created");
+            println!("Mapper7 (AxROM) created");
             Ok(Box::new(super::mapper7::Mapper7::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen)))
         }
         9 => {
-            godot_print!("Mapper9 (MMC2) created");
+            println!("Mapper9 (MMC2) created");
             Ok(Box::new(super::mapper9::Mapper9::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, false)))
         }
         10 => {
             // MMC4 is similar to MMC2 so using the same code here.
-            godot_print!("Mapper10 (MMC4) created");
+            println!("Mapper10 (MMC4) created");
             Ok(Box::new(super::mapper9::Mapper9::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, true)))
         }
         34 => {
-            godot_print!("Mapper34 (NINA-001/NINA-002/BNROM) created");
+            println!("Mapper34 (NINA-001/NINA-002/BNROM) created");
             Ok(Box::new(super::mapper34::Mapper34::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
         }
         64 => {
-            godot_print!("Mapper64 (Rambo-1) created");
+            println!("Mapper64 (Rambo-1) created");
             Ok(Box::new(super::mapper64::Mapper64::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
         }
         66 => {
-            godot_print!("Mapper66 (GNROM) created");
+            println!("Mapper66 (GNROM) created");
             Ok(Box::new(super::mapper66::Mapper66::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring)))
         }
         69 => {
-            godot_print!("Mapper69 (Sunsoft FME-7/5A/5B) created");
+            println!("Mapper69 (Sunsoft FME-7/5A/5B) created");
             Ok(Box::new(super::mapper69::Mapper69::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
         }
         71 => {
-            godot_print!("Mapper71 (Camerica) created");
+            println!("Mapper71 (Camerica) created");
             Ok(Box::new(super::mapper71::Mapper71::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
         }
         118 => {
             // TODO: using same mapper code as MMC3, will need to detect variant and handle differences accordingly
-            godot_print!("Mapper118 (TLSROM/TKSROM) created");
+            println!("Mapper118 (TLSROM/TKSROM) created");
             Ok(Box::new(super::mapper4::Mapper4::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, 118, submapper_id)))
         }
         206 => {
-            godot_print!("Mapper206 (DxROM) created");
+            println!("Mapper206 (DxROM) created");
             Ok(Box::new(super::mapper206::Mapper206::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen)))
         }
         // Add future mappers here. The system file never has to change!
