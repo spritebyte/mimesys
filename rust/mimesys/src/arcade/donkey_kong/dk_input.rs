@@ -1,3 +1,5 @@
+// didn't end up using this
+
 pub struct Joypad {
     input_mode: u8,
     coin_pulse_frames: u8,

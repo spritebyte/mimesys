@@ -1,8 +1,3 @@
-/*
-pub struct CpuConfig {
-}
-*/
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CpuVariant {
     ZilogZ80,
@@ -327,7 +322,7 @@ impl Z80Cpu {
         let mut index = IndexMode::HL;
 
         loop {
-            let byte = self.fetch_u8(bus);
+            let byte = self.fetch_opcode(bus);
             self.inc_r();
 
             match byte {
@@ -344,7 +339,7 @@ impl Z80Cpu {
 
                 0xCB => {
                     if index == IndexMode::HL {
-                        let op = self.fetch_u8(bus);
+                        let op = self.fetch_opcode(bus);
                         self.inc_r();
                         cycles += self.exec_cb(op, index, 0, bus);
                     } else {
@@ -356,7 +351,7 @@ impl Z80Cpu {
                 }
 
                 0xED => {
-                    let op = self.fetch_u8(bus);
+                    let op = self.fetch_opcode(bus);
                     self.r = (self.r & 0x80) | self.r.wrapping_add(1) & 0x7F;
                     cycles += self.exec_ed(op, bus);
                     return cycles;
@@ -389,6 +384,12 @@ impl Z80Cpu {
         let lo = self.fetch_u8(bus) as u16;
         let hi = self.fetch_u8(bus) as u16;
         lo | (hi << 8)
+    }
+
+    fn fetch_opcode(&mut self, bus: &mut dyn Bus) -> u8 {
+        let byte = bus.read_opcode(self.pc);
+        self.pc = self.pc.wrapping_add(1);
+        byte
     }
 
     fn exec_main(&mut self, op: u8, index: IndexMode, bus: &mut dyn Bus) -> u32 {
@@ -886,6 +887,33 @@ impl Z80Cpu {
         11
     }
 
+    pub fn irq(&mut self, bus: &mut dyn Bus, data_bus: u8) -> u32 {
+        if !self.iff1 || self.ei_pending {
+            return 0;
+        }
+    //    println!("IRQ called. IM={:02X}", self.im);
+
+        self.halted = false;
+        self.iff1 = false;
+        self.iff2 = false;
+        self.inc_r();
+        self.push16(bus, self.pc);
+        match self.im {
+            2 => {
+                let table = ((self.i as u16) << 8) | data_bus as u16;
+                let lo = bus.read(table) as u16;
+                let hi = bus.read(table.wrapping_add(1)) as u16;
+                self.pc = (hi << 8) | lo;
+                19
+            }
+            1 => { self.pc = 0x0038; 13 }
+            _ => {
+                self.pc = if data_bus & 0xC7 == 0xC7 { (data_bus & 0x38) as u16 } else { 0x0038 };
+                13
+            }
+        }
+    }
+
     fn inc_r(&mut self) {
         self.r = (self.r & 0x80) | self.r.wrapping_add(1) & 0x7F;
     }
@@ -1082,6 +1110,7 @@ impl Z80Cpu {
 
 pub trait Bus {
     fn read(&mut self, addr: u16) -> u8;
+    fn read_opcode(&mut self, addr: u16) -> u8 { self.read(addr) }
     fn write(&mut self, addr: u16, val: u8);
     fn port_in(&mut self, port: u16) -> u8;
     fn port_out(&mut self, port: u16, val: u8); 

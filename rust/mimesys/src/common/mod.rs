@@ -7,3 +7,4 @@ pub mod system;
 pub mod cpu;
 pub mod input;
 pub mod rotate;
+pub mod encryption;
