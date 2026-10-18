@@ -67,6 +67,9 @@ struct Mapper64StateVariables {
     mirroring_mode: Mirroring,
     current_cycle: i64,
     prg_ram: Vec<u8>,
+    cpu_cycle_prescaler: u32,
+    #[serde(with = "serde_bytes")]
+    chr_ram: Vec<u8>,
 }
 
 impl Mapper64 {
@@ -368,6 +371,8 @@ impl Mapper for Mapper64 {
             mirroring_mode: self.mirroring_mode,
             current_cycle: self.current_cycle,
             prg_ram: self.prg_ram.clone(),
+            cpu_cycle_prescaler: self.cpu_cycle_prescaler,
+            chr_ram: self.chr_ram.clone(),
         };
         
         let config = bincode::config::standard().with_fixed_int_encoding();
@@ -400,6 +405,8 @@ impl Mapper for Mapper64 {
             if state.prg_ram.len() == self.prg_ram.len() {
                 self.prg_ram = state.prg_ram;
             }
+            self.cpu_cycle_prescaler = state.cpu_cycle_prescaler;
+            self.chr_ram = state.chr_ram;
             self.recalculate_banks(); // rebuild derived prg_offsets/chr_offsets from restored registers
         }
     }

@@ -225,6 +225,13 @@ impl NesPPU {
         self.oam.copy_from_slice(&state.oam);
         self.vram.copy_from_slice(&state.vram);
         self.palette_ram.copy_from_slice(&state.palette_ram);
+        self.base_nametable_address = 0x2000 + ((self.ctrl & 0x03) as u16) * 0x400;
+        self.vram_increment = if self.ctrl & 0x04 != 0 { 32 } else { 1 };
+        self.sprite_pattern_table = if self.ctrl & 0x08 != 0 { 0x1000 } else { 0x0000 };
+        self.background_pattern_table = if self.ctrl & 0x10 != 0 { 0x1000 } else { 0x0000 };
+        self.sprite_size = if self.ctrl & 0x20 != 0 { 16 } else { 8 };
+        self.sprite_0_delay = 0;
+        self.frame_ready = false;
     }
 
     pub fn reset(&mut self) {

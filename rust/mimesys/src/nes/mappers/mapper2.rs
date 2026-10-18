@@ -21,6 +21,7 @@ pub struct Mapper2 {
 #[derive(Serialize, Deserialize)]
 pub struct Mapper2StateVariables {
     prg_banks: u8,
+    prg_bank: u8,
     mirroring_mode: Mirroring,
     prg_ram: Vec<u8>, 
     chr_ram: Vec<u8>,
@@ -162,6 +163,7 @@ impl Mapper for Mapper2 {
     fn save_state(&self) -> Vec<u8> {
         let variables = Mapper2StateVariables {
             prg_banks: self.prg_banks,
+            prg_bank: self.prg_bank,
             mirroring_mode: self.mirroring_mode,
             prg_ram: self.prg_ram.clone(),
             chr_ram: self.chr_ram.clone(),
@@ -175,6 +177,7 @@ impl Mapper for Mapper2 {
         let config = bincode::config::standard().with_fixed_int_encoding();
         if let Ok((variables, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper2StateVariables, _>(state_bytes, config) {
             self.prg_banks = variables.prg_banks;
+            self.prg_bank = variables.prg_bank;
             self.mirroring_mode = variables.mirroring_mode;
             self.prg_ram = variables.prg_ram;
             self.chr_ram = variables.chr_ram;

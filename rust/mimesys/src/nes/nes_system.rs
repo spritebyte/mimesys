@@ -160,7 +160,7 @@ impl NesSystem {
 
     pub fn build_save_state(&self) -> NesSaveState {
         NesSaveState {
-            version: 0.1,
+            version: 0.2,
             cpu: self.cpu.get_state(),
             ppu: unsafe { (*self.bus.ppu.get()).get_state() },
             apu: unsafe { (*self.bus.apu.get()).get_state() },
@@ -175,6 +175,13 @@ impl NesSystem {
             total_cpu_cycles: self.bus.total_cpu_cycles,
             mapper_number: self.bus.cartridge.mapper_number(),
             mapper_data: self.bus.cartridge.mapper().save_state(),
+            dmc_stall_remaining: self.bus.dmc_stall_remaining,
+            nmi_line_snapshot: self.bus.nmi_line_snapshot,
+            irq_line_snapshot: self.bus.irq_line_snapshot,
+            open_bus: self.bus.open_bus.get(),
+            pad2_shift_reg: self.bus.pad2_shift_reg.get(),
+            total_ppu_dots: self.bus.total_ppu_dots,
+            dot_in_cycle: self.bus.dot_in_cycle,
         }
     }
 
@@ -197,24 +204,17 @@ impl NesSystem {
         self.bus.dma_temp_buffer = state.dma_temp_buffer;
         self.bus.bus_available = state.bus_available;
         self.bus.total_cpu_cycles = state.total_cpu_cycles;
+        self.bus.dmc_stall_remaining = state.dmc_stall_remaining;
+        self.bus.nmi_line_snapshot = state.nmi_line_snapshot;
+        self.bus.irq_line_snapshot = state.irq_line_snapshot;
+        self.bus.open_bus.set(state.open_bus);
+        self.bus.pad2_shift_reg.set(state.pad2_shift_reg);
+        self.bus.total_ppu_dots = state.total_ppu_dots;
+        self.bus.dot_in_cycle = state.dot_in_cycle;
         self.bus.cartridge.mapper_mut().load_state(&state.mapper_data);
         self.cpu.load_state(&state.cpu);
 
         Ok(())
-    }
-
-    pub fn save_state_to_bytes(&self) -> Result<Vec<u8>, String> {
-        let nes_state = self.build_save_state();
-        let config = bincode::config::standard().with_fixed_int_encoding();
-        bincode::serde::encode_to_vec(&nes_state, config).map_err(|e| format!("{:?}", e))
-    }
-
-    pub fn load_state_from_bytes(&mut self, data: &[u8]) -> Result<(), String> {
-        let config = bincode::config::standard().with_fixed_int_encoding();
-        match bincode::serde::decode_from_slice::<NesSaveState, _>(data, config) {
-            Ok((state, _)) => { let _ = self.apply_save_state(&state); Ok(()) }
-            Err(e) => Err(format!("Failed to decode save state: {:?}", e)),
-        }
     }
 
     /*
@@ -502,6 +502,10 @@ impl System for NesSystem {
         &self.save_battery_path
     }
 
+    fn save_state_path(&self) -> &str {
+        &self.save_state_path
+    }
+
     fn is_sram_dirty(&self) -> bool {
         self.bus.is_sram_dirty()
     }
@@ -545,12 +549,17 @@ impl System for NesSystem {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        todo!("hook up NES save state")
+        let nes_state = self.build_save_state();
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        bincode::serde::encode_to_vec(&nes_state, config).unwrap_or_default()
     }
 
     fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
-        let _ = data;
-        todo!("hook up NES load state")
+        let config = bincode::config::standard().with_fixed_int_encoding();
+        match bincode::serde::decode_from_slice::<NesSaveState, _>(data, config) {
+            Ok((state, _)) => self.apply_save_state(&state),
+            Err(e) => Err(format!("Failed to decode save state: {:?}", e)),
+        }
     }
 
     fn set_audio_rate_adjust(&mut self, factor: f32) {

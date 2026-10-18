@@ -1,5 +1,7 @@
 pub mod donkey_kong;
 pub mod pacman;
+pub mod popeye;
+pub mod galaxian;
 
 use crate::common::system::System;
 use std::collections::HashMap;
@@ -22,6 +24,20 @@ pub fn load_arcade(driver: &str, set_name: &str, regions: HashMap<String, Vec<u8
             };
             Ok(Box::new(pacman::pacman_system::PacmanSystem::new(
             Variant::Pengo(cipher), set_name, regions)?))
+        },
+        "popeye" => Ok(Box::new(popeye::popeye_system::PopeyeSystem::new(set_name, regions, true)?)),
+        "popeye_noalu" => Ok(Box::new(popeye::popeye_system::PopeyeSystem::new(set_name, regions, false)?)),
+        "galaxian" | "mooncrst" | "mooncrst_plain" | "frogger" | "amidar" | "turtles" => {
+            use galaxian::galaxian_system::{GalaxianSystem, Variant};
+            let v = match driver {
+                "mooncrst" => Variant::MoonCresta,
+                "mooncrst_plain" => Variant::MoonCrestaPlain,
+                "frogger" => Variant::Frogger,
+                "amidar" => Variant::Amidar,
+                "turtles" => Variant::Turtles,
+                _ => Variant::Galaxian,
+            };
+            Ok(Box::new(GalaxianSystem::new(v, set_name, regions)?))
         },
         other => Err(format!("no arcade driver name '{other}'")),
     }

@@ -31,6 +31,7 @@ pub trait System: Send {
     fn has_battery(&self) -> bool;
     fn save_battery_path(&self) -> &str;
     fn save_filename(&self) -> &str;
+    fn save_state_path(&self) -> &str;
     fn power_on(&mut self);
     fn power_off(&mut self);
     fn is_sram_dirty(&self) -> bool;

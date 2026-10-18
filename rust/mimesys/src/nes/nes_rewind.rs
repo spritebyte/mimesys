@@ -42,7 +42,7 @@ impl RewindBuffer {
         }
 
         if frame_number % self.checkpoint_interval == 0 {
-            self.checkpoints.push_back((frame_number, system.save_state_to_bytes().expect("REASON")));
+            self.checkpoints.push_back((frame_number, system.save_state()));
             while self.checkpoints.len() > self.max_checkpoints {
                 self.checkpoints.pop_front();
             }
@@ -57,7 +57,7 @@ impl RewindBuffer {
             .find(|(f, _)| *f <= target_frame)
             .ok_or_else(|| "No checkpoint old enough to rewind that far".to_string())?;
 
-        system.load_state_from_bytes(checkpoint_bytes)?;
+        system.load_state(checkpoint_bytes)?;
         system.set_current_frame(*checkpoint_frame);
 
         let inputs_to_replay: Vec<u16> = self.input_history.iter()

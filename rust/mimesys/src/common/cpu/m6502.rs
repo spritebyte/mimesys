@@ -1,26 +1,12 @@
 const STACK_BASE: u16 = 0x100;
 
 /* TODO: BCD mode isn't handled correctly yet and lots of opcodes for 65C02 are missing or incorrect 
-    Focus was on NES and still need to complete variant implementations
+    Focus was on NES and still need to complete variants
 
     TG-16 uses HuC6280 not 65C02. It extends the 6502/65C02 instruction set. 
 */
 
 use serde::{Serialize, Deserialize};
-
-#[cfg(test)]
-macro_rules! emu_print {
-    ($($t:tt)*) => {
-        println!($($t)*)
-    };
-}
-
-#[cfg(not(test))]
-macro_rules! emu_print {
-    ($($t:tt)*) => {
-        godot::global::godot_print!($($t)*)
-    };
-}
 
 #[derive(Default, Clone, Copy, Serialize, Deserialize)]
 pub struct StatusFlags {
@@ -349,7 +335,6 @@ impl M6502Cpu {
         let hi = bus.read_byte(0xFFFD) as u16;
         self.pc = (hi << 8) | lo;
         self.total_cycles = 7;
-        emu_print!("power_on: total cycles {} bus cycles {}", self.total_cycles, bus.total_cycles());
     }
 
     pub fn reset(&mut self, bus: &mut dyn AddressBus) {
@@ -387,9 +372,6 @@ impl M6502Cpu {
             && matches!(self.current_op,
                 Operation::Bpl | Operation::Bmi | Operation::Bvc | Operation::Bvs |
                 Operation::Bcc | Operation::Bcs | Operation::Bne | Operation::Beq);
-//        if self.cycles_remaining == 1 && suppress_poll {
-//            emu_print!("SUPPRESS at rem={} step={} op={:?}", self.cycles_remaining, self.instruction_step, self.current_op);
-//        }
         if self.cycles_remaining == 1 && !in_interrupt_sequence && !suppress_poll {
             self.nmi_polled = self.nmi_pending_shadow;
             self.irq_polled = self.irq_line_shadow && !self.status.interrupt_disable;
@@ -1160,7 +1142,7 @@ impl M6502Cpu {
             0x17 => (Operation::Slo, AddressingMode::ZeroPageX, 6),
             0x1B => (Operation::Slo, AddressingMode::AbsoluteY, 7),
             0x1F => (Operation::Slo, AddressingMode::AbsoluteX, 7),
-            _=> { emu_print!("Opcode unimplemented: {:02X}. {:04X}", opcode, self.pc);
+            _=> { println!("Opcode unimplemented: {:02X}. {:04X}", opcode, self.pc);
                 todo!() },
         }
     }
@@ -1175,16 +1157,12 @@ impl M6502Cpu {
             self.nmi_pending = false; // Clear edge trigger flag
             self.nmi_pending_shadow = false;
             self.nmi_polled = false;
-            //            emu_print!("Setup NMI Interrupt");
             self.setup_hardware_interrupt(Operation::Nmi, bus);
             return true;
         }
-
         
-//        if bus.is_irq_line_asserted() && !interrupts_disabled {
         if self.irq_polled {
             self.irq_polled = false;
-            //            emu_print!("******Setup IRQ Interrupt.");
             self.setup_hardware_interrupt(Operation::Irq, bus);
             return true;
         }
@@ -1330,7 +1308,6 @@ impl M6502Cpu {
                             } else {
                                 // Branch taken + Same Page = 3 cycles total (Needs 1 more micro-cycle)
                                 self.cycles_remaining += 1;
-//                                emu_print!("BR taken: rem_after_bump={} step={}", self.cycles_remaining, self.instruction_step);
                             }
                         } else {
                             self.branch_taken = false;
@@ -1836,7 +1813,7 @@ impl M6502Cpu {
 //                            emu_print!("Operation is BRK. Cycle 7 done and PC now {:04X}. Cycle={}, bus cycles={}", self.pc, self.total_cycles, bus.total_cycles());
                         }
                     }
-                    _ => { emu_print!("INTERRUPT step {}: Vector Addr: {:04X}|PC: {:04X}|", self.instruction_step, vector_base_addr, self.pc); }
+                    _ => { println!("INTERRUPT step {}: Vector Addr: {:04X}|PC: {:04X}|", self.instruction_step, vector_base_addr, self.pc); }
                 }
             }
         }

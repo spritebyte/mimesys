@@ -93,13 +93,44 @@ impl EmuSystem {
     }
 
     #[func]
-    pub fn save_state_to_file(slot: u8) {
+    pub fn save_state_to_file(&mut self, slot: u8) {
+        let Some(sys)= &self.system else { return; };
+        let state_bytes = sys.save_state();
+        if state_bytes.is_empty() {
+            godot_print!("Save states aren't supported for this system yet.");
+            return;
+        }
+        let dir = sys.save_state_path();
+        if !godot::classes::DirAccess::dir_exists_absolute(sys.save_state_path()) {
+            godot::classes::DirAccess::make_dir_recursive_absolute(sys.save_state_path());
+        }    
 
+        let save_path = format!("{}/{}_slot{}.state", dir, sys.save_filename(), slot);
+            
+        if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::WRITE) {
+            let packed_array = PackedByteArray::from(&state_bytes[..]);
+            file.store_buffer(&packed_array);
+            godot_print!("Save state slot {} saved successfully.", slot);
+        } else {
+            godot_print!("Error: Couldn't open file for save state at {}", save_path);
+        }
     }
 
     #[func]
-    pub fn load_state_from_file(slot: u8) {
+    pub fn load_state_from_file(&mut self, slot: u8) {
+        let Some(sys)= &mut self.system else { return; };
+        let save_path = format!("{}/{}_slot{}.state", sys.save_state_path(), sys.save_filename(), slot);
 
+        let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::READ) else {
+            godot_print!("No save state found at {}", save_path);
+            return;
+        };
+        let len = file.get_length() as i64;
+        let state_bytes = file.get_buffer(len).to_vec();
+        match sys.load_state(&state_bytes) {
+            Ok(()) => godot_print!("Save state slot {} loaded.", slot),
+            Err(e) => godot_print!("Couldn't load save state: {}", e),
+        }
     }
 
     #[func]

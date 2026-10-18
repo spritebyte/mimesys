@@ -27,6 +27,13 @@ pub struct Mapper69 {
 pub struct Mapper69StateVariables {
     mirroring_mode: u8,
     prg_ram: Vec<u8>, 
+    command_reg: u8,
+    chr_regs: [u8; 8],
+    prg_regs: [u8; 4],
+    irq_enable: bool,
+    irq_counter_enable: bool,
+    irq_counter: u16,
+    irq_pending: bool,
 }
 
 impl Mapper69 {
@@ -228,6 +235,13 @@ impl Mapper for Mapper69 {
         let variables = Mapper69StateVariables {
             mirroring_mode: self.mirroring_mode,
             prg_ram: self.prg_ram.to_vec(),
+            command_reg: self.command_reg,
+            chr_regs: self.chr_regs.clone(),
+            prg_regs: self.prg_regs.clone(),
+            irq_enable: self.irq_enable,
+            irq_counter_enable: self.irq_counter_enable,
+            irq_counter: self.irq_counter.get(),
+            irq_pending: self.irq_pending.get(),
         };
         
         let config = bincode::config::standard().with_fixed_int_encoding();
@@ -239,6 +253,13 @@ impl Mapper for Mapper69 {
         if let Ok((variables, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper69StateVariables, _>(state_bytes, config) {
             self.mirroring_mode = variables.mirroring_mode;
             self.prg_ram.copy_from_slice(&variables.prg_ram);
+            self.command_reg = variables.command_reg;
+            self.chr_regs = variables.chr_regs;
+            self.prg_regs = variables.prg_regs;
+            self.irq_enable = variables.irq_enable;
+            self.irq_counter_enable = variables.irq_counter_enable;
+            self.irq_counter.set(variables.irq_counter);
+            self.irq_pending.set(variables.irq_pending);
         }
     }
 }

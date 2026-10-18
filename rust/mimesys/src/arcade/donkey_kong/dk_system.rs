@@ -1,4 +1,4 @@
-use crate::common::cpu::z80::Z80Cpu;
+use crate::common::cpu::z80::{Z80Cpu, Z80State};
 use crate::arcade::donkey_kong::dk_bus::DKBus;
 use crate::arcade::donkey_kong::dk_sound::{SoundCpu, Mcs48, DacResampler, DkSfx, run_sound_line};
 use crate::arcade::donkey_kong::dk_video::{DKVideo, SCREEN_W, SCREEN_H, FIRST_VISIBLE_LINE, VBLANK_START};
@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use crate::arcade::take_region;
 use crate::common::input as pad;
+use serde::{Serialize, Deserialize};
 
 const CYCLES_PER_LINE: i32 = 192;
 const LINES_PER_FRAME: u16 = 264;
@@ -25,6 +26,16 @@ pub struct DKSystem {
     resampler: DacResampler,
     sfx: DkSfx,
     sound_budget: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct DKSaveState {
+    pub version: f32,
+    pub cpu: Z80State,
+//    pub ppu: PpuState,
+//    pub apu: ApuState,
+    #[serde(with = "serde_bytes")]
+    pub ram: [u8; 2048], 
 }
 
 impl DKSystem {
@@ -108,6 +119,7 @@ impl System for DKSystem {
     fn has_battery(&self) -> bool { false }
     fn save_filename(&self) -> &str { &self.save_filename }
     fn save_battery_path(&self) -> &str { &self.save_path }
+    fn save_state_path(&self) -> &str { &self.save_path }
     fn is_sram_dirty(&self) -> bool { false }
     fn clear_sram_dirty(&mut self) { }
     fn get_current_frame(&self) -> i64 { self.current_frame as i64 }

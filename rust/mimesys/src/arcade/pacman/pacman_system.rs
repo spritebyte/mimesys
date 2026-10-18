@@ -155,6 +155,7 @@ impl System for PacmanSystem {
     fn has_battery(&self) -> bool { false }
     fn save_filename(&self) -> &str { &self.save_filename }
     fn save_battery_path(&self) -> &str { &self.save_path }
+    fn save_state_path(&self) -> &str { &self.save_path }
     fn is_sram_dirty(&self) -> bool { false }
     fn clear_sram_dirty(&mut self) { }
     fn get_current_frame(&self) -> i64 { self.current_frame as i64 }

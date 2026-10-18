@@ -1,4 +1,6 @@
-#[derive(Clone, Copy, Debug, PartialEq)]
+use serde::{Serialize, Deserialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CpuVariant {
     ZilogZ80,
     ZilogZ180,
@@ -47,6 +49,17 @@ pub struct Z80Cpu {
     pub is_running: bool,
 //    pub config: CpuConfig,
     variant: CpuVariant,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default, Debug, PartialEq)]
+pub struct Z80State {
+    pub main: [u8; 8],       // A F B C D E H L
+    pub alt: [u8; 8],        // A' F' B' C' D' E' H' L'
+    pub ix: u16, pub iy: u16, pub sp: u16, pub pc: u16,
+    pub i: u8, pub r: u8,
+    pub iff1: bool, pub iff2: bool, pub im: u8,
+    pub ei_pending: bool, pub nmi_pending: bool, pub prev_nmi_line: bool,
+    pub halted: bool,
 }
 
 impl Z80Cpu {
@@ -1105,6 +1118,28 @@ impl Z80Cpu {
         } else {
             self.f &= !flag;
         }
+    }
+
+    pub fn save_state(&self) -> Z80State {
+        Z80State {
+            main: [self.a, self.f, self.b, self.c, self.d, self.e, self.h, self.l],
+            alt: [self.a_, self.f_, self.b_, self.c_, self.d_, self.e_, self.h_, self.l_],
+            ix: self.ix, iy: self.iy, sp: self.sp, pc: self.pc,
+            i: self.i, r: self.r,
+            iff1: self.iff1, iff2: self.iff2, im: self.im,
+            ei_pending: self.ei_pending, nmi_pending: self.nmi_pending, prev_nmi_line: self.prev_nmi_line,
+            halted: self.halted,
+        }
+    }
+
+    pub fn load_state(&mut self, s: &Z80State) {
+        [self.a, self.f, self.b, self.c, self.d, self.e, self.h, self.l] = s.main;
+        [self.a_, self.f_, self.b_, self.c_, self.d_, self.e_, self.h_, self.l_] = s.alt;
+        self.ix = s.ix; self.iy = s.iy; self.sp = s.sp; self.pc = s.pc;
+        self.i = s.i; self.r = s.r;
+        self.iff1 = s.iff1; self.iff2 = s.iff2; self.im = s.im;
+        self.ei_pending = s.ei_pending; self.nmi_pending = s.nmi_pending; self.prev_nmi_line = s.prev_nmi_line;
+        self.halted = s.halted;
     }
 }
 

@@ -207,6 +207,10 @@ impl System for GbSystem {
         &self.save_battery_path
     }
 
+    fn save_state_path(&self) -> &str {
+        &self.save_state_path
+    }
+
     fn is_sram_dirty(&self) -> bool {
         self.bus.is_sram_dirty()
     }

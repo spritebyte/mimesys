@@ -108,20 +108,11 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 				gb_system.load_cartridge("gbc", data, base_name.validate_filename(), bios)				
 			return gb_system
 
-#			print("TODO: Rewriting in rust...")
-#			return null
-#			var gbrom := GBRom.new(data)
-#			gbrom.base_filename = base_name
-#			var bus := GBBus.new(gbrom)
-#			return GBSystem.new(bus)
-
 		"sms", "gg":
-			print("TODO: Will support SMS and Gamegear in future")
-			return null
-#			var sms_rom = SMSRom.new(data)
-#			sms_rom.base_filename = base_name
-#			var bus = SMSBus.new(sms_rom)
-#			return SMSSystem.new(bus)
+			var sega_system = EmuSystem.new()
+			sega_system.load_cartridge(actual_ext, data, base_name.validate_filename(), PackedByteArray())
+			return sega_system
+
 		_:
 			print("Error: Unrecognized file extension '.%s' for %s" % [actual_ext, base_name])
 			return null
@@ -136,87 +127,178 @@ static func load_bios(p_path: String) -> PackedByteArray:
 	return data
 
 static func load_arcade(zip_path: String) -> EmuSystem:
-	var set_id := zip_path.get_file().get_basename().to_lower()   # "dkong.zip" -> "dkong"
-	var db := _load_arcade_db()
-	if not db.has(set_id):
-		push_error("Unknown arcade set '%s' (not in %s)" % [set_id, ARCADE_DB_PATH])
+	var found := resolve_arcade(zip_path, _load_arcade_db())
+	if found.is_empty():
 		return null
-	var game: Dictionary = db[set_id]
-	print("\n--- [ Arcade: %s ] ---" % game.get("title", set_id))
+	var sys := EmuSystem.new()
+	if not sys.load_arcade(found["driver"], found["set_id"], found["regions"]):
+		return null
+	return sys
 
-	# Open this set's zip, then its parent's, and so on.
-	# (Variant zips often hold only the files that differ.)
-	var zips: Array[ZIPReader] = []
-	var id := set_id
-	while id != "":
-		var zip := ZIPReader.new()
-		if zip.open(zip_path.get_base_dir().path_join(id + ".zip")) == OK:
-			zips.append(zip)
+
+## Returns {"set_id", "driver", "title", "regions": {name: PackedByteArray}}, or {} on failure.
+static func resolve_arcade(zip_path: String, db: Dictionary) -> Dictionary:
+	var folder := zip_path.get_base_dir()
+	var zip_id := zip_path.get_file().get_basename().to_lower()
+	var cache := {}   # zip id -> index, so each zip is only read and hashed once
+	var own := _zip_index(cache, folder, zip_id)
+	if own.is_empty():
+		push_error("Can't open %s" % zip_path)
+		return {}
+
+	var candidates: Array = []
+	if db.has(zip_id):
+		candidates.append(zip_id)
+	for set_id in _sets_by_overlap(db, own):
+		if set_id != zip_id:
+			candidates.append(set_id)
+	if candidates.is_empty():
+		push_error("%s doesn't match any arcade set in the database" % zip_path.get_file())
+		return {}
+
+	var first_missing: Array = []
+	for set_id in candidates:
+		var pool: Array = [own]
+		for id in [set_id] + _parents_of(db, set_id):
+			if id == zip_id:
+				continue
+			var idx := _zip_index(cache, folder, id)
+			if not idx.is_empty():
+				pool.append(idx)
+		var built := _build_regions(db, set_id, pool)
+		if built["missing"].is_empty():
+			if set_id != zip_id:
+				print("%s identified as '%s' by its contents" % [zip_path.get_file(), set_id])
+			print("\n--- [ Arcade: %s ] ---" % db[set_id].get("title", set_id))
+			return {
+				"set_id": set_id,
+				"driver": _driver_of(db, set_id),
+				"title": db[set_id].get("title", set_id),
+				"regions": built["regions"],
+			}
+		if first_missing.is_empty():
+			first_missing = built["missing"].map(func(m): return "%s: %s" % [set_id, m])
+
+	push_error("%s: missing ROMs\n  %s" % [zip_path.get_file(), "\n  ".join(first_missing)])
+	return {}
+
+
+## Reads and hashes every file in <folder>/<id>.zip. Returns {} if there's no such zip.
+static func _zip_index(cache: Dictionary, folder: String, id: String) -> Dictionary:
+	if cache.has(id):
+		return cache[id]
+	var idx := {}
+	var zip := ZIPReader.new()
+	if zip.open(folder.path_join(id + ".zip")) == OK:
+		idx = {"by_sha1": {}, "by_name": {}}
+		for f in zip.get_files():
+			if f.ends_with("/"):
+				continue
+			var data := zip.read_file(f)
+			if data.is_empty():
+				continue
+			idx["by_name"][f.get_file().to_lower()] = data
+			idx["by_sha1"][_sha1(data)] = data
+		zip.close()
+	cache[id] = idx
+	return idx
+
+
+static func _sha1(data: PackedByteArray) -> String:
+	var ctx := HashingContext.new()
+	ctx.start(HashingContext.HASH_SHA1)
+	ctx.update(data)
+	return ctx.finish().hex_encode()
+
+
+## Every set that shares at least one ROM with this zip, most shared first.
+static func _sets_by_overlap(db: Dictionary, idx: Dictionary) -> Array:
+	var scored: Array = []
+	for set_id in db:
+		var hits := 0
+		for region in _resolve_regions(db, set_id).values():
+			for rom in region["roms"]:
+				if idx["by_sha1"].has(rom.get("sha1", "")):
+					hits += 1
+		if hits > 0:
+			scored.append([hits, set_id])
+	scored.sort_custom(func(a, b): return a[0] > b[0])
+	return scored.map(func(s): return s[1])
+
+
+static func _parents_of(db: Dictionary, set_id: String) -> Array:
+	var out: Array = []
+	var id: String = db.get(set_id, {}).get("parent", "")
+	while id != "" and not out.has(id):
+		out.append(id)
 		id = db.get(id, {}).get("parent", "")
+	return out
 
-	var regions := _resolve_regions(db, set_id)
+
+static func _find_rom(pool: Array, rom: Dictionary) -> PackedByteArray:
+	var sha: String = rom.get("sha1", "")
+	for idx in pool:
+		if sha != "":
+			if idx["by_sha1"].has(sha):
+				return idx["by_sha1"][sha]
+		elif idx["by_name"].has(rom["name"].to_lower()):
+			return idx["by_name"][rom["name"].to_lower()]
+	return PackedByteArray()
+
+
+## Returns {"regions": {...}, "missing": [descriptions]}
+static func _build_regions(db: Dictionary, set_id: String, pool: Array) -> Dictionary:
 	var out := {}
-	var ok := true
+	var missing: Array = []
+	var regions := _resolve_regions(db, set_id)
 	for region_name in regions:
 		var region: Dictionary = regions[region_name]
 		var buf := PackedByteArray()
-		buf.resize(region["size"].hex_to_int())
+		buf.resize(region["size"].hex_to_int())   # zero-filled
 		for rom in region["roms"]:
-			var data := _read_from_zips(zips, rom["name"])
+			var data := _find_rom(pool, rom)
 			if data.is_empty():
-				push_error("%s: missing %s" % [set_id, rom["name"]])
-				ok = false
+				missing.append("%s (sha1 %s)" % [rom["name"], rom.get("sha1", "?")])
 				continue
 			var file_off: int = rom.get("file_offset", "0x0").hex_to_int()
 			var size: int = rom["size"].hex_to_int()
 			if data.size() < file_off + size:
-				push_error("%s: %s is %d bytes, need at least %d" % [set_id, rom["name"], data.size(), file_off + size])
-				ok = false
+				missing.append("%s is too small (%d bytes)" % [rom["name"], data.size()])
 				continue
 			var chunk := data.slice(file_off, file_off + size)
 			var nibble: String = rom.get("nibble", "")
 			for off in [rom["offset"]] + rom.get("reload", []):
 				_copy_into(buf, off.hex_to_int(), chunk, nibble)
 		out[region_name] = buf
+	return {"regions": out, "missing": missing}
 
-	for z in zips:
-		z.close()
-	if not ok:
-		return null
-
-	var sys := EmuSystem.new()
-	if not sys.load_arcade(_driver_of(db, set_id), set_id, out):
-		return null
-	return sys
 
 # A variant's regions replace its parent's, one whole region at a time
 static func _resolve_regions(db: Dictionary, set_id: String) -> Dictionary:
 	var game: Dictionary = db[set_id]
 	var regions := {}
-	if game.has("parent"):
+	if game.has("parent") and db.has(game["parent"]):
 		regions = _resolve_regions(db, game["parent"])
 	regions.merge(game.get("regions", {}), true)
 	return regions
 
-# Variants inherit "driver" (and anything else) from the parent if they don't set it
+
+# Variants inherit "driver" from the parent if they don't set it
 static func _driver_of(db: Dictionary, set_id: String) -> String:
 	var game: Dictionary = db[set_id]
 	if game.has("driver"):
 		return game["driver"]
 	return _driver_of(db, game["parent"])
 
-static func _read_from_zips(zips: Array[ZIPReader], file: String) -> PackedByteArray:
-	for zip in zips:
-		if zip.get_files().has(file):
-			return zip.read_file(file)
-	return PackedByteArray()
 
+# nibble: "" = overwrite, "low" = OR into bits 0-3, "high" = OR into bits 4-7
 static func _copy_into(dst: PackedByteArray, offset: int, src: PackedByteArray, nibble: String = "") -> void:
 	for i in src.size():
 		match nibble:
 			"low":  dst[offset + i] |= src[i] & 0x0F
 			"high": dst[offset + i] |= (src[i] & 0x0F) << 4
 			_:      dst[offset + i] = src[i]
+
 
 static func _load_arcade_db() -> Dictionary:
 	var parsed = JSON.parse_string(FileAccess.get_file_as_string(ARCADE_DB_PATH))

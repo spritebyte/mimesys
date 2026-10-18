@@ -26,6 +26,10 @@ pub struct Mapper206 {
 #[derive(Serialize, Deserialize)]
 struct Mapper206StateVariables {
     prg_banks: u8,
+    bank_registers: [usize; 8],
+    bank_select: u8,
+    prg_mode: u8,
+    chr_mode: u8,
     mirroring_mode: Mirroring,
     prg_ram: Vec<u8>, 
     chr_ram: Vec<u8>,
@@ -193,6 +197,10 @@ impl Mapper for Mapper206 {
     fn save_state(&self) -> Vec<u8> {
         let variables = Mapper206StateVariables {
             prg_banks: self.prg_banks as u8,
+            bank_registers: self.bank_registers.clone(),
+            bank_select: self.bank_select,
+            prg_mode: self.prg_mode,
+            chr_mode: self.chr_mode,
             mirroring_mode: self.mirroring_mode,
             prg_ram: self.prg_ram.clone(),
             chr_ram: self.chr_ram.clone(),
@@ -209,6 +217,7 @@ impl Mapper for Mapper206 {
             self.mirroring_mode = variables.mirroring_mode;
             self.prg_ram = variables.prg_ram;
             self.chr_ram = variables.chr_ram;
+            self.update_offsets();
         }
     }
 }

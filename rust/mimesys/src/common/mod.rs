@@ -8,3 +8,6 @@ pub mod cpu;
 pub mod input;
 pub mod rotate;
 pub mod encryption;
+pub mod audio;
+pub mod video;
+pub mod io;

@@ -38,6 +38,10 @@ pub struct Mapper9 {
 #[derive(Serialize, Deserialize)]
 struct Mapper9StateVariables {
     prg_banks: u8,
+    prg_bank: u8,
+    chr_fd_0: u8, chr_fe_0: u8,
+    chr_fd_1: u8, chr_fe_1: u8,
+    latch_0: u8, latch_1: u8,
     prg_banks_16k: usize,
     prg_banks_8k: usize,
     mirroring_mode: Mirroring,
@@ -240,6 +244,13 @@ impl Mapper for Mapper9 {
     fn save_state(&self) -> Vec<u8> {
         let variables = Mapper9StateVariables {
             prg_banks: self.prg_banks as u8,
+            prg_bank: self.prg_bank,
+            chr_fd_0: self.chr_fd_0,
+            chr_fe_0: self.chr_fe_0,
+            chr_fd_1: self.chr_fd_1,
+            chr_fe_1: self.chr_fe_1,
+            latch_0: self.latch_0.get(),
+            latch_1: self.latch_1.get(),
             prg_banks_8k: self.prg_banks_8k,
             prg_banks_16k: self.prg_banks_16k,
             mirroring_mode: self.mirroring_mode,
@@ -256,6 +267,13 @@ impl Mapper for Mapper9 {
         let config = bincode::config::standard().with_fixed_int_encoding();
         if let Ok((variables, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper9StateVariables, _>(state_bytes, config) {
             self.prg_banks = variables.prg_banks as usize;
+            self.prg_bank = variables.prg_bank;
+            self.chr_fd_0 = variables.chr_fd_0;
+            self.chr_fe_0 = variables.chr_fe_0;
+            self.chr_fd_1 = variables.chr_fd_1;
+            self.chr_fe_1 = variables.chr_fe_1;
+            self.latch_0.set(variables.latch_0);
+            self.latch_1.set(variables.latch_1);
             self.prg_banks_16k = variables.prg_banks_16k;
             self.prg_banks_8k = variables.prg_banks_8k;
             self.mirroring_mode = variables.mirroring_mode;

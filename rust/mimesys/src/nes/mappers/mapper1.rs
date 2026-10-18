@@ -72,6 +72,7 @@ struct Mapper1StateVariables {
     chr_bank_1: u8,
     prg_bank: u8,
     last_write_cycle: i64,
+    current_cycle: i64,
     #[serde(with = "serde_bytes")]
     prg_ram: Vec<u8>,
     #[serde(with = "serde_bytes")]
@@ -323,6 +324,7 @@ impl Mapper for Mapper1 {
             chr_bank_1: self.chr_bank_1,
             prg_bank: self.prg_bank,
             last_write_cycle: self.last_write_cycle,
+            current_cycle: self.current_cycle,
             prg_ram: self.prg_ram.clone(),
             chr_ram: self.chr_ram.clone(),
         };
@@ -341,6 +343,7 @@ impl Mapper for Mapper1 {
             self.chr_bank_1 = variables.chr_bank_1;
             self.prg_bank = variables.prg_bank;
             self.last_write_cycle = variables.last_write_cycle;
+            self.current_cycle = variables.current_cycle;
             self.prg_ram = variables.prg_ram;
             self.chr_ram = variables.chr_ram;
         }
