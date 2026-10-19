@@ -15,6 +15,10 @@ run/main_scene="uid://dmqrip33lf7oq"
 config/features=PackedStringArray("4.6", "GL Compatibility")
 config/icon="res://icon.svg"
 
+[autoload]
+
+AppSettings="*uid://bxjeyb8wavk1m"
+
 [input]
 
 c1_up={

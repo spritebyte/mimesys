@@ -31,9 +31,6 @@ oversampling_override = 1.0
 [node name="DebugMenu" type="PopupMenu" parent="MainVerticalStack/TopMenuBar" unique_id=1380072654]
 oversampling_override = 1.0
 
-[node name="ViewMenu" type="PopupMenu" parent="MainVerticalStack/TopMenuBar" unique_id=305318371]
-oversampling_override = 1.0
-
 [node name="ScreenContainer" type="AspectRatioContainer" parent="MainVerticalStack" unique_id=871644046]
 unique_name_in_owner = true
 layout_mode = 2

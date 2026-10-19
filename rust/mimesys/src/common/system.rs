@@ -9,7 +9,7 @@ pub enum Rotation {
 pub struct DisplayInfo {
        pub buffer_width: i32,
        pub buffer_height: i32,
-       pub visible_x: u32, pub visible_y: u32,
+       pub visible_x: i32, pub visible_y: i32,
        pub visible_width: i32, pub visible_height: i32,
        pub target_aspect_ratio: f32,
        pub rotation: Rotation,   // plain Rust enum, fine here

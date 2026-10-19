@@ -75,15 +75,15 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 			nes_system.load_cartridge("nes", data, base_name.validate_filename(), bios)
 			return nes_system
 
-#			var nes_system = NesSystem.create_from_bytes(data, base_name.validate_filename())
-#			return nes_system
-
-		# "A26" = Atari 2600
+		"a26":
+			var atari = EmuSystem.new()
+			atari.load_cartridge("a26", data, base_name.validate_filename(), PackedByteArray())
+			return atari
 		# "A52" = Atari 5200
 		# "BIN" = Atari 7800?
-		# TODO: should rely on file structure rather than extension
+
 		"col", "cv", "rom":
-			var bios_path="user://BIOS/colecovision.rom"
+			var bios_path = AppSettings.bios_path("coleco", "user://BIOS/colecovision.rom")
 			var bios: PackedByteArray = load_bios(bios_path)
 			print("Loaded BIOS '%s': %d bytes" % [bios_path, bios.size()])
 			if bios.is_empty():
@@ -95,7 +95,7 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 		"gb", "gbc":
 			# TODO: let user select if BIOS should be skipped
 			#       and if specific system should be forced.
-			var bios_path="user://BIOS/gbc_bios.bin"
+			var bios_path = AppSettings.bios_path("gb", "user://BIOS/gbc_bios.bin")
 			var bios: PackedByteArray = load_bios(bios_path)
 			print("Loaded BIOS '%s': %d bytes" % [bios_path, bios.size()])
 			if bios.is_empty():
@@ -112,6 +112,14 @@ static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
 			var sega_system = EmuSystem.new()
 			sega_system.load_cartridge(actual_ext, data, base_name.validate_filename(), PackedByteArray())
 			return sega_system
+
+		"pce":
+			var pce = EmuSystem.new()
+			pce.load_cartridge("pce", data, base_name.validate_filename(), PackedByteArray())
+			return pce
+
+
+
 
 		_:
 			print("Error: Unrecognized file extension '.%s' for %s" % [actual_ext, base_name])

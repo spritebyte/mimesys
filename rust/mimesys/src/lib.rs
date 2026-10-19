@@ -11,4 +11,6 @@ mod sms;
 mod common;
 mod coleco;
 mod arcade;
+mod atari2600;
+mod pce;
 

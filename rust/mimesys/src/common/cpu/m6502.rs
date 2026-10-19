@@ -1937,7 +1937,7 @@ impl M6502Cpu {
             Operation::Isc => {
                 let incremented_value = value.wrapping_add(1);
                 bus.write_byte(self.effective_addr, incremented_value);    
-                self.add_with_carry_logic(incremented_value ^ 0xFF);
+                self.subtract_with_borrow_logic(incremented_value);
             }
 
             Operation::Las => { // undocumented 6502 instruction
@@ -2055,7 +2055,7 @@ impl M6502Cpu {
                 let result = self.a & self.x;
                 bus.write_byte(self.effective_addr, result);
             }
-            Operation::Sbc => { self.add_with_carry_logic(value ^ 0xFF); }
+            Operation::Sbc => self.subtract_with_borrow_logic(value),
             Operation::Sbx => {
                 let base = self.a & self.x;
     
@@ -2237,6 +2237,26 @@ impl M6502Cpu {
             self.a = new_a;
             self.update_nz_flags(self.a);
         }
+    }
+
+    fn subtract_with_borrow_logic(&mut self, value: u8) {
+        if !(self.config.has_bcd && self.status.decimal) {
+            self.add_with_carry_logic(value ^ 0xFF);
+            return;
+        }
+        let borrow: i16 = if self.status.carry { 0 } else { 1 };
+        let binary = self.a as i16 - value as i16 - borrow;
+        let binary_u8 = binary as u8;
+        self.status.overflow = ((self.a ^ value) & (self.a ^ binary_u8) & 0x80) != 0;
+        self.status.carry = binary >= 0;
+
+        let mut lo = (self.a & 0x0F) as i16 - (value & 0x0F) as i16 - borrow;
+        let mut hi = (self.a >> 4) as i16 - (value >> 4) as i16;
+        if lo < 0 { lo -= 6; hi -= 1; }
+        if hi < 0 { hi -= 6; }
+        self.a = (((hi & 0x0F) << 4) | (lo & 0x0F)) as u8;
+
+        if self.config.is_c02 { self.update_nz_flags(self.a); } else { self.update_nz_flags(binary_u8); }
     }
 
     // Flag helpers

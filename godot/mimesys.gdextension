@@ -4,7 +4,7 @@ compatibility_minimum = 4.1
 reloadable = true
 
 [libraries]
-linux.debug.x86_64 =     "res://../rust/mimesys/target/debug/libmimesys.so"
+linux.debug.x86_64 =     "res://../rust/mimesys/target/release/libmimesys.so"
 linux.release.x86_64 =   "res://../rust/mimesys/target/release/libmimesys.so"
 windows.debug.x86_64 =   "res://../rust/mimesys/target/debug/mimesys.dll"
 windows.release.x86_64 = "res://../rust/mimesys/target/release/mimesys.dll"

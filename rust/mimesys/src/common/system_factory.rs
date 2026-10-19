@@ -3,14 +3,12 @@ use crate::gameboy::gb_system::GbSystem;
 use crate::coleco::coleco_system::ColecoSystem;
 use crate::nes::nes_system::NesSystem;
 use crate::sms::sms_system::SmsSystem;
+use crate::atari2600::a2600_system::A2600System;
+use crate::pce::pce_system::PceSystem;
 use std::collections::HashMap;
  
-// use crate::gameboy::load_gameboy;
-// use crate::gba::load_gba;
-// use crate::arcade::load_pacman;
- 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CartSystem { GameBoy, GameBoyColor, Gba, Coleco, Nes, Sms, GameGear }
+pub enum CartSystem { GameBoy, GameBoyColor, Gba, Coleco, Nes, Sms, GameGear, Atari2600, Pce }
 
 impl CartSystem {
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -22,6 +20,8 @@ impl CartSystem {
             "nes"    => Ok(Self::Nes),
             "sms"    => Ok(Self::Sms),
             "gg"     => Ok(Self::GameGear),
+            "a26"    => Ok(Self::Atari2600),
+            "pce"    => Ok(Self::Pce),
             other    => Err(format!("Unknown system id '{other}'")),
         }
     }
@@ -46,6 +46,11 @@ fn load_cartridge(system: CartSystem, rom: &[u8], filename: &str, bios: Option<V
 {
     let bios_or_empty: &[u8] = bios.as_deref().unwrap_or(&[]);
     match system {
+        CartSystem::Atari2600 => {
+            let core = A2600System::from_rom(rom, filename, bios_or_empty)
+                .map_err(|e| format!("Atari 2600 from_rom failed: {e}"))?;
+            Ok(Box::new(core))
+        }        
         CartSystem::GameBoy | CartSystem::GameBoyColor => {
             let core = GbSystem::from_rom(rom, filename, bios_or_empty)
                 .map_err(|e| format!("GB from_rom failed: {e}"))?;
@@ -69,6 +74,11 @@ fn load_cartridge(system: CartSystem, rom: &[u8], filename: &str, bios: Option<V
             let gg = system == CartSystem::GameGear;
             let core = SmsSystem::from_rom(rom, filename, bios_or_empty, gg)
                 .map_err(|e| format!("SMS/GG from_rom failed: {e}"))?;
+            Ok(Box::new(core))
+        }
+        CartSystem::Pce => {
+            let core = PceSystem::from_rom(rom, filename, bios_or_empty)
+                .map_err(|e| format!("PC Engine from_rom failed: {e}"))?;
             Ok(Box::new(core))
         }
     }
