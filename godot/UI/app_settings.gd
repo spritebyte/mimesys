@@ -1,6 +1,6 @@
 extends Node
 ## Autoload "AppSettings": app settings + per-system controller mappings.
-## Saved to user://GD_EMU/settings.cfg (plain text, safe to hand-edit or delete).
+## Saved to user://settings.cfg (plain text, safe to hand-edit or delete).
 ##
 ## How remapping works: the emulator thread reads the InputMap actions (c1_up, c1_a, ...).
 ## Each system keeps its own binding table; apply_input_profile(system_id) rewrites those
@@ -16,11 +16,13 @@ const ALL_ACTIONS := [
 	"c1_star", "c1_hash",
 ]
 
-## File extension -> system id
+## File extension -> system (controls profile) id, for extensions that only one system uses.
 const SYSTEM_BY_EXT := {
-	"nes": "nes", "gb": "gb", "gbc": "gb", "col": "coleco", "cv": "coleco", "rom": "coleco",
-	"sms": "sms", "gg": "gg", "pce": "pce", "a26": "a2600", "bin": "a2600",
+	"nes": "nes", "gb": "gb", "gbc": "gb", "col": "coleco", "cv": "coleco",
+	"sms": "sms", "gg": "gg", "pce": "pce", "a26": "a2600", "a78": "a7800",
 }
+## Extensions several systems use: the ROM detector looks inside these files.
+const AMBIGUOUS_EXT := ["bin", "rom"]
 
 ## Per system: display name and the buttons it uses, as [action, label].
 ## The [x] in each label is the emulator's generic button, so you can tell which is which.
@@ -31,6 +33,11 @@ var state_slot := 0
 var rom_folders: Array = []      # folders the game library scans
 var recent: Array = []           # newest first: {"path", "inner", "title", "system"}
 const MAX_RECENT := 10
+var link_a := ""                 # last games picked for the link cable
+var link_b := ""
+var net_ip := ""                 # last address joined / port used for network link
+var net_port := 47100
+var rom_systems := {}            # "path" or "path|file in zip" -> system id the user picked
 
 ## Per-system options (frontend side). Missing keys fall back to these defaults.
 const OPTION_DEFAULTS := {
@@ -74,6 +81,9 @@ func _init() -> void:
 			["c1_a", "I [A]"], ["c1_b", "II [B]"], ["c1_select", "Select"], ["c1_start", "Run [Start]"]]},
 		"a2600": {"name": "Atari 2600", "actions": dpad + [
 			["c1_a", "Fire [A]"], ["c1_select", "Game Select [Select]"], ["c1_start", "Game Reset [Start]"]]},
+		"a7800": {"name": "Atari 7800", "actions": dpad + [
+			["c1_a", "Button 1 [A]"], ["c1_b", "Button 2 [B]"], ["c1_start", "Pause [Start]"],
+			["c1_select", "Select"], ["c2_start", "Reset [P2 Start]"]]},
 		"arcade": {"name": "Arcade", "actions": dpad + [
 			["c1_a", "Button 1 [A]"], ["c1_b", "Button 2 [B]"], ["c1_start", "P1 Start"],
 			["c2_start", "P2 Start"], ["coin", "Coin"]]},
@@ -98,6 +108,11 @@ func load_settings() -> void:
 	state_slot = cfg.get_value("states", "slot", 0)
 	rom_folders = cfg.get_value("library", "folders", [])
 	recent = cfg.get_value("library", "recent", [])
+	link_a = cfg.get_value("link", "a", "")
+	link_b = cfg.get_value("link", "b", "")
+	net_ip = cfg.get_value("network", "ip", "")
+	net_port = cfg.get_value("network", "port", 47100)
+	rom_systems = cfg.get_value("library", "rom_systems", {})
 	for section in cfg.get_sections():
 		if section.begins_with("opt_"):
 			var opts := {}
@@ -122,6 +137,11 @@ func save_settings() -> void:
 	cfg.set_value("states", "slot", state_slot)
 	cfg.set_value("library", "folders", rom_folders)
 	cfg.set_value("library", "recent", recent)
+	cfg.set_value("link", "a", link_a)
+	cfg.set_value("link", "b", link_b)
+	cfg.set_value("network", "ip", net_ip)
+	cfg.set_value("network", "port", net_port)
+	cfg.set_value("library", "rom_systems", rom_systems)
 	for system_id in _options:
 		for key in _options[system_id]:
 			cfg.set_value("opt_" + system_id, key, _options[system_id][key])
@@ -167,6 +187,20 @@ func add_recent(path: String, inner: String, title: String, system_id: String) -
 	recent.push_front({"path": path, "inner": inner, "title": title, "system": system_id})
 	recent.resize(min(recent.size(), MAX_RECENT))
 	save_settings()
+
+
+## A system the user picked for a file (see SystemPickDialog), or "".
+func remembered_system(path: String, inner: String) -> String:
+	return rom_systems.get(_rom_key(path, inner), "")
+
+
+func remember_system(path: String, inner: String, system_id: String) -> void:
+	rom_systems[_rom_key(path, inner)] = system_id
+	save_settings()
+
+
+func _rom_key(path: String, inner: String) -> String:
+	return path if inner == "" else path + "|" + inner
 
 
 func system_name(system_id: String) -> String:

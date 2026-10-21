@@ -369,6 +369,7 @@ impl System for NesSystem {
         let mut cpu_cycles_run:u16 = 0;
         self.bus.accesses_this_cycle = 0;
         while !unsafe { (*self.bus.ppu.get()).is_frame_complete() } {
+            self.bus.apply_cheat_writes();
             self.bus.accesses_this_cycle = 0;
             let apu = self.bus.apu.get();
             if self.bus.dmc_stall_remaining == 0 && unsafe { (*apu).dmc_dma_request } {
@@ -565,4 +566,6 @@ impl System for NesSystem {
     fn set_audio_rate_adjust(&mut self, factor: f32) {
         self.bus.apu.get_mut().sample_rate_ratio = (1789773.0 / 44100.0) / factor;
     }
+
+    fn cheats_mut(&mut self) -> Option<&mut crate::common::cheats::Cheats> { Some(&mut self.bus.cheats) }
 }

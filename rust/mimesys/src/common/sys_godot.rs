@@ -6,6 +6,9 @@ use crate::common::system::{System,DisplayInfo};
 use crate::common::gd_sys_display::SystemDisplayInfo;
 use crate::common::rotate::rotate_rgba;
 use crate::common::system::Rotation;
+use crate::gameboy::gb_system::GbSystem;
+use crate::gameboy::gb_link_system::GbLinkPair;
+use crate::gameboy::gb_netlink::NetLink;
 //use std::sync::atomic::Ordering;
 use std::collections::VecDeque;
 use std::collections::HashMap;
@@ -165,17 +168,10 @@ impl EmuSystem {
     #[func]
     pub fn power_on(&mut self) {
         let Some(sys) = &mut self.system else { return; };
-//        sys.set_running(true);
-//        sys.is_running.store(true, Ordering::SeqCst);
-        let save_path = format!("{}/{}.sav", sys.save_battery_path(), sys.save_filename());
-        if sys.has_battery() && godot::classes::FileAccess::file_exists(&save_path) {
-            if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::READ) {
-                let file_length = file.get_length() as i64;
-                let buffer = file.get_buffer(file_length);
-                sys.load_sram(buffer.as_slice());
-                godot_print!("SRAM loaded successfully during power_on.");
-            }
-        } else { println!("No save file doesn't exist at {save_path}"); }
+        load_battery(sys.as_mut());
+        if let Some(partner) = sys.link_partner() {
+            load_battery(partner);
+        }
         sys.power_on();
         println!("System Power On");
     }
@@ -196,33 +192,9 @@ impl EmuSystem {
     #[func]
     pub fn check_and_save_sram(&mut self) {
         let Some(sys) = &mut self.system else {return;};
-        if !sys.is_sram_dirty() {
-            return;
-        }
-        if let Some(sram_bytes) = sys.get_sram() {
-            let dir_path_str = sys.save_battery_path();
-            let dir_path = GString::from(dir_path_str);
-
-            if !godot::classes::DirAccess::dir_exists_absolute(&dir_path) {
-                let err = godot::classes::DirAccess::make_dir_recursive_absolute(&dir_path);
-                if err != godot::global::Error::OK {
-                    godot_print!("Failed to create save directory '{}'. Error: {:?}", dir_path_str, err);
-                    return;
-                }
-                godot_print!("Created missing save directory: {}", sys.save_battery_path());
-            }
-            let save_path_str = format!("{}/{}.sav", dir_path_str, sys.save_filename());
-            let save_path = GString::from(&save_path_str);
-
-            if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::WRITE) {
-
-                let packed_array = PackedByteArray::from(&sram_bytes[..]);
-                file.store_buffer(&packed_array);
-                file.flush();
-                sys.clear_sram_dirty(); 
-                godot_print!("SRAM successfully saved to {save_path_str}");
-            }
-            else { println!("Couldn't open file for saving at {save_path}") }
+        save_battery(sys.as_mut());
+        if let Some(partner) = sys.link_partner() {
+            save_battery(partner);
         }
     }
 
@@ -334,16 +306,120 @@ impl EmuSystem {
             self.audio_fifo.pop_front();
         }
     }
-}
 
-/*
-fn kind_from_i32(v: i32) -> SystemKind {
-    match v {
-        0 => SystemKind::GameBoy,
-        1 => SystemKind::GameBoyColor,
-        2 => SystemKind::Gba,
-        3 => SystemKind::Coleco,
-        _ => SystemKind::GameBoy,
+    #[func]
+    pub fn set_cheats(&mut self, codes: PackedStringArray) -> PackedStringArray {
+        let codes: Vec<String> = codes.as_slice().iter().map(|s| s.to_string()).collect();
+        let errors: Vec<String> = match self.system.as_mut().and_then(|s| s.cheats_mut()) {
+            Some(cheats) => cheats.set(&codes),
+            None => codes.iter().map(|_| "cheats aren't supported for this system yet".to_string()).collect(),
+        };
+        PackedStringArray::from_iter(errors.iter().map(|e| GString::from(e.as_str())))
+    }
+
+    #[func]
+    pub fn supports_cheats(&mut self) -> bool {
+        self.system.as_mut().map_or(false, |s| s.cheats_mut().is_some())
+    }
+
+    #[func]
+    fn load_gb_link(&mut self, rom_a: PackedByteArray, name_a: String,
+                    rom_b: PackedByteArray, name_b: String, bios: PackedByteArray) -> bool {
+        let a = match GbSystem::from_rom(rom_a.as_slice(), &name_a, bios.as_slice()) {
+            Ok(s) => s, Err(e) => { godot_error!("Game Boy 1: {e}"); return false; }
+        };
+        let b = match GbSystem::from_rom(rom_b.as_slice(), &name_b, bios.as_slice()) {
+            Ok(s) => s, Err(e) => { godot_error!("Game Boy 2: {e}"); return false; }
+        };
+        self.system = Some(Box::new(GbLinkPair::new(a, b)));
+        true
+    }
+
+    #[func]
+    fn set_option(&mut self, key: GString, value: i64) {
+        if let Some(sys) = &mut self.system {
+            sys.set_option(&key.to_string(), value);
+        }
+    }
+
+    #[func]
+    fn detect_rom(data: PackedByteArray, path: GString) -> PackedStringArray {
+        use crate::common::rom_detect;
+        let guesses = rom_detect::detect(data.as_slice(), &path.to_string());
+        let mut lines = vec![if rom_detect::is_clear(&guesses) { "clear".to_string() } else { "ask".to_string() }];
+        lines.extend(guesses.iter().map(|g| format!("{}|{}|{}", g.system, g.score, g.why)));
+        PackedStringArray::from_iter(lines.iter().map(|s| GString::from(s.as_str())))
+    }
+
+    #[func]
+    fn net_host(&mut self, port: i64) -> GString {
+        let Some(sys) = &mut self.system else { return "Load a game first".into(); };
+        match NetLink::host(port as u16) {
+            Ok(link) => {
+                if sys.attach_cable(Some(Box::new(link))) { GString::new() }
+                else { "This system has no link port".into() }
+            }
+            Err(e) => GString::from(e.as_str()),
+        }
+    }
+
+    #[func]
+    fn net_join(&mut self, address: GString, port: i64) -> GString {
+        let Some(sys) = &mut self.system else { return "Load a game first".into(); };
+        match NetLink::join(&address.to_string(), port as u16) {
+            Ok(link) => {
+                if sys.attach_cable(Some(Box::new(link))) { GString::new() }
+                else { "This system has no link port".into() }
+            }
+            Err(e) => GString::from(e.as_str()),
+        }
+    }
+
+    #[func]
+    fn net_disconnect(&mut self) {
+        if let Some(sys) = &mut self.system {
+            sys.attach_cable(None);
+        }
+    }
+
+    #[func]
+    fn net_status(&self) -> GString {
+        match &self.system {
+            Some(sys) => GString::from(sys.cable_status().as_str()),
+            None => GString::new(),
+        }
     }
 }
-*/
+
+fn load_battery(sys: &mut dyn System) {
+    let save_path = format!("{}/{}.sav", sys.save_battery_path(), sys.save_filename());
+    if sys.has_battery() && godot::classes::FileAccess::file_exists(&save_path) {
+        if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::READ) {
+            let len = file.get_length() as i64;
+            let buffer = file.get_buffer(len);
+            sys.load_sram(buffer.as_slice());
+            godot_print!("SRAM loaded from {save_path}");
+        }
+    }
+}
+
+fn save_battery(sys: &mut dyn System) {
+    if !sys.is_sram_dirty() {
+        return;
+    }
+    let Some(sram) = sys.get_sram() else { return; };
+    let sram = sram.to_vec();
+    let dir = sys.save_battery_path().to_string();
+    if !godot::classes::DirAccess::dir_exists_absolute(&dir) {
+        godot::classes::DirAccess::make_dir_recursive_absolute(&dir);
+    }
+    let save_path = format!("{}/{}.sav", dir, sys.save_filename());
+    if let Some(mut file) = godot::classes::FileAccess::open(&save_path, godot::classes::file_access::ModeFlags::WRITE) {
+        file.store_buffer(&PackedByteArray::from(&sram[..]));
+        file.flush();
+        sys.clear_sram_dirty();
+        godot_print!("SRAM saved to {save_path}");
+    } else {
+        godot_print!("Couldn't open {save_path} for saving");
+    }
+}

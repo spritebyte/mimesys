@@ -27,7 +27,12 @@ pub const FB_LINES: usize = 262;
 const HBLANK: u16 = 68;
 const CLOCKS_PER_LINE: u16 = 228;
 const MAX_LINES: u16 = 320;
-const W: u16 = SCREEN_W as u16;     // a frame with no VSYNC gets cut here
+const W: u16 = SCREEN_W as u16;
+/// HMOVE timing, by the color clock where the write lands (3 x the CPU cycle count):
+///   cycle 73-74 (clock 219-222): "late", no black bar, objects move 8 further left
+///   cycle 75    (clock 225):     counts as a normal HMOVE for the *next* line (bar there)
+const LATE_HMOVE: u16 = 219;
+const NEXT_LINE_HMOVE: u16 = 225;     // a frame with no VSYNC gets cut here
 pub const AUDIO_RATE: f64 = 3_579_545.0 / 114.0;   // 2 audio clocks per line = 31.4 kHz
 
 /// NTSC palette (Stella's), indexed by color register >> 1.
@@ -161,12 +166,20 @@ pub struct Tia {
     hm_m: [u8; 2],
     hm_bl: u8,
     hmove_blank: bool,
+    hmove_blank_next: bool,
 
     grp_new: [u8; 2],
     grp_old: [u8; 2],
     vdelp: [bool; 2],
     enam: [bool; 2],
     resmp: [bool; 2],
+    /// Set by RESPx / RESMx until the line ends: the object's counter was just reset, so its
+    /// main copy isn't drawn again until the next line (its NUSIZ copies still are).
+    /// Not saved: it only lasts to the end of the current line.
+    #[serde(skip)]
+    reset_this_line_p: [bool; 2],
+    #[serde(skip)]
+    reset_this_line_m: [bool; 2],
     enabl_new: bool,
     enabl_old: bool,
     vdelbl: bool,
@@ -174,6 +187,11 @@ pub struct Tia {
     collisions: [u8; 8],          // read registers 0-7, bits 7 and 6
 
     pub fire: [bool; 2],          // joystick buttons (INPT4/5)
+
+    /// Writes the TIA applies a few color clocks late: (register, value, clocks left).
+    delayed: Vec<(u8, u8, u8)>,
+    /// The playfield is sampled once per 4-pixel cell, at the cell's first pixel.
+    pf_latch: bool,
 
     audio: [AudioChannel; 2],
     audio_phase: f64,
@@ -186,6 +204,19 @@ pub struct Tia {
 
     #[serde(skip)]
     pub framebuffer: Vec<u8>,     // RGBA, SCREEN_W x FB_LINES
+
+    /// Lines where VBLANK was off this frame (first, last), and the same for the last frame.
+    #[serde(skip)]
+    vis: Option<(u16, u16)>,
+    #[serde(skip)]
+    pub last_vis: Option<(u16, u16)>,
+    /// 7800: color clocks not yet turned into audio clocks (see run_audio)
+    #[serde(skip)]
+    audio_clocks: u32,
+
+    /// Debug: when Some, every register write is recorded as (line, color clock, register, value).
+    #[serde(skip)]
+    pub write_log: Option<Vec<(u16, u16, u8, u8)>>,
 }
 
 impl Tia {
@@ -194,16 +225,23 @@ impl Tia {
             hpos: 0, line: 0, last_frame_lines: 0,
             vsync: false, vblank: 0, wsync: false, frame_done: false,
             colup: [0; 2], colupf: 0, colubk: 0, ctrlpf: 0, pf: [0; 3], nusiz: [0; 2], refp: [false; 2],
-            pos_p: [0; 2], pos_m: [0; 2], pos_bl: 0, hm_p: [0; 2], hm_m: [0; 2], hm_bl: 0, hmove_blank: false,
+            pos_p: [0; 2], pos_m: [0; 2], pos_bl: 0, hm_p: [0; 2], hm_m: [0; 2], hm_bl: 0, hmove_blank: false, hmove_blank_next: false,
             grp_new: [0; 2], grp_old: [0; 2], vdelp: [false; 2], enam: [false; 2], resmp: [false; 2],
+            reset_this_line_p: [false; 2], reset_this_line_m: [false; 2],
             enabl_new: false, enabl_old: false, vdelbl: false,
             collisions: [0; 8],
             fire: [false; 2],
+            delayed: Vec::with_capacity(4),
+            pf_latch: false,
             audio: [AudioChannel::new(), AudioChannel::new()],
             audio_phase: 0.0, audio_acc: 0.0, audio_n: 0, dc: (0.0, 0.0),
             out_rate: out_rate as f64,
             audio_out: Vec::with_capacity(2048),
             framebuffer: vec![0; SCREEN_W * FB_LINES * 4],
+            write_log: None,
+            vis: None,
+            last_vis: None,
+            audio_clocks: 0,
         }
     }
 
@@ -223,8 +261,8 @@ impl Tia {
     }
 
     /// HMxx: signed high nibble, positive values move left.
-    fn apply_motion(pos: &mut u16, hm: u8) {
-        let delta = (hm as i8 >> 4) as i32;
+    fn apply_motion(pos: &mut u16, hm: u8, extra: i32) {
+        let delta = (hm as i8 >> 4) as i32 + extra;
         *pos = (*pos as i32 - delta).rem_euclid(SCREEN_W as i32) as u16;
     }
 
@@ -233,6 +271,23 @@ impl Tia {
     }
 
     pub fn write(&mut self, reg: u8, v: u8) {
+        if let Some(log) = self.write_log.as_mut() { log.push((self.line, self.hpos, reg & 0x3F, v)); }
+        // Delays measured from the end of the CPU write (Stella's TIA): playfield 2 clocks,
+        // player graphics and enables 1 clock. Stored as clocks-to-go, counted down before
+        // each pixel is drawn.
+        let delay = match reg & 0x3F {
+            0x0D..=0x0F => 3,
+            0x1B..=0x1F => 2,
+            _ => 0,
+        };
+        if delay > 0 {
+            self.delayed.push((reg & 0x3F, v, delay));
+        } else {
+            self.write_now(reg, v);
+        }
+    }
+
+    fn write_now(&mut self, reg: u8, v: u8) {
         match reg & 0x3F {
             0x00 => {                                            // VSYNC
                 let on = v & 0x02 != 0;
@@ -240,7 +295,11 @@ impl Tia {
                 self.vsync = on;
             }
             0x01 => self.vblank = v,                             // VBLANK (bit 1 = blank)
-            0x02 => self.wsync = true,                           // WSYNC: halt the CPU until the line ends
+            // WSYNC: halt the CPU until the line ends. Writes reach us after their cycle's 3
+            // clocks; if those clocks just finished the line (hpos 0-2), the latch on real
+            // hardware was set *during* that cycle and released at the line end already,
+            // so the CPU doesn't stop. Halting here would cost a whole extra line.
+            0x02 => if self.hpos >= 3 { self.wsync = true },
             0x03 => self.hpos = 0,                               // RSYNC (test register)
             0x04 => self.nusiz[0] = v,
             0x05 => self.nusiz[1] = v,
@@ -254,10 +313,16 @@ impl Tia {
             0x0D => self.pf[0] = v,
             0x0E => self.pf[1] = v,
             0x0F => self.pf[2] = v,
-            0x10 => self.pos_p[0] = self.reset_position(5),      // RESP0
-            0x11 => self.pos_p[1] = self.reset_position(5),
-            0x12 => self.pos_m[0] = self.reset_position(4),      // RESM0
-            0x13 => self.pos_m[1] = self.reset_position(4),
+            0x10 | 0x11 => {                                     // RESP0/1
+                let n = (reg & 1) as usize;
+                self.pos_p[n] = self.reset_position(5);
+                self.reset_this_line_p[n] = true;
+            }
+            0x12 | 0x13 => {                                     // RESM0/1
+                let n = (reg & 1) as usize;
+                self.pos_m[n] = self.reset_position(4);
+                self.reset_this_line_m[n] = true;
+            }
             0x14 => self.pos_bl = self.reset_position(4),        // RESBL
             0x15 => self.audio[0].audc = v,
             0x16 => self.audio[1].audc = v,
@@ -293,13 +358,21 @@ impl Tia {
                 }
             }
             0x2A => {                                            // HMOVE
+                // HMOVE sends (HM xor 8) = 0..15 extra clocks to each object during HBLANK,
+                // and stretches HBLANK by 8 clocks, which costs every object 8 clocks:
+                // net motion = HM (-8..+7). Hit at the very end of the previous line
+                // (cycle 73-75, the Activision trick) HBLANK isn't stretched: no black bar,
+                // and objects move 8 further left.
+                let late = (LATE_HMOVE..NEXT_LINE_HMOVE).contains(&self.hpos);
+                let extra = if late { 8 } else { 0 };
                 for n in 0..2 {
-                    Self::apply_motion(&mut self.pos_p[n], self.hm_p[n]);
-                    Self::apply_motion(&mut self.pos_m[n], self.hm_m[n]);
+                    Self::apply_motion(&mut self.pos_p[n], self.hm_p[n], extra);
+                    Self::apply_motion(&mut self.pos_m[n], self.hm_m[n], extra);
                 }
-                Self::apply_motion(&mut self.pos_bl, self.hm_bl);
+                Self::apply_motion(&mut self.pos_bl, self.hm_bl, extra);
                 // HMOVE at the start of a line blanks its first 8 pixels (the "HMOVE bar")
                 if self.hpos < HBLANK { self.hmove_blank = true; }
+                if self.hpos >= NEXT_LINE_HMOVE { self.hmove_blank_next = true; }
             }
             0x2B => { self.hm_p = [0; 2]; self.hm_m = [0; 2]; self.hm_bl = 0; }   // HMCLR
             0x2C => self.collisions = [0; 8],                    // CXCLR
@@ -308,12 +381,14 @@ impl Tia {
     }
 
     /// Reads: 0-7 collision latches (bits 7/6), 8-B paddles, C-D fire buttons (0 = pressed).
+    /// Only bits 7-6 are real; the bus fills in the rest from the data bus.
     pub fn read(&self, reg: u8) -> u8 {
         match reg & 0x0F {
             r @ 0..=7 => self.collisions[r as usize],
             0x8..=0xB => if self.vblank & 0x80 != 0 { 0x00 } else { 0x80 },   // paddles: no paddle connected
             0xC => if self.fire[0] { 0x00 } else { 0x80 },
-            _ => if self.fire[1] { 0x00 } else { 0x80 },
+            0xD => if self.fire[1] { 0x00 } else { 0x80 },
+            _ => 0x00,                   // 0x0E/0x0F: nothing drives the bus (see a2600_bus.rs)
         }
     }
 
@@ -324,12 +399,25 @@ impl Tia {
         let from = (self.line as usize).min(FB_LINES) * SCREEN_W * 4;
         for px in self.framebuffer[from..].chunks_mut(4) { px.copy_from_slice(&[0, 0, 0, 0xFF]); }
         self.last_frame_lines = self.line;
+        self.last_vis = self.vis.take();
         self.line = 0;
         self.frame_done = true;
     }
 
     /// One color clock.
     pub fn clock(&mut self) {
+        if !self.delayed.is_empty() {
+            let mut i = 0;
+            while i < self.delayed.len() {
+                self.delayed[i].2 -= 1;
+                if self.delayed[i].2 == 0 {
+                    let (reg, v, _) = self.delayed.remove(i);
+                    self.write_now(reg, v);
+                } else {
+                    i += 1;
+                }
+            }
+        }
         if self.hpos >= HBLANK {
             self.render_pixel((self.hpos - HBLANK) as usize);
         }
@@ -341,7 +429,10 @@ impl Tia {
             self.hpos = 0;
             self.line += 1;
             self.wsync = false;
-            self.hmove_blank = false;
+            self.hmove_blank = self.hmove_blank_next;
+            self.hmove_blank_next = false;
+            self.reset_this_line_p = [false; 2];
+            self.reset_this_line_m = [false; 2];
             if self.line >= MAX_LINES { self.end_frame(); }
         }
     }
@@ -363,6 +454,7 @@ impl Tia {
         if grp == 0 { return false; }
         let (offsets, scale) = copies(self.nusiz[n]);
         for &o in offsets {
+            if o == 0 && self.reset_this_line_p[n] { continue; }    // main copy: from next line
             let d = (x + 2 * SCREEN_W as u16 - self.pos_p[n] - o) % SCREEN_W as u16;
             if d < 8 * scale {
                 let bit = d / scale;
@@ -377,7 +469,9 @@ impl Tia {
         if !self.enam[n] || self.resmp[n] { return false; }
         let size = 1 << ((self.nusiz[n] >> 4) & 3);
         let (offsets, _) = copies(self.nusiz[n]);
-        offsets.iter().any(|&o| (x + 2 * W - self.pos_m[n] - o) % W < size)
+        offsets.iter()
+            .filter(|&&o| !(o == 0 && self.reset_this_line_m[n]))   // main copy: from next line
+            .any(|&o| (x + 2 * W - self.pos_m[n] - o) % W < size)
     }
 
     fn ball_bit(&self, x: u16) -> bool {
@@ -389,7 +483,8 @@ impl Tia {
 
     fn render_pixel(&mut self, x: usize) {
         let xx = x as u16;
-        let pf = self.playfield_bit(x);
+        if x % 4 == 0 { self.pf_latch = self.playfield_bit(x); }
+        let pf = self.pf_latch;
         let bl = self.ball_bit(xx);
         let p0 = self.player_bit(0, xx);
         let p1 = self.player_bit(1, xx);
@@ -409,6 +504,10 @@ impl Tia {
         hit(7, 0x80, p0, p1); hit(7, 0x40, m0, m1);
 
         if (self.line as usize) >= FB_LINES { return; }
+        if self.vblank & 0x02 == 0 {
+            let l = self.line;
+            self.vis = Some(self.vis.map_or((l, l), |(a, b)| (a.min(l), b.max(l))));
+        }
         let color = if self.vblank & 0x02 != 0 || (self.hmove_blank && x < 8) {
             None
         } else {
@@ -429,6 +528,16 @@ impl Tia {
         self.framebuffer[o..o + 4].copy_from_slice(&[r, g, b, 0xFF]);
     }
 
+    /// Atari 7800: there the TIA only makes sound (MARIA does the picture). Advance its audio
+    /// by `tia_clocks` color clocks (3.58 MHz) without drawing anything.
+    pub fn run_audio(&mut self, tia_clocks: u32) {
+        self.audio_clocks += tia_clocks;
+        while self.audio_clocks >= CLOCKS_PER_LINE as u32 / 2 {
+            self.audio_clocks -= CLOCKS_PER_LINE as u32 / 2;
+            self.clock_audio();
+        }
+    }
+
     fn clock_audio(&mut self) {
         self.audio[0].clock();
         self.audio[1].clock();
@@ -447,6 +556,14 @@ impl Tia {
             self.audio_out.push(s);
             self.audio_out.push(s);
         }
+    }
+
+    /// Tests that move the beam by hand (hpos = 0) skip the real line end; this does its part.
+    #[cfg(test)]
+    pub(crate) fn new_line_for_test(&mut self) {
+        self.hpos = 0;
+        self.reset_this_line_p = [false; 2];
+        self.reset_this_line_m = [false; 2];
     }
 
     #[cfg(test)]

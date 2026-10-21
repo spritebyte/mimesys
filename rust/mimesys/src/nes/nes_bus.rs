@@ -1,5 +1,6 @@
 use crate::common::cpu::m6502::{M6502Cpu,AddressBus};
 //use crate::nes::mappers::Mapper;
+use crate::common::cheats::{Cheats, CheatSystem};
 use crate::nes::cartridge::Cartridge;
 use crate::nes::nes_ppu::NesPPU;
 use crate::nes::nes_apu::NesAPU;
@@ -11,6 +12,7 @@ use std::sync::atomic::AtomicBool;
 pub struct NesBus {
     pub ram: [u8; 2048],
     pub cartridge: Cartridge,
+    pub cheats: Cheats,
     pub ppu: UnsafeCell<NesPPU>,
     pub apu: UnsafeCell<NesAPU>,
     // Input processing fields
@@ -47,6 +49,7 @@ impl NesBus {
             ram: [0; 2048],                         // Zero out the 2KB of CPU RAM on startup
             ppu: UnsafeCell::new(NesPPU::new(system_frame_ready)),   // Initialize a fresh PPU 
             apu: UnsafeCell::new(NesAPU::new()),
+            cheats: Cheats::new(CheatSystem::Nes),
             cartridge,                              // Inject the cartridge we loaded
             pad1_state: 0,
             pad1_shift_reg: Cell::new(0),
@@ -175,7 +178,10 @@ impl NesBus {
                 let shift_reg = self.pad2_shift_reg.get();
                 (shift_reg & 0x01) | (self.open_bus.get() & 0xE0)
            }
-            0x4020..=0xFFFF => self.cartridge.mapper().cpu_read(addr),
+            0x4020..=0xFFFF => {
+                let v = self.cartridge.mapper().cpu_read(addr);
+                self.cheats.patch_read(addr, v)
+            },
             _ => {
                 let val = self.open_bus.get();
                 val
@@ -195,6 +201,17 @@ impl NesBus {
             if self.dot_in_cycle == INT_SAMPLE_DOT {
                 self.nmi_line_snapshot = self.ppu.get_mut().is_nmi_line_asserted();
                 self.irq_line_snapshot = self.cartridge.mapper().is_irq_asserted() || self.apu.get_mut().is_irq_asserted();
+            }
+        }
+    }
+    
+    pub fn apply_cheat_writes(&mut self) {
+        for i in 0..self.cheats.ram_writes().len() {
+            let w = self.cheats.ram_writes()[i];
+            match w.addr {
+                0x0000..=0x1FFF => self.ram[(w.addr & 0x07FF) as usize] = w.value,
+                0x6000..=0x7FFF => self.cartridge.mapper_mut().cpu_write(w.addr, w.value),
+                _ => {}
             }
         }
     }

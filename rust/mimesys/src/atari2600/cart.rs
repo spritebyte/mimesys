@@ -9,21 +9,28 @@
 //   E0  8K    Parker Bros: four 1K slices, 0x1FE0-0x1FF7 select what's in slices 0-2, slice 3 fixed
 //   3F        Tigervision: writing to 0x00-0x3F (TIA space) selects the 2K bank at 0x1000,
 //             0x1800-0x1FFF is fixed to the last 2K
+//   E7  16K   M-Network (Masters of the Universe, BurgerTime...): 2K slices and 2K of RAM
+//             0x1000-0x17FF  slice 0-6 (hotspots 0x1FE0-0x1FE6), or with 0x1FE7: 1K RAM
+//                            (write at 0x1000-0x13FF, read at 0x1400-0x17FF)
+//             0x1800-0x19FF  256 bytes of RAM, one of 4 banks (hotspots 0x1FE8-0x1FEB)
+//                            (write at 0x1800-0x18FF, read at 0x1900-0x19FF)
+//             0x1A00-0x1FFF  fixed: the rest of the last slice
+//             (12K E7 boards work the same with 6 slices)
 //
 // Detection follows Stella's heuristics. Not supported yet: FE (Activision 8K, e.g. Decathlon),
-// E7 (M-Network 16K), FA, F0, CV, UA, AR (Supercharger).
+// FA, F0, CV, UA, AR (Supercharger).
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Scheme { Plain, F8, F6, F4, E0, Tigervision3F }
+pub enum Scheme { Plain, F8, F6, F4, E0, Tigervision3F, E7 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Cart {
     pub scheme: Scheme,
     pub superchip: bool,
-    pub bank: usize,
-    pub slices: [usize; 4],          // E0
+    pub bank: usize,                 // F8/F6/F4/3F: ROM bank. E7: which 256-byte RAM bank
+    pub slices: [usize; 4],          // E0. E7: slices[0] = what's at 0x1000 (7 = the 1K RAM)
     #[serde(with = "serde_bytes")]
     pub sc_ram: Vec<u8>,
     #[serde(skip)]
@@ -38,7 +45,11 @@ impl Cart {
             Scheme::F8 => banks - 1,            // F8 boards power up in their last bank
             _ => 0,
         };
-        Ok(Self { scheme, superchip, bank, slices: [4, 5, 6, 7], sc_ram: vec![0; 128], rom })
+        let (slices, ram) = match scheme {
+            Scheme::E7 => ([0, 0, 0, 0], 2048),       // 1K + 4 x 256 bytes
+            _ => ([4, 5, 6, 7], 128),
+        };
+        Ok(Self { scheme, superchip, bank, slices, sc_ram: vec![0; ram], rom })
     }
 
     pub fn load_state(&mut self, s: Cart) {
@@ -59,6 +70,8 @@ impl Cart {
                 let slot = ((a - 0xFE0) / 8) as usize;
                 self.slices[slot] = (a & 7) as usize;
             }
+            Scheme::E7 if (0xFE0..=0xFE7).contains(&a) => self.slices[0] = (a - 0xFE0) as usize,
+            Scheme::E7 if (0xFE8..=0xFEB).contains(&a) => self.bank = (a - 0xFE8) as usize,
             _ => {}
         }
     }
@@ -66,6 +79,9 @@ impl Cart {
     /// `a` = address within the cartridge (0x000-0xFFF).
     pub fn read(&mut self, a: u16) -> u8 {
         self.touch(a);
+        if self.scheme == Scheme::E7 {
+            return self.e7_read(a);
+        }
         if self.superchip && a < 0x100 {
             // 0x000-0x07F is the write port: reading it returns junk (and real carts corrupt RAM)
             return if a >= 0x80 { self.sc_ram[(a - 0x80) as usize] } else { 0xFF };
@@ -75,6 +91,7 @@ impl Cart {
             Scheme::Plain => a as usize % len,
             Scheme::F8 | Scheme::F6 | Scheme::F4 => self.bank * 4096 + a as usize,
             Scheme::E0 => self.slices[(a >> 10) as usize] * 1024 + (a & 0x3FF) as usize,
+            Scheme::E7 => unreachable!(),
             Scheme::Tigervision3F => {
                 if a < 0x800 { self.bank * 2048 + a as usize } else { len - 2048 + (a - 0x800) as usize }
             }
@@ -84,8 +101,30 @@ impl Cart {
 
     pub fn write(&mut self, a: u16, v: u8) {
         self.touch(a);
+        if self.scheme == Scheme::E7 {
+            match a {
+                0x000..=0x3FF if self.slices[0] == 7 => self.sc_ram[a as usize] = v,
+                0x800..=0x8FF => self.sc_ram[1024 + self.bank * 256 + (a - 0x800) as usize] = v,
+                _ => {}
+            }
+            return;
+        }
         if self.superchip && a < 0x80 {
             self.sc_ram[a as usize] = v;
+        }
+    }
+
+    fn e7_read(&self, a: u16) -> u8 {
+        let slices = self.rom.len() / 2048;
+        let last = (slices - 1) * 2048;
+        match a {
+            // RAM write ports: reading them returns junk on real carts
+            0x000..=0x3FF if self.slices[0] == 7 => 0xFF,
+            0x400..=0x7FF if self.slices[0] == 7 => self.sc_ram[(a - 0x400) as usize],
+            0x000..=0x7FF => self.rom[(self.slices[0] % slices) * 2048 + a as usize],
+            0x800..=0x8FF => 0xFF,
+            0x900..=0x9FF => self.sc_ram[1024 + self.bank * 256 + (a - 0x900) as usize],
+            _ => self.rom[last + (a - 0x800) as usize],
         }
     }
 
@@ -115,6 +154,15 @@ fn is_e0(rom: &[u8]) -> bool {
     SIGS.iter().any(|s| contains(rom, s) > 0)
 }
 
+/// M-Network: code touching the E7 hotspots (Stella's signatures).
+fn is_e7(rom: &[u8]) -> bool {
+    const SIGS: [[u8; 3]; 7] = [
+        [0xAD, 0xE2, 0xFF], [0xAD, 0xE5, 0xFF], [0xAD, 0xE5, 0x1F], [0xAD, 0xE7, 0x1F],
+        [0x0C, 0xE7, 0x1F], [0x8D, 0xE7, 0xFF], [0x8D, 0xE7, 0x1F],
+    ];
+    SIGS.iter().any(|s| contains(rom, s) > 0)
+}
+
 fn is_3f(rom: &[u8]) -> bool { contains(rom, &[0x85, 0x3F]) >= 2 }   // STA $3F, twice or more
 
 fn detect(rom: &[u8]) -> Result<(Scheme, bool), String> {
@@ -127,8 +175,10 @@ fn detect(rom: &[u8]) -> Result<(Scheme, bool), String> {
             else if is_3f(rom) { (Scheme::Tigervision3F, false) }
             else { (Scheme::F8, false) }
         }
+        0x3000 if is_e7(rom) => (Scheme::E7, false),
         0x4000 => {
             if is_superchip(rom) { (Scheme::F6, true) }
+            else if is_e7(rom) { (Scheme::E7, false) }
             else if is_3f(rom) { (Scheme::Tigervision3F, false) }
             else { (Scheme::F6, false) }
         }

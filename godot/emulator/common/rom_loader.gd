@@ -1,132 +1,92 @@
 class_name RomLoader
 
 const ARCADE_DB_PATH := "user://arcade_games.json"
+const SKIP_EXT := ["txt", "md", "nfo", "htm", "html", "jpg", "png", "pdf"]
 
-# Loads a ROM from a file path.
-# - Non-zip files: detected directly by extension.
-# - Single-file zips: the contained file is extracted and detected by its extension.
-# - Multi-file zips: treated as an arcade ROM set; matched by the zip's base name.
-# - file_inside_zip: optionally force-load a specific file from a zip (e.g. from a picker dialog).
-static func load_rom(path: String, file_inside_zip: String = "") -> Variant:
-	var data: PackedByteArray
-	var actual_ext: String
-	var base_name: String
-	var ext: String = path.get_extension().to_lower()
+# Loading a game is three steps (main.gd's execute_load does them in order):
+#   1. read_rom(path, inner)       the bytes (from a file, or a zip), or "this is an arcade set"
+#   2. guess_system(data, path)    which system: the Rust detector looks at the data first
+#                                  (headers, code fingerprints), the extension/folder last
+#   3. create_system(id, ...)      the EmuSystem for that system, with its BIOS if it has one
+# When the guess isn't clear, main.gd asks the user (SystemPickDialog) between 2 and 3.
 
-	if ext == "zip":
-		print("load_rom: zip file loaded")
-		# Caller explicitly selected a file from inside the zip.
-		if file_inside_zip != "":
-			print("Load file from zip: %s" % file_inside_zip)
-			var zip := ZIPReader.new()
-			zip.open(path)
-			data = zip.read_file(file_inside_zip)
+
+## Returns one of
+##   {"kind": "cart", "data": PackedByteArray, "name": save-file name, "file": file name}
+##   {"kind": "arcade"}            multi-file zip: load it with load_arcade(path)
+##   {}                            couldn't read it
+## file_inside_zip: a specific file from a zip (from the library or the zip picker).
+static func read_rom(path: String, file_inside_zip: String = "") -> Dictionary:
+	if path.get_extension().to_lower() != "zip":
+		var data := FileAccess.get_file_as_bytes(path)
+		if data.is_empty():
+			return {}
+		return _cart(data, path.get_file())
+
+	var zip := ZIPReader.new()
+	if zip.open(path) != OK:
+		print("Error: can't open zip %s" % path.get_file())
+		return {}
+	var inner := file_inside_zip
+	if inner == "":
+		var roms: Array = []
+		for f in zip.get_files():
+			if f.ends_with("/") or f.begins_with("__MACOSX") or f.get_extension().to_lower() in SKIP_EXT:
+				continue
+			roms.append(f)
+		if roms.size() > 1:
 			zip.close()
-			actual_ext = file_inside_zip.get_extension().to_lower()
-			base_name = file_inside_zip.get_basename().to_lower()
-		else:
-			# Inspect the zip contents to decide how to handle it.
-			var zip := ZIPReader.new()
-			zip.open(path)
-			var all_files: PackedStringArray = zip.get_files()
+			return {"kind": "arcade"}       # several ROMs = an arcade set, matched by the zip's name
+		if roms.is_empty():
 			zip.close()
-			# FILTER: Filter out text files, system metadata, or directories
-			var valid_rom_files: Array = []
-			for f in all_files:
-				var f_ext = f.get_extension().to_lower()
-				# Ignore standard text files, mac OS metadata, or directory entries
-				if f_ext in ["txt", "md", "nfo", "htm", "html"] or f.begins_with("__MACOSX") or f.ends_with("/"):
-					continue
-				valid_rom_files.append(f)
-			if valid_rom_files.size() > 1:
-				# Multi-file zip = arcade ROM set. Match by zip name.
-				print("More than 1 file in zip")
-				
-				return load_arcade(path)
-#				return check_and_load_arcade(path)
+			print("Error: zip file is empty: %s" % path.get_file())
+			return {}
+		inner = roms[0]
+	var data := zip.read_file(inner)
+	zip.close()
+	print("Load file from zip: %s" % inner)
+	return _cart(data, inner.get_file()) if not data.is_empty() else {}
 
-			elif valid_rom_files.size() == 1:
-				# Single-file zip = console ROM. Extract and detect by extension.
-				print("Just one zip file, load immediately")
-				var the_file: String = valid_rom_files[0]
-				print("Load file from zip: %s" % the_file)
-				var zip2 := ZIPReader.new()
-				zip2.open(path)
-				data = zip2.read_file(the_file)
-				zip2.close()
-				actual_ext = the_file.get_extension().to_lower()
-				base_name = the_file.get_file().get_basename().to_lower()
 
-			else:
-				print("Error: zip file is empty: %s" % path.get_file())
-				return null
-	else:
-		data = FileAccess.get_file_as_bytes(path)
-		actual_ext = ext
-		base_name = path.get_file().get_basename().to_lower()
+static func _cart(data: PackedByteArray, file: String) -> Dictionary:
+	return {"kind": "cart", "data": data, "file": file,
+		"name": file.get_basename().to_lower().validate_filename()}
 
-	# Extension-based console detection.
-	print("Checking extension for %s" % base_name)
 
-	match actual_ext:
-		"nes":
-			var nes_system = EmuSystem.new()
-			var bios: PackedByteArray = PackedByteArray()
-			nes_system.load_cartridge("nes", data, base_name.validate_filename(), bios)
-			return nes_system
+## The Rust detector's guesses, best first: {"clear": bool, "guesses": [{"system", "score", "why"}]}.
+## `path` is the full path (folder names are a hint) with the file name at the end.
+static func guess_system(data: PackedByteArray, path: String) -> Dictionary:
+	var lines: PackedStringArray = EmuSystem.detect_rom(data, path)
+	var guesses: Array = []
+	for i in range(1, lines.size()):
+		var parts := lines[i].split("|", true, 2)
+		guesses.append({"system": parts[0], "score": int(parts[1]), "why": parts[2]})
+	return {"clear": lines.size() > 0 and lines[0] == "clear", "guesses": guesses}
 
-		"a26":
-			var atari = EmuSystem.new()
-			atari.load_cartridge("a26", data, base_name.validate_filename(), PackedByteArray())
-			return atari
-		# "A52" = Atari 5200
-		# "BIN" = Atari 7800?
 
-		"col", "cv", "rom":
-			var bios_path = AppSettings.bios_path("coleco", "user://BIOS/colecovision.rom")
-			var bios: PackedByteArray = load_bios(bios_path)
-			print("Loaded BIOS '%s': %d bytes" % [bios_path, bios.size()])
+## Build the system. `system_id`: nes gb gbc sms gg coleco pce a2600 a7800
+static func create_system(system_id: String, data: PackedByteArray, name: String) -> Variant:
+	var bios := PackedByteArray()
+	match system_id:
+		"coleco":
+			bios = load_bios(AppSettings.bios_path("coleco", "user://BIOS/colecovision.rom"))
 			if bios.is_empty():
-				print("Warning: Boot ROM is empty! Emulation will fall back or skip boot ROM.")
-			var coleco_system = EmuSystem.new()
-			coleco_system.load_cartridge("coleco", data, base_name.validate_filename(), bios)
-			return coleco_system
-
+				print("Warning: no ColecoVision BIOS; most games won't start.")
 		"gb", "gbc":
-			# TODO: let user select if BIOS should be skipped
-			#       and if specific system should be forced.
-			var bios_path = AppSettings.bios_path("gb", "user://BIOS/gbc_bios.bin")
-			var bios: PackedByteArray = load_bios(bios_path)
-			print("Loaded BIOS '%s': %d bytes" % [bios_path, bios.size()])
-			if bios.is_empty():
-				print("Warning: Boot ROM is empty! Emulation will fall back or skip boot ROM.")
-#			var gb_system = GbSystemNode.create_from_bytes(data, base_name.validate_filename(), bios)
-			var gb_system = EmuSystem.new()
-			if actual_ext == "gb":
-				gb_system.load_cartridge("gb", data, base_name.validate_filename(), bios)
-			else:
-				gb_system.load_cartridge("gbc", data, base_name.validate_filename(), bios)				
-			return gb_system
-
-		"sms", "gg":
-			var sega_system = EmuSystem.new()
-			sega_system.load_cartridge(actual_ext, data, base_name.validate_filename(), PackedByteArray())
-			return sega_system
-
-		"pce":
-			var pce = EmuSystem.new()
-			pce.load_cartridge("pce", data, base_name.validate_filename(), PackedByteArray())
-			return pce
+			bios = load_bios(AppSettings.bios_path("gb", "user://BIOS/gbc_bios.bin"))
+	var sys := EmuSystem.new()
+	if not sys.load_cartridge(system_id, data, name, bios):
+		return null
+	return sys
 
 
+## The controls/options profile for a system id (Game Boy Color shares the Game Boy's).
+static func profile_id(system_id: String) -> String:
+	return "gb" if system_id == "gbc" else system_id
 
-
-		_:
-			print("Error: Unrecognized file extension '.%s' for %s" % [actual_ext, base_name])
-			return null
 
 static func load_bios(p_path: String) -> PackedByteArray:
-	if not FileAccess.file_exists(p_path):
+	if p_path == "" or not FileAccess.file_exists(p_path):
 		print("Warning: BIOS not found at '%s'" % p_path)
 		return PackedByteArray()
 	var file := FileAccess.open(p_path, FileAccess.READ)
@@ -309,30 +269,7 @@ static func _copy_into(dst: PackedByteArray, offset: int, src: PackedByteArray, 
 
 
 static func _load_arcade_db() -> Dictionary:
+	if not FileAccess.file_exists(ARCADE_DB_PATH):
+		return {}
 	var parsed = JSON.parse_string(FileAccess.get_file_as_string(ARCADE_DB_PATH))
 	return parsed if parsed is Dictionary else {}
-
-static func detect_systems(path: String, data: PackedByteArray, ext: String) -> Array[String]:
-	# 1. Header sniff: a confident answer wins outright
-	if data.size() >= 4 and data.slice(0, 4) == PackedByteArray([0x4E, 0x45, 0x53, 0x1A]):
-		return ["nes"]
-	if data.size() > 0x150 and _has_gb_logo(data):
-		return ["gbc"] if data[0x143] & 0x80 else ["gb"]
-	if data.size() >= 2 and ((data[0] == 0xAA and data[1] == 0x55) or (data[0] == 0x55 and data[1] == 0xAA)):
-		return ["coleco"]
-
-	# 2. Extension: may return several
-	var by_ext := {"nes": ["nes"], "gb": ["gb"], "gbc": ["gbc"], "col": ["coleco"],
-				   "rom": ["coleco", "msx"], "bin": ["a2600", "a7800", "genesis"]}
-	var candidates: Array[String] = []
-	candidates.assign(by_ext.get(ext, []))
-
-	# 3. Folder hint: narrows the list when it matches a candidate
-	for part in path.get_base_dir().to_lower().split("/"):
-		if part in candidates:
-			return [part]
-	return candidates   # 0 = unknown, 1 = load it, 2+ = prompt the user
-
-# TODO: need to complete function
-static func _has_gb_logo(data: PackedByteArray) -> bool:
-	return false

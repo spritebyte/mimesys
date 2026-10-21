@@ -11,6 +11,11 @@
 //   START   console RESET switch
 //   SELECT  console SELECT switch
 // The difficulty switches stay on B (novice) and TV type on color.
+//
+// Phosphor mode: some games draw half their objects each frame (Asteroids) and rely on the
+// TV's afterglow. With phosphor on, each displayed frame is the average of the last two
+// (Stella does the same for those games). It's switched on for file names containing
+// "asteroids"; call set_phosphor() to control it yourself.
 
 use serde::{Deserialize, Serialize};
 use crate::common::cpu::m6502::{M6502Cpu, CpuVariant, CpuState};
@@ -25,15 +30,28 @@ const SAMPLE_RATE: u32 = 44_100;
 const STATE_VERSION: u32 = 1;
 /// Safety net: a frame never runs longer than this many CPU cycles (~1.5 normal frames).
 const MAX_CYCLES_PER_FRAME: u32 = 30_000;
-/// First line shown, counted from the start of VSYNC, and how many lines.
-/// Most games: 3 lines VSYNC + 37 VBLANK, then 192 picture lines.
-const VISIBLE_Y: i32 = 31;
-const VISIBLE_H: i32 = 210;
+/// Lines in the picture we show. Games choose where their picture starts and how tall it is
+/// (most: 192 lines after 3 VSYNC + 37 VBLANK, some go much further down), so the window
+/// follows the lines where the game turns VBLANK off, centered, like Stella's auto mode.
+pub const OUT_H: usize = 228;
+/// Before a game has shown anything: lines 31..259 (the old fixed window, extended).
+const DEFAULT_TOP: usize = 31;
+/// The window moves only after the game's picture has been somewhere else for this many
+/// frames in a row, so a single odd frame (loading, a flash) doesn't make it jump.
+const SETTLE_FRAMES: u32 = 20;
 
 pub struct A2600System {
     cpu: M6502Cpu,
     pub bus: A2600Bus,
     current_frame: u64,
+    phosphor: bool,
+    prev_frame_lines: u16,
+    top: usize,             // first framebuffer line shown
+    want_top: usize,        // where the game's picture currently suggests
+    want_frames: u32,       // for how many frames in a row
+    out: Vec<u8>,           // the SCREEN_W x OUT_H picture handed to the frontend
+    display: Vec<u8>,       // what framebuffer() returns when phosphor is on
+    prev_raw: Vec<u8>,
     save_filename: String,
     save_battery_path: String,
     save_state_path: String,
@@ -60,12 +78,76 @@ impl A2600System {
             cpu: M6502Cpu::new(CpuVariant::NMOS6502),   // the 6507 has working decimal mode
             bus: A2600Bus::new(cart, SAMPLE_RATE),
             current_frame: 0,
+            prev_frame_lines: 0,
+            top: DEFAULT_TOP,
+            want_top: DEFAULT_TOP,
+            want_frames: 0,
+            out: vec![0; SCREEN_W * OUT_H * 4],
+            phosphor: filename.to_lowercase().contains("asteroids"),
+            display: vec![0; SCREEN_W * FB_LINES * 4],
+            prev_raw: vec![0; SCREEN_W * FB_LINES * 4],
             save_filename: filename.to_string(),
             save_battery_path: "user://GD_EMU/A2600/Save".to_string(),
             save_state_path: "user://GD_EMU/A2600/State".to_string(),
         };
         sys.cpu.power_on(&mut sys.bus);
         Ok(sys)
+    }
+
+    /// Debug: record every TIA write during the next frame, then print the ones on lines
+    /// `first..=last` (line numbers count from the start of VSYNC).
+    pub fn dump_tia_writes(&mut self, first: u16, last: u16) {
+        const NAMES: [&str; 0x2D] = ["VSYNC","VBLANK","WSYNC","RSYNC","NUSIZ0","NUSIZ1","COLUP0","COLUP1",
+            "COLUPF","COLUBK","CTRLPF","REFP0","REFP1","PF0","PF1","PF2","RESP0","RESP1","RESM0","RESM1",
+            "RESBL","AUDC0","AUDC1","AUDF0","AUDF1","AUDV0","AUDV1","GRP0","GRP1","ENAM0","ENAM1","ENABL",
+            "HMP0","HMP1","HMM0","HMM1","HMBL","VDELP0","VDELP1","VDELBL","RESMP0","RESMP1","HMOVE","HMCLR","CXCLR"];
+        self.bus.tia.write_log = Some(Vec::new());
+        self.run_frame(0x0F << pad::KEYPAD_SHIFT);
+        for (line, clock, reg, v) in self.bus.tia.write_log.take().unwrap_or_default() {
+            if (first..=last).contains(&line) {
+                let name = NAMES.get(reg as usize).copied().unwrap_or("?");
+                println!("line {line:3} cycle {:2} (clock {clock:3}) {name:7} = {v:02X}", clock / 3);
+            }
+        }
+    }
+
+    /// Blend each frame with the previous one (for games that flicker on purpose).
+    pub fn set_phosphor(&mut self, on: bool) { self.phosphor = on; }
+
+    /// Where the window should start for a picture spanning lines first..=last.
+    pub(crate) fn top_for(first: u16, last: u16) -> usize {
+        let (first, h) = (first as i64, last as i64 - first as i64 + 1);
+        let top = first - (OUT_H as i64 - h) / 2;             // center (h > OUT_H: center the overflow)
+        top.clamp(0, (FB_LINES - OUT_H) as i64) as usize
+    }
+
+    /// Follow the game's picture (see OUT_H), then copy the window into `out`.
+    fn update_window(&mut self) {
+        if let Some((first, last)) = self.bus.tia.last_vis {
+            let want = Self::top_for(first, last);
+            if want == self.want_top {
+                self.want_frames += 1;
+            } else {
+                self.want_top = want;
+                self.want_frames = 1;
+            }
+            // first picture after power-on: adopt it quickly
+            let needed = if self.current_frame < 120 { 3 } else { SETTLE_FRAMES };
+            if self.want_frames >= needed {
+                self.top = self.want_top;
+            }
+        }
+        let src = if self.phosphor { &self.display } else { &self.bus.tia.framebuffer };
+        let row = SCREEN_W * 4;
+        self.out.copy_from_slice(&src[self.top * row..(self.top + OUT_H) * row]);
+    }
+
+    fn blend_frames(&mut self) {
+        let raw = &self.bus.tia.framebuffer;
+        for ((d, &r), p) in self.display.iter_mut().zip(raw.iter()).zip(self.prev_raw.iter_mut()) {
+            *d = ((r as u16 + *p as u16) / 2) as u8;
+            *p = r;
+        }
     }
 }
 
@@ -76,12 +158,25 @@ impl System for A2600System {
         for _ in 0..MAX_CYCLES_PER_FRAME {
             // The TIA runs this cycle's 3 color clocks first: a CPU write lands at the end of
             // its cycle (same ordering as Stella), which is what RESPx positioning depends on.
+            // WSYNC is checked *before* the clocks: when the line ends during these 3 clocks
+            // they still belong to the old line, so the CPU resumes on the next cycle,
+            // which is cycle 0 of the new line.
+            let halted = self.bus.tia.wsync;
             self.bus.tick();
-            if !self.bus.tia.wsync {
+            if !halted {
                 self.cpu.step_one_cycle(&mut self.bus);
             }
             if self.bus.tia.frame_done { break; }
         }
+        if self.phosphor { self.blend_frames(); }
+        self.update_window();
+        // A steady game always has the same number of lines per frame (usually 262).
+        // If this changes while playing, the picture jumps: print it to help find why.
+        let lines = self.bus.tia.last_frame_lines;
+        if lines != self.prev_frame_lines && self.current_frame > 2 {
+            println!("2600 frame {}: {} scan lines (was {})", self.current_frame, lines, self.prev_frame_lines);
+        }
+        self.prev_frame_lines = lines;
         self.current_frame += 1;
     }
 
@@ -113,7 +208,7 @@ impl System for A2600System {
     fn get_current_frame(&self) -> i64 { self.current_frame as i64 }
     fn get_sram(&self) -> Option<&[u8]> { None }
     fn load_sram(&mut self, _data: &[u8]) {}
-    fn framebuffer(&self) -> &[u8] { &self.bus.tia.framebuffer }
+    fn framebuffer(&self) -> &[u8] { &self.out }
 
     fn reset(&mut self) {
         self.cpu = M6502Cpu::new(CpuVariant::NMOS6502);
@@ -123,11 +218,11 @@ impl System for A2600System {
     fn display_info(&self) -> DisplayInfo {
         DisplayInfo {
             buffer_width: SCREEN_W as i32,
-            buffer_height: FB_LINES as i32,
+            buffer_height: OUT_H as i32,
             visible_x: 0,
-            visible_y: VISIBLE_Y,
+            visible_y: 0,
             visible_width: SCREEN_W as i32,
-            visible_height: VISIBLE_H,
+            visible_height: OUT_H as i32,
             target_aspect_ratio: 4.0 / 3.0,   // 2600 pixels are wide: 160 of them fill a 4:3 screen
             rotation: Rotation::None,
         }

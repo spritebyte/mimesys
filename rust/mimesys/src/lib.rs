@@ -12,5 +12,6 @@ mod common;
 mod coleco;
 mod arcade;
 mod atari2600;
+mod atari7800;
 mod pce;
 

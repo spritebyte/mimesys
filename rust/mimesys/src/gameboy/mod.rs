@@ -1,7 +1,7 @@
 //pub mod gb_dummy;
 //pub mod gb_mock_bus;
 mod gb_cpu;
-mod gb_godot;
+//mod gb_godot;
 pub mod gb_system;
 mod gb_bus;
 mod gb_joypad;
@@ -13,6 +13,10 @@ mod gb_ppu;
 mod gb_timer;
 mod gb_dma;
 mod gb_palette;
+pub mod gb_link;
+pub mod gb_serial;
+pub mod gb_link_system;
+pub mod gb_netlink;
 #[path = "mbc/gb_mbc0.rs"]
 pub mod gb_mbc0;
 #[path = "mbc/gb_mbc1.rs"]

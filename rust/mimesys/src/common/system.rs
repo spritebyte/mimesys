@@ -27,7 +27,6 @@ pub trait System: Send {
     fn load_sram(&mut self, data: &[u8]);
     fn get_sram(&self) -> Option<&[u8]>;
     fn reset(&mut self);
-//    fn set_frame_published(&mut self, is_frame_published: bool);
     fn has_battery(&self) -> bool;
     fn save_battery_path(&self) -> &str;
     fn save_filename(&self) -> &str;
@@ -38,5 +37,10 @@ pub trait System: Send {
     fn clear_sram_dirty(&mut self);
     fn get_current_frame(&self) -> i64;
     fn set_audio_rate_adjust(&mut self, _factor: f32) {}
-//    fn is_frame_ready(&self) -> bool;
+    fn cheats_mut(&mut self) -> Option<&mut crate::common::cheats::Cheats> { None }
+    fn set_option(&mut self, _key: &str, _value: i64) {}
+    fn link_partner(&mut self) -> Option<&mut dyn System> { None }
+    fn attach_cable(&mut self, _cable: Option<Box<dyn crate::gameboy::gb_link::LinkCable>>) -> bool { false }
+    /// The cable's status line for the UI ("" = no cable).
+    fn cable_status(&self) -> String { String::new() }    
 }

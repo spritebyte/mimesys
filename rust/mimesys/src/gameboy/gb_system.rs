@@ -4,6 +4,9 @@ use crate::gameboy::gb_common::GbVariant;
 use crate::gameboy::gb_cartridge::{GbCartridge, CartType};
 use crate::gameboy::gb_palette::*;
 use crate::gameboy::gb_mbc;
+use crate::gameboy::gb_link::LinkUnit;
+use crate::gameboy::gb_serial::Serial;
+use crate::gameboy::gb_link::{LinkCable, service_port};
 use crate::common::system::{System,DisplayInfo,Rotation};
 use crate::common::snapshot::Snapshot;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +27,8 @@ pub struct GbSystem {
     pub cgb_mode: bool,
     pub current_ui_theme: PaletteTheme,
     pub frame_cache: Vec<u8>,
+    pub cable: Option<Box<dyn LinkCable>>,
+    pub last_poll: u64,    
 }
 
 impl GbSystem {
@@ -81,14 +86,14 @@ impl GbSystem {
                 cpu: GameBoyCpu::new(run_boot_rom, variant),
                 save_filename: base_name.to_string(),
                 slice_complete: false, cgb_mode: cgb_mode,
-                // todo: different path for gameboy color? allow user to select path?
+                // todo: should use paths saved in settings
                 save_battery_path: "user://GD_EMU/GB/Save".to_string(),
                 save_state_path: "user://GD_EMU/GB/State".to_string(),
                 is_running: Arc::new(AtomicBool::new(false)),
                 current_frame: 0,
-//                frame_published: frame_ready,
                 current_ui_theme: PaletteTheme::Auto,
                 frame_cache: vec![0; buffer_size],
+                cable: None, last_poll: 0,
             }
         })
     }
@@ -134,6 +139,15 @@ impl GbSystem {
         debug_assert_eq!(self.bus.master - before, self.bus.cycle_len(), 
                          "M-cycle must advance the clock exactly once");
     }
+
+    /// Copy the PPU's last finished frame into frame_cache (the link pair uses this).
+    pub fn refresh_frame_cache(&mut self) {
+        self.frame_cache = {
+            let ppu = self.bus.ppu.get_mut();
+            let front_guard = ppu.front_buffer.lock().unwrap();
+            front_guard.clone()
+        };
+    }  
 }
 
 impl System for GbSystem {
@@ -142,8 +156,12 @@ impl System for GbSystem {
         self.current_frame = self.current_frame.wrapping_add(1);
         self.set_input(input);
         while !unsafe { (*self.bus.ppu.get()).is_slice_complete() } {
+            if !service_port(&mut self.bus.serial, &mut self.cable, self.bus.master, &mut self.last_poll) {
+                return;   // waiting for the other player's byte: picture holds, emulated time doesn't move
+            }
             self.tick();
         }
+        self.bus.apply_cheat_writes();
         self.frame_cache = {
             let ppu = self.bus.ppu.get_mut();
             let front_guard = ppu.front_buffer.lock().unwrap();
@@ -254,13 +272,24 @@ impl System for GbSystem {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        todo!("hook up GB save state")
+        Vec::new()
     }
 
     fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
         let _ = data;
-        todo!("hook up GB load state")
+        Err("GB save states not done yet".into())
     }
+
+    fn cheats_mut(&mut self) -> Option<&mut crate::common::cheats::Cheats> { Some(&mut self.bus.cheats) }
+
+    fn attach_cable(&mut self, cable: Option<Box<dyn LinkCable>>) -> bool {
+        self.cable = cable;
+        true
+    }
+
+    fn cable_status(&self) -> String {
+        self.cable.as_ref().map_or(String::new(), |c| c.status())
+    }    
 }
 
 
@@ -270,5 +299,15 @@ impl Snapshot for GbSystem {
 
     fn load(&mut self, cur: &mut Cursor<&[u8]>) {
 
+    }
+}
+
+impl LinkUnit for GbSystem {
+    fn serial(&mut self) -> &mut Serial { &mut self.bus.serial }
+    fn clock(&self) -> u64 { self.bus.master }
+    fn run_until(&mut self, target: u64) {
+        while self.bus.master < target && self.bus.serial.awaiting.is_none() {
+            self.tick();
+        }
     }
 }

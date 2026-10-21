@@ -6,7 +6,8 @@ extends AcceptDialog
 ## The scan result is cached in user://GD_EMU/library.json; "Rescan" refreshes it.
 ##
 ## What counts as a game:
-##   a file with a known console extension (.nes .gb .pce ...)
+##   a file with a known console extension (.nes .gb .pce ...); for extensions several
+##   systems share (.bin, .rom) the ROM detector looks inside (see RomLoader.guess_system)
 ##   a zip of console ROMs: one entry per ROM inside
 ##   any other multi-file zip: an arcade set (named from arcade_games.json when listed)
 
@@ -79,8 +80,7 @@ func _init() -> void:
 	_folders.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	folders.add_child(_folders)
 	var hint := Label.new()
-	hint.text = "Subfolders are scanned too. Arcade parent sets (e.g. pacman.zip for mspacman) can live in the same folder."
-	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.text = "Subfolders are scanned too.\nArcade parent sets (e.g. pacman.zip for mspacman) can live in the same folder."
 	hint.modulate = Color(1, 1, 1, 0.7)
 	folders.add_child(hint)
 	tabs.add_child(folders)
@@ -159,8 +159,10 @@ func _scan_dir(dir: String, arcade_db: Dictionary) -> void:
 		var ext := f.get_extension().to_lower()
 		if ext == "zip":
 			_scan_zip(path, arcade_db)
-		elif AppSettings.SYSTEM_BY_EXT.has(ext):
-			_add(f.get_basename(), AppSettings.SYSTEM_BY_EXT[ext], path, "")
+		elif AppSettings.SYSTEM_BY_EXT.has(ext) or ext in AppSettings.AMBIGUOUS_EXT:
+			var sys := _system_of(path, "", f, func(): return FileAccess.get_file_as_bytes(path))
+			if sys != "":
+				_add(f.get_basename(), sys, path, "")
 
 
 func _scan_zip(path: String, arcade_db: Dictionary) -> void:
@@ -172,20 +174,41 @@ func _scan_zip(path: String, arcade_db: Dictionary) -> void:
 		if f.ends_with("/") or f.begins_with("__MACOSX") or f.get_extension().to_lower() in SKIP_EXT:
 			continue
 		files.append(f)
-	zip.close()
 	if files.is_empty():
+		zip.close()
 		return
-	var all_console := files.all(func(f): return AppSettings.SYSTEM_BY_EXT.has(f.get_extension().to_lower()))
+	var all_console := files.all(func(f):
+		var e: String = f.get_extension().to_lower()
+		return AppSettings.SYSTEM_BY_EXT.has(e) or e in AppSettings.AMBIGUOUS_EXT)
 	if all_console:
 		for f in files:
-			var ext: String = f.get_extension().to_lower()
 			# one file: load the zip directly; several: point at the file inside
-			_add(f.get_file().get_basename(), AppSettings.SYSTEM_BY_EXT[ext], path,
-				"" if files.size() == 1 else f)
+			var inner: String = "" if files.size() == 1 else f
+			var sys := _system_of(path, inner, f, func(): return zip.read_file(f))
+			if sys != "":
+				_add(f.get_file().get_basename(), sys, path, inner)
+		zip.close()
 		return
+	zip.close()
 	var id := path.get_file().get_basename().to_lower()
 	var title: String = arcade_db.get(id, {}).get("title", path.get_file().get_basename())
 	_add(title, "arcade", path, "")
+
+
+## Controls-profile id for a ROM: what the user picked for it before, its extension when
+## only one system uses it, else what the detector finds inside (read lazily: `read` gives
+## the bytes). "" = not a ROM we know.
+func _system_of(path: String, inner: String, file: String, read: Callable) -> String:
+	var picked: String = AppSettings.remembered_system(path, inner)
+	if picked != "":
+		return RomLoader.profile_id(picked)
+	var ext := file.get_extension().to_lower()
+	if AppSettings.SYSTEM_BY_EXT.has(ext):
+		return AppSettings.SYSTEM_BY_EXT[ext]
+	var guess: Dictionary = RomLoader.guess_system(read.call(), path.get_base_dir().path_join(file))
+	if guess["guesses"].is_empty():
+		return ""
+	return RomLoader.profile_id(guess["guesses"][0]["system"])
 
 
 func _add(title: String, system_id: String, path: String, inner: String) -> void:

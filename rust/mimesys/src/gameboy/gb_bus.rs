@@ -9,6 +9,8 @@ use crate::gameboy::gb_cpu::Bus;
 use crate::gameboy::gb_joypad::Joypad;
 use crate::gameboy::gb_dma::DmaState;
 use crate::gameboy::gb_timer::GbTimer;
+use crate::common::cheats::{Cheats, CheatSystem};
+use crate::gameboy::gb_serial::Serial;
 use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -17,6 +19,7 @@ pub struct GameBoyBus {
     pub variant: GbVariant,
     pub ram: Vec<u8>,
     pub hram: [u8;0x80],
+    pub cheats: Cheats,
     pub cartridge: GbCartridge,
     pub ppu: UnsafeCell<GbPPU>,
     pub apu: UnsafeCell<GbAPU>,
@@ -25,8 +28,7 @@ pub struct GameBoyBus {
     pub iflags: u8,
     pub dma: DmaState,
     pub joypad: Joypad,
-    serial_data_buffer: u8,
-    serial_control: u8,
+    pub serial: Serial,
     last_master: u64,
     pub master: u64,                   // total t-cycles
     double_speed: bool,
@@ -57,6 +59,7 @@ impl GameBoyBus {
         let boot_mapped = run_boot_rom && !boot_rom_data.is_empty() && variant == GbVariant::Cgb;
         Self {
             variant,
+            cheats: Cheats::new(CheatSystem::GameBoy),
             joypad: Joypad::new(),
             boot_rom: boot_rom_data.to_vec(),
             boot_rom_mapped: boot_mapped,
@@ -69,8 +72,7 @@ impl GameBoyBus {
             cartridge,
             ie: 0, iflags: 0,
             last_master: 0,
-            serial_data_buffer: 0xFF,
-            serial_control: 0,
+            serial: Serial::new(variant == GbVariant::Cgb),
             master: 0,
             double_speed: false,
             open_bus: 0,
@@ -107,8 +109,8 @@ impl GameBoyBus {
     fn _read_io(&mut self, addr: u16) -> u8 {
         match addr {
             0xFF00 => self.joypad.read_p1(),
-            0xFF01 => self.serial_data_buffer,
-            0xFF02 => self.serial_control | 0x7E,
+            0xFF01 => self.serial.read_sb(),
+            0xFF02 => self.serial.read_sc(),
             0xFF04..=0xFF07 => unsafe { (*self.timer.get()).read(addr) }
             0xFF0F => self.iflags | 0xE0,
             // APU Sound registers ($FF10-$FF3F)
@@ -142,15 +144,8 @@ impl GameBoyBus {
     fn _write_io(&mut self, addr: u16, value: u8) {
         match addr {
             0xFF00 => self.joypad.write_p1(value, &mut self.iflags),
-            0xFF01 => self.serial_data_buffer = value,
-            0xFF02 => {
-                self.serial_control = value;
-                if (value & 0x80) != 0 {
-                    self.serial_control &= !0x80;
-                    self.serial_data_buffer = 0xFF;
-                    self.iflags |= 0x08;
-                }
-            },
+            0xFF01 => self.serial.write_sb(value),
+            0xFF02 => self.serial.write_sc(value, self.double_speed),
             0xFF04..=0xFF07 => unsafe { (*self.timer.get()).write(addr, value) },
             0xFF0F => self.iflags = value & 0x1F,
             // APU range $FF10-$FF3F
@@ -221,7 +216,11 @@ impl GameBoyBus {
         }
 
         match addr {
-            0x0000..=0x7FFF | 0xA000..=0xBFFF => unsafe { (*self.cartridge.mbc.get()).read(addr) },
+            0x0000..=0x7FFF => {
+                let v = unsafe { (*self.cartridge.mbc.get()).read(addr) };
+                self.cheats.patch_read(addr, v)
+            }
+            0xA000..=0xBFFF => unsafe { (*self.cartridge.mbc.get()).read(addr) },
             0x8000..=0x9FFF => unsafe {
                 let bank = if self.variant == GbVariant::Cgb { ((*self.ppu.get()).vbk & 0x01) as usize } else { 0 };
                 let offset = (addr & 0x1FFF) as usize + (bank * 0x2000);
@@ -371,6 +370,27 @@ impl GameBoyBus {
     pub fn write_key1(&mut self, value: u8) {
         self.key1 = (self.key1 & 0x80) | (value & 0x01);
     }
+
+    /// GameShark-style RAM codes: called once per frame.
+    pub fn apply_cheat_writes(&mut self) {
+        for i in 0..self.cheats.ram_writes().len() {
+            let w = self.cheats.ram_writes()[i];
+            match w.addr {
+                0xA000..=0xBFFF => unsafe { (*self.cartridge.mbc.get()).write(w.addr, w.value) },
+                0xC000..=0xCFFF => self.ram[(w.addr & 0x0FFF) as usize] = w.value,
+                0xD000..=0xDFFF => {
+                    let off = match w.bank {
+                        Some(b) if self.variant == GbVariant::Cgb =>
+                            (b.max(1) as usize) * 0x1000 + (w.addr & 0x0FFF) as usize,
+                        _ => self.get_wram_offset(w.addr),
+                    };
+                    self.ram[off] = w.value;
+                }
+                0xFF80..=0xFFFE => self.hram[(w.addr & 0x7F) as usize] = w.value,
+                _ => {}
+            }
+        }
+    }
 }
 
 impl Timed for GameBoyBus {
@@ -397,6 +417,10 @@ impl Timed for GameBoyBus {
             self.dma.next_tick_master += 4;
         }
 
+        self.serial.tick(target_master.saturating_sub(self.last_master));
+        if self.serial.take_irq() {
+            self.iflags |= 0x08;
+        }
         self.last_master = target_master;
         unsafe {
             self.iflags |= (*self.ppu.get()).take_irqs();

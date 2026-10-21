@@ -5,6 +5,10 @@
 //   A12 = 0, A7 = 0             TIA        (writes: A0-A5 = register, reads: A0-A3)
 //   A12 = 0, A7 = 1, A9 = 0     RIOT RAM   (0x80-0xFF, mirrored at 0x180 = the stack)
 //   A12 = 0, A7 = 1, A9 = 1     RIOT ports and timer (0x280-0x29F)
+//
+// TIA reads only drive data bits 7 and 6; bits 5-0 keep whatever was last on the data bus
+// (usually the instruction's own operand byte). Games rely on it: Haunted House divides
+// by 15 with "SBC $0F" (an unused TIA address), which reads back $0F from the operand.
 
 use crate::common::cpu::m6502::AddressBus;
 use crate::atari2600::cart::Cart;
@@ -16,11 +20,13 @@ pub struct A2600Bus {
     pub riot: Riot,
     pub cart: Cart,
     pub cycles: u64,
+    /// Last byte on the data bus (for the bits TIA reads don't drive)
+    data_bus: u8,
 }
 
 impl A2600Bus {
     pub fn new(cart: Cart, out_rate: u32) -> Self {
-        Self { tia: Tia::new(out_rate), riot: Riot::new(), cart, cycles: 0 }
+        Self { tia: Tia::new(out_rate), riot: Riot::new(), cart, cycles: 0, data_bus: 0 }
     }
 
     /// Everything that happens in one CPU cycle besides the CPU itself:
@@ -42,18 +48,21 @@ impl AddressBus for A2600Bus {
 
     fn read_byte(&mut self, addr: u16) -> u8 {
         let a = addr & 0x1FFF;
-        if a & 0x1000 != 0 {
+        let v = if a & 0x1000 != 0 {
             self.cart.read(a & 0x0FFF)
         } else if a & 0x80 == 0 {
-            self.tia.read(a as u8)
+            (self.tia.read(a as u8) & 0xC0) | (self.data_bus & 0x3F)
         } else if a & 0x200 == 0 {
             self.riot.ram[(a & 0x7F) as usize]
         } else {
             self.riot.read(a)
-        }
+        };
+        self.data_bus = v;
+        v
     }
 
     fn write_byte(&mut self, addr: u16, value: u8) {
+        self.data_bus = value;
         let a = addr & 0x1FFF;
         if a & 0x1000 != 0 {
             self.cart.write(a & 0x0FFF, value);

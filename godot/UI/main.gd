@@ -47,13 +47,21 @@ var library_dialog: LibraryDialog              # NEW (pass 2)
 var options_dialog: SystemOptionsDialog        # NEW (pass 2)
 var recent_menu: PopupMenu                     # NEW (pass 2)
 var _display_info: SystemDisplayInfo           # NEW (pass 2): kept so options apply live
+var cheats_dialog: CheatsDialog                # NEW (cheats)
+var link_dialog: LinkLoadDialog                # NEW (link cable)
+var link_mode := false                         # NEW (link cable): two Game Boys running
+var link_focus := 0                            # NEW (link cable): which one gets the controls
+var system_pick: SystemPickDialog              # NEW (ROM detection)
+var net_dialog: NetLinkDialog                  # NEW (network link)
+var _net_status := ""
+var _net_poll_msec := 0
 var _paused_before_dialog := false
 var _toast_panel: PanelContainer
 var _toast_label: Label
 var _toast_tween: Tween
 
-enum FileMenuID { LOAD_ROM, RELOAD_ROM, SAVE_STATE, LOAD_STATE, QUIT, LIBRARY }
-enum EmuMenuID { RESET, PAUSE, RESUME, STEP_CPU }
+enum FileMenuID { LOAD_ROM, RELOAD_ROM, SAVE_STATE, LOAD_STATE, QUIT, LIBRARY, LINK, NETWORK }
+enum EmuMenuID { RESET, PAUSE, RESUME, STEP_CPU, CHEATS }
 enum DebugMenuID { CPU_REGISTERS, AUDIO_REGISTERS, VDP_REGISTERS, MEMORY_VIEWER, DISASSEMBLY }
 enum SettingsMenuID { NES, GB, CONTROLS, OPTIONS }
 enum ViewMenuID { FULLSCREEN }
@@ -73,6 +81,18 @@ func _ready() -> void:
 	options_dialog = SystemOptionsDialog.new()
 	add_child(options_dialog)
 	options_dialog.options_changed.connect(_apply_display_options)
+	cheats_dialog = CheatsDialog.new()
+	add_child(cheats_dialog)
+	link_dialog = LinkLoadDialog.new()
+	add_child(link_dialog)
+	link_dialog.chosen.connect(execute_link_load)
+	system_pick = SystemPickDialog.new()
+	add_child(system_pick)
+	net_dialog = NetLinkDialog.new()
+	add_child(net_dialog)
+	net_dialog.host_requested.connect(_net_host)
+	net_dialog.join_requested.connect(_net_join)
+	net_dialog.disconnect_requested.connect(_net_disconnect)
 	emu_mutex = Mutex.new()
 	cpu_thread = Thread.new()
 	frame_control.main_ui = self
@@ -97,6 +117,8 @@ func init_menus():
 	recent_menu.name = "RecentMenu"
 	file_menu.add_child(recent_menu)
 	file_menu.add_submenu_item("Recent ROMs", "RecentMenu")
+	file_menu.add_item("Link Cable: 2 Game Boys...", FileMenuID.LINK)
+	file_menu.add_item("Network Link (Game Boy)...", FileMenuID.NETWORK)
 	recent_menu.about_to_popup.connect(_refresh_recent_menu)
 	recent_menu.id_pressed.connect(_on_recent_menu)
 #	file_menu.add_item("Reload ROM", FileMenuID.RELOAD_ROM)
@@ -133,6 +155,8 @@ func init_menus():
 	emu_menu.add_item("Resume", EmuMenuID.RESUME)
 	emu_menu.set_item_disabled(emu_menu.get_item_index(EmuMenuID.RESUME), true)
 	emu_menu.add_item("Step CPU", EmuMenuID.STEP_CPU)
+	emu_menu.add_separator()
+	emu_menu.add_item("Cheats...   (Ctrl+H)", EmuMenuID.CHEATS)
 
 	emu_menu.id_pressed.connect(_on_emu_menu)
 
@@ -167,6 +191,15 @@ func _on_file_menu(id):
 
 		FileMenuID.LOAD_ROM:
 			file_dialog.popup_centered()
+
+		FileMenuID.LINK:
+			link_dialog.open()
+
+		FileMenuID.NETWORK:
+			if emu_system == null or current_system_id != "gb" or link_mode:
+				_toast("Load a Game Boy game first")
+			else:
+				net_dialog.open()
 
 #		FileMenuID.RELOAD_ROM:
 #			emu_system.reload_rom()
@@ -203,6 +236,9 @@ func _on_emu_menu(id):
 		EmuMenuID.STEP_CPU:
 			if emu_system: emu_system.cpu.step()
 
+		EmuMenuID.CHEATS:
+			cheats_dialog.open_dialog()
+
 
 func _on_debug_menu(id):
 	pass
@@ -215,6 +251,14 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event.keycode == KEY_L and event.ctrl_pressed:
 		library_dialog.open()
+		get_viewport().set_input_as_handled()
+		return
+	if event.keycode == KEY_H and event.ctrl_pressed:
+		cheats_dialog.open_dialog()
+		get_viewport().set_input_as_handled()
+		return
+	if event.keycode == KEY_TAB and link_mode:
+		_switch_link_focus()
 		get_viewport().set_input_as_handled()
 		return
 	match event.keycode:
@@ -307,27 +351,6 @@ func _on_remap_visibility() -> void:
 	else:
 		is_paused = _paused_before_dialog
 
-## Which controls profile a ROM uses: by extension, or "arcade" for multi-file zips.
-func _detect_system_id(path: String, inner: String) -> String:
-	var ext := path.get_extension().to_lower()
-	if inner != "":
-		ext = inner.get_extension().to_lower()
-	elif ext == "zip":
-		var zip := ZIPReader.new()
-		if zip.open(path) != OK:
-			return "arcade"
-		var roms: Array = []
-		for f in zip.get_files():
-			if f.get_extension().to_lower() in ["txt", "md", "nfo", "htm", "html"] \
-					or f.begins_with("__MACOSX") or f.ends_with("/"):
-				continue
-			roms.append(f)
-		zip.close()
-		if roms.size() != 1:
-			return "arcade"
-		ext = roms[0].get_extension().to_lower()
-	return AppSettings.SYSTEM_BY_EXT.get(ext, "nes")
-
 # ---------------- NEW (pass 2): recent ROMs ----------------
 func _refresh_recent_menu() -> void:
 	recent_menu.clear()
@@ -381,6 +404,50 @@ func _apply_display_options() -> void:
 	EmulatorScreen.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR \
 		if AppSettings.get_option(sys, "smooth") else CanvasItem.TEXTURE_FILTER_NEAREST
 
+# ---------------- NEW (network link) ----------------
+# The networking is all Rust (gb_netlink.rs); these just call it and show what it says.
+func _net_host(port: int) -> void:
+	_net_call("net_host", [port])
+	AppSettings.net_port = port
+	AppSettings.save_settings()
+
+func _net_join(address: String, port: int) -> void:
+	_net_call("net_join", [address, port])
+	AppSettings.net_ip = address
+	AppSettings.net_port = port
+	AppSettings.save_settings()
+
+func _net_disconnect() -> void:
+	_net_call("net_disconnect", [])
+
+func _net_call(method: String, args: Array) -> void:
+	if emu_system == null:
+		return
+	emu_mutex.lock()
+	var err = emu_system.callv(method, args)
+	emu_mutex.unlock()
+	if err is String and err != "":
+		_toast(err)
+	_poll_net_status(true)
+
+## Twice a second while a Game Boy runs: show status changes (connected / disconnected).
+func _poll_net_status(force := false) -> void:
+	var now := Time.get_ticks_msec()
+	if not force and now - _net_poll_msec < 500:
+		return
+	_net_poll_msec = now
+	if emu_system == null or current_system_id != "gb" or link_mode:
+		return
+	emu_mutex.lock()
+	var s: String = emu_system.net_status()
+	emu_mutex.unlock()
+	if s == _net_status:
+		return
+	_net_status = s
+	net_dialog.set_status(s)
+	if s.begins_with("Connected to") or s.begins_with("Not connected"):
+		_toast(s)
+
 # ---------------- NEW: on-screen messages ----------------
 func _init_toast() -> void:
 	var layer := CanvasLayer.new()
@@ -408,6 +475,7 @@ func _exit_tree():
 	stop_emulation()
 
 func _process(_delta):
+	_poll_net_status()   # NEW (network link)
 	var now = Time.get_ticks_msec()
 	_real_frame_count += 1
 	if emu_system and (now - _fps_timer_msec >= 1000):
@@ -508,30 +576,117 @@ func _on_rom_selection_dialog_confirmed() -> void:
 	var zip_path: String = $RomSelectionDialog.get_meta("zip_path")
 	execute_load(zip_path, file_name)
 
+## Load a game: read it, work out its system (asking if the detector isn't sure), start it.
 func execute_load(path: String, internal_zip_file: String = "") -> void:
+	print("Call load_rom: %s" % path)
+	var rom: Dictionary = RomLoader.read_rom(path, internal_zip_file)
+	if rom.is_empty():
+		OS.alert("Could not read %s" % path.get_file())
+		return
+
+	if rom["kind"] == "arcade":
+		_stop_current()
+		var arcade = RomLoader.load_arcade(path)
+		if not arcade:
+			OS.alert("Could not load arcade set: %s" % path.get_file())
+			return
+		var arcade_title := path.get_file().get_basename()
+		AppSettings.add_recent(path, internal_zip_file, arcade_title, "arcade")
+		link_mode = false
+		_start_system(arcade, "arcade", arcade_title)
+		return
+
+	# which system? a remembered answer, else the detector, else ask
+	var system_id: String = AppSettings.remembered_system(path, internal_zip_file)
+	if system_id == "":
+		var where: String = path.get_base_dir().path_join(rom["file"])
+		var guess: Dictionary = RomLoader.guess_system(rom["data"], where)
+		if guess["clear"]:
+			system_id = guess["guesses"][0]["system"]
+			print("Detected %s (%s)" % [system_id, guess["guesses"][0]["why"]])
+		else:
+			system_pick.ask(rom["file"], guess["guesses"])
+			var answer: Array = await system_pick.picked
+			if answer[0] == "":
+				return
+			system_id = answer[0]
+			if answer[1]:
+				AppSettings.remember_system(path, internal_zip_file, system_id)
+
+	_stop_current()
+	var new_system = RomLoader.create_system(system_id, rom["data"], rom["name"])
+	if not new_system:
+		OS.alert("Could not load %s as %s" % [rom["file"], SystemPickDialog.display_name(system_id)])
+		return
+	var title: String = rom["file"].get_basename()
+	var profile: String = RomLoader.profile_id(system_id)
+	AppSettings.add_recent(path, internal_zip_file, title, profile)   # NEW (pass 2)
+	link_mode = false
+	_start_system(new_system, profile, title)
+
+## NEW (link cable): two Game Boys side by side, joined by a link cable. Tab switches controls.
+func execute_link_load(path_a: String, path_b: String) -> void:
+	_stop_current()
+	var a := _read_rom(path_a)
+	var b := _read_rom(path_b)
+	if a.is_empty() or b.is_empty():
+		OS.alert("Couldn't read %s" % (path_a if a.is_empty() else path_b).get_file())
+		return
+	var bios: PackedByteArray = RomLoader.load_bios(AppSettings.bios_path("gb", "user://BIOS/gbc_bios.bin"))
+	var sys = EmuSystem.new()
+	if not sys.load_gb_link(a["data"], a["name"], b["data"], b["name"], bios):
+		OS.alert("Couldn't start the link cable (see the Output panel)")
+		return
+	link_mode = true
+	link_focus = 0
+	_start_system(sys, "gb", "%s + %s" % [a["name"], b["name"]])
+	_toast("Link cable on  —  Tab switches which Game Boy you control")
+
+func _switch_link_focus() -> void:
+	link_focus = 1 - link_focus
+	emu_mutex.lock()
+	emu_system.set_option("link_focus", link_focus)
+	emu_mutex.unlock()
+	_toast("Controlling Game Boy %d (%s side)" % [link_focus + 1, ["left", "right"][link_focus]])
+
+func _stop_current() -> void:
 	if emu_system:
 		emu_system.power_off()
 	if cpu_thread.is_alive():
 		stop_emulation()
-	print("Call load_rom: %s" % path)
-	var new_system = RomLoader.load_rom(path, internal_zip_file)
-	if new_system:
-		emu_system = new_system
-		current_system_id = _detect_system_id(path, internal_zip_file)   # NEW
-		AppSettings.apply_input_profile(current_system_id)               # NEW
-		var title := (internal_zip_file if internal_zip_file != "" else path).get_file().get_basename()
-		AppSettings.add_recent(path, internal_zip_file, title, current_system_id)   # NEW (pass 2)
-		emu_system.power_on()
-		var playback = audio_player.get_stream_playback()
-		emu_system.set_audio_playback(playback)
-		cpu_thread.start(Callable(self, "_thread_loop"))
-		var display_info = emu_system.display_info()
-		if display_info:
-			setup_screen(display_info)
-		else:
-			print("Could not get display info")
+
+func _start_system(new_system, system_id: String, title: String) -> void:
+	emu_system = new_system
+	current_system_id = system_id
+	AppSettings.apply_input_profile(current_system_id)
+	emu_system.power_on()
+	cheats_dialog.game_loaded(emu_system, emu_mutex, current_system_id, title)   # NEW (cheats)
+	if cheats_dialog.active_count() > 0:
+		_toast("%d cheat(s) on" % cheats_dialog.active_count())
+	var playback = audio_player.get_stream_playback()
+	emu_system.set_audio_playback(playback)
+	cpu_thread.start(Callable(self, "_thread_loop"))
+	var display_info = emu_system.display_info()
+	if display_info:
+		setup_screen(display_info)
 	else:
-		OS.alert("Could not load ROM: %s" % path.get_file())
+		print("Could not get display info")
+
+## A .gb/.gbc file, or the first one inside a zip: {"data": PackedByteArray, "name": String}
+func _read_rom(path: String) -> Dictionary:
+	if path.get_extension().to_lower() != "zip":
+		var data := FileAccess.get_file_as_bytes(path)
+		return {} if data.is_empty() else {"data": data, "name": path.get_file().get_basename().to_lower().validate_filename()}
+	var zip := ZIPReader.new()
+	if zip.open(path) != OK:
+		return {}
+	for f in zip.get_files():
+		if f.get_extension().to_lower() in ["gb", "gbc"]:
+			var data := zip.read_file(f)
+			zip.close()
+			return {"data": data, "name": f.get_file().get_basename().to_lower().validate_filename()}
+	zip.close()
+	return {}
 
 func _notification(what):
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
