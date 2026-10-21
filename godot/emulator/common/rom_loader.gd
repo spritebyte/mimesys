@@ -52,7 +52,6 @@ static func _cart(data: PackedByteArray, file: String) -> Dictionary:
 	return {"kind": "cart", "data": data, "file": file,
 		"name": file.get_basename().to_lower().validate_filename()}
 
-
 ## The Rust detector's guesses, best first: {"clear": bool, "guesses": [{"system", "score", "why"}]}.
 ## `path` is the full path (folder names are a hint) with the file name at the end.
 static func guess_system(data: PackedByteArray, path: String) -> Dictionary:

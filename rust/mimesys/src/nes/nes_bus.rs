@@ -1,3 +1,4 @@
+use crate::common::timed::Timed;
 use crate::common::cpu::m6502::{M6502Cpu,AddressBus};
 //use crate::nes::mappers::Mapper;
 use crate::common::cheats::{Cheats, CheatSystem};
@@ -204,7 +205,7 @@ impl NesBus {
             }
         }
     }
-    
+
     pub fn apply_cheat_writes(&mut self) {
         for i in 0..self.cheats.ram_writes().len() {
             let w = self.cheats.ram_writes()[i];
