@@ -5,7 +5,13 @@ use crate::arcade::take_region;
 use crate::common::audio::ay8910::Ay8910;
 use crate::arcade::popeye::popeye_bus::PopeyeBus;
 use crate::arcade::popeye::popeye_video::{PopeyeVideo, SCREEN_W, SCREEN_H};
+use crate::arcade::popeye::popeye_bus::PopeyeBusState;
+use crate::arcade::hiscore::HiScoreMem;
+use crate::arcade::state;
+use crate::common::cpu::z80::{Bus, Z80State};
 use std::collections::HashMap;
+
+const STATE_VERSION: u32 = 1;
 
 // 8 MHz crystal: Z80 at 4 MHz, AY-3-8910 at 2 MHz. 59.94 frames per second.
 const CPU_CLOCK: u64 = 4_000_000;
@@ -174,9 +180,25 @@ impl System for PopeyeSystem {
         }
     }
 
-    fn save_state(&self) -> Vec<u8> { Vec::new() }
-    fn load_state(&mut self, _data: &[u8]) -> Result<(), String> {
-        Err("save states not implemented for Popeye yet".into())
+    fn save_state(&self) -> Vec<u8> {
+        let s = (self.cpu.save_state(), self.bus.save(), self.cycle_debt, self.ay_cycles,
+                 self.nmi_line, self.watchdog_count, self.in_reset, self.current_frame);
+        state::encode(&self.save_filename, STATE_VERSION, &s)
+    }
+
+    fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let (cpu, bus, cycle_debt, ay_cycles, nmi_line, watchdog_count, in_reset, frame):
+            (Z80State, PopeyeBusState, u64, i32, bool, u8, bool, u64) =
+            state::decode(&self.save_filename, STATE_VERSION, data)?;
+        self.bus.load(bus)?;
+        self.cpu.load_state(&cpu);
+        self.cycle_debt = cycle_debt;
+        self.ay_cycles = ay_cycles;
+        self.nmi_line = nmi_line;
+        self.watchdog_count = watchdog_count;
+        self.in_reset = in_reset;
+        self.current_frame = frame;
+        Ok(())
     }
 }
 
@@ -194,4 +216,9 @@ pub fn decrypt_tpp2(rom: &[u8]) -> Vec<u8> {
 pub(crate) fn bitswap(val: usize, bits: &[u8]) -> usize {
     let n = bits.len();
     bits.iter().enumerate().map(|(k, &src)| ((val >> src) & 1) << (n - 1 - k)).sum()
+}
+
+impl HiScoreMem for PopeyeSystem {
+    fn hs_read(&mut self, addr: u16) -> u8 { self.bus.read(addr) }
+    fn hs_write(&mut self, addr: u16, v: u8) { self.bus.write(addr, v) }
 }

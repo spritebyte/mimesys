@@ -23,6 +23,7 @@ const VOLUME: [f32; 16] = [
     0.12658, 0.20498, 0.29221, 0.37283, 0.49253, 0.63532, 0.80558, 1.0,
 ];
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ay8910 {
     regs: [u8; 16],
     address: u8,
@@ -51,6 +52,7 @@ pub struct Ay8910 {
     lp_state: [f32; 3],
     dc: (f32, f32),          // DC blocker state (last input, last output)
     pub gain: f32,
+    #[serde(skip)]
     pub out: Vec<f32>,       // interleaved stereo L, R
 }
 

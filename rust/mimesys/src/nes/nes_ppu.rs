@@ -1,3 +1,19 @@
+/// Dots between a $2001 write and the PPU's internal rendering-enable switching
+/// (1 = takes effect on the dot after the write)
+const RENDER_DELAY: u8 = 3;
+/// Zapper: scanlines the photodiode keeps reporting light after the beam passed, and the
+/// brightness (luma 0-255) it needs
+const ZAPPER_LIGHT_LINES: i32 = 20;
+const ZAPPER_BRIGHTNESS: u32 = 85;
+/// sprite unit state bit in scanline_sprites.0 (low 8 bits = X counter)
+const SPR_COUNTING: usize = 0x100;
+/// dots from a $2007 read (CPU access point) to the PPU refilling the read buffer
+/// dots from the second $2006 write until v takes t (4 = before the 4th dot after it)
+const V_UPDATE_DELAY: u8 = 4;
+/// dots between finding the 9th sprite and $2002's overflow bit being set
+const OVERFLOW_FLAG_DELAY: u8 = 1;
+const SM_DELAY: u64 = 5;
+
 use crate::nes::mappers::Mapper;
 use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Serialize, Deserialize};
@@ -91,7 +107,66 @@ pub struct NesPPU {
     pub last_2006: u64,
     pub last_2006_2: u64,
     pub sprite_0_delay: u8,
+    // PPU I/O latch ("decay register"): separate from the CPU data bus. Each bit
+    // remembers the dot it was last refreshed; a 1 not refreshed for ~600 ms reads as 0.
+    io_latch: u8,
+    io_refresh: [u64; 8],
+    // Background fetch latches (filled on dots 2/4/6/8 of each tile, loaded into the
+    // shifters on the next tile boundary)
+    nt_latch: u8,
+    at_latch: u8,
+    pt_lo_latch: u8,
+    pt_hi_latch: u8,
+    // Sprite evaluation result for the NEXT line: (oam index, y, tile, attr, x)
+    /// Secondary OAM (32 bytes) and the PPU's own pointer into it
+    sec_oam: [u8; 32],
+    sec_addr: u8,
+    /// sprite evaluation state (dots 65-256)
+    eval_copying: bool,   // copying bytes 1-3 of an in-range sprite
+    eval_first: bool,     // next Y checked is the first one this line ("sprite 0")
+    eval_done: bool,      // OAM pointer wrapped: nothing left to check
+    sec_full: bool,       // 8 sprites found: now hunting for overflow
+    ovf_copy: u8,         // bytes still to "read" after an overflow hit
+    sprite0_next: bool,   // slot 0 of the next line is "sprite 0"
+    sprite_count: u8,     // sprites found by the last evaluation
+    attr_feed: u8,        // attribute bits feeding the attribute shifters' serial input
+    render_on: bool,      // rendering enabled, as seen RENDER_DELAY dots after a $2001 write
+    oam2_ovf: bool,       // secondary OAM pointer wrapped: increments frozen
+    // ---- PPU memory bus: each fetch = ALE dot (low address byte into the octal latch)
+    //      + read dot (current high address bits | octal latch) ----
+    octal: u8,
+    ale_addr: u16,        // address put out on the last ALE dot
+    ale_dot: u64,
+    render_read: u8,      // value of the last rendering read (what's on the data bus)
+    render_read_dot: u64,
+    /// $2007 read: the buffer is refilled by a read SM_DELAY dots later (0 = none pending)
+    sm_read_at: u64,
+    sm_addr: u16,
+    v_update_delay: u8,   // $2006 second write: dots until t -> v
+    overflow_delay: u8,   // sprite overflow found: dots until $2002 bit 5 is set
+    /// debug: NES_HIDE=bg / spr / bg,spr hides a layer on screen (bit 0 bg, bit 1 sprites);
+    /// sprite 0 hits and everything else still happen
+    debug_hide: u8,
+    /// debug: NES_TRACE_V=1 logs, per visible line, v / fine X at dot 1 and the tile
+    /// numbers fetched (drained into the event trace by the bus)
+    debug_v: bool,
+    debug_tiles: Vec<u8>,
+    debug_v_start: (u16, u8, bool),
+    pub debug_lines: Vec<String>,
+    fetch_y: u8, fetch_tile: u8, fetch_attr: u8, fetch_x: u8,   // sprite fetch latches
+    render_delay: u8,
+    oam_buffer: u8,       // what a $2004 read returns during rendering
+    /// rendering was turned off mid-line: OAM row 0 gets copied over this row at the
+    /// next rendered dot (OAM corruption)
+    oam_corrupt_row: Option<u8>,
+    // Sprites fetched on dots 257-320, shown on the next line
+    next_sprites: Vec<(usize, u8, u8, u8, u8, bool)>,
+    overflow_at_dot: u32,
+    a12_line: bool,
 }
+
+/// ~600 ms of PPU dots (5.369318 MHz)
+const IO_DECAY_DOTS: u64 = 3_220_000;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PpuState {
@@ -157,7 +232,7 @@ impl NesPPU {
             bg_shift_low: 0, bg_shift_high: 0, attr_shift_low: 0, attr_shift_high: 0,
             v_addr: 0, t_addr: 0, data_buffer: 0,
             vram: [0;4096], palette_ram: [0;32], oam: [0;256],
-            scanline_bg: [(0, 0, 0); 33], scanline_sprites: Vec::with_capacity(8),
+            scanline_bg: [(0, 0, 0); 33], scanline_sprites: vec![(0, 0xFF, 0, 0, 0, false); 8],
             back_buffer: vec![0; buffer_size],
             front_buffer: Arc::new(Mutex::new(vec![0; buffer_size])),
             system_frame_ready,
@@ -165,6 +240,22 @@ impl NesPPU {
             last_2005_2: 0, last_2006_2: 0,
             sprite_0_hit: false, debug_trace_bg: false,
             a12_sprite_tiles: [None; 8], sprite_0_delay: 0,
+            io_latch: 0, io_refresh: [0; 8],
+            nt_latch: 0, at_latch: 0, pt_lo_latch: 0, pt_hi_latch: 0,
+            sec_oam: [0xFF; 32], sec_addr: 0, eval_copying: false, eval_first: true,
+            eval_done: false, sec_full: false, ovf_copy: 0, sprite0_next: false,
+            sprite_count: 0, attr_feed: 0, render_on: false, render_delay: 0, oam2_ovf: false,
+            octal: 0, ale_addr: 0, ale_dot: u64::MAX, render_read: 0, render_read_dot: u64::MAX,
+            sm_read_at: 0, sm_addr: 0, v_update_delay: 0, overflow_delay: 0,
+            debug_v: std::env::var_os("NES_TRACE_V").is_some(),
+            debug_tiles: Vec::new(), debug_v_start: (0, 0, false), debug_lines: Vec::new(),
+            debug_hide: std::env::var("NES_HIDE").map(|v| {
+                let v = v.to_ascii_lowercase();
+                (v.contains("bg") as u8) | ((v.contains("spr") as u8) << 1)
+            }).unwrap_or(0),
+            fetch_y: 0xFF, fetch_tile: 0xFF, fetch_attr: 0xFF, fetch_x: 0xFF, oam_buffer: 0xFF, oam_corrupt_row: None,
+            next_sprites: Vec::with_capacity(8),
+            overflow_at_dot: 0, a12_line: false,
         }
     }
 
@@ -201,6 +292,8 @@ impl NesPPU {
     pub fn load_state(&mut self, state: &PpuState) {
         self.ctrl = state.ctrl;
         self.mask = state.mask;
+        self.render_on = (state.mask & 0x18) != 0;
+        self.render_delay = 0;
         self.status = state.status;
         self.oam_addr = state.oam_addr;
         self.v_addr = state.v_addr;
@@ -220,6 +313,7 @@ impl NesPPU {
         self.nmi_suppressed = state.nmi_suppressed;
         self.data_buffer = state.data_buffer;
         self.scanline_sprites = state.scanline_sprites.clone();
+        self.scanline_sprites.resize(8, (0, 0xFF, 0, 0, 0, false));
         self.a12_sprite_tiles = state.a12_sprite_tiles.clone();
         self.background_pattern_table = state.background_pattern_table;
         self.oam.copy_from_slice(&state.oam);
@@ -235,7 +329,7 @@ impl NesPPU {
     }
 
     pub fn reset(&mut self) {
-        self.ctrl = 0; self.mask = 0; self.status = 0;
+        self.ctrl = 0; self.mask = 0; self.status = 0; self.render_on = false; self.render_delay = 0;
         self.scanline = 261; self.cycle = 0; self.frame_ready = false;
         self.w_latch = false; self.v_addr = 0; self.t_addr = 0;
         self.frame_number = 0;
@@ -261,6 +355,14 @@ impl NesPPU {
     pub fn total_cycles(&self) -> u64 { return self.total_ppu_cycles; }
 
     pub fn step_one_cycle(&mut self, mapper: &mut dyn Mapper) {
+        self.tick_render_delay();
+        if self.v_update_delay > 0 {
+            self.v_update_delay -= 1;
+            if self.v_update_delay == 0 {
+                self.v_addr = self.t_addr;
+                self.drive_a12_from_v(mapper, self.v_addr & 0x3FFF);
+            }
+        }
         let rendering_enabled = self.rendering_enabled();
 /*
         if self.decay_timer_upper > 0 {
@@ -286,9 +388,30 @@ impl NesPPU {
                         self.status |= 0x40;
                     }
                 }
+                if self.overflow_delay > 0 {
+                    self.overflow_delay -= 1;
+                    if self.overflow_delay == 0 {
+                        self.status |= 0x20;
+                    }
+                }
+                if self.debug_v && self.scanline < 240 {
+                    if self.cycle == 1 {
+                        self.debug_v_start = (self.v_addr, self.fine_x, self.rendering_enabled());
+                        self.debug_tiles.clear();
+                    } else if self.cycle == 257 {
+                        let (v, fx, on) = self.debug_v_start;
+                        let tiles: Vec<String> = self.debug_tiles.iter().map(|t| format!("{t:02X}")).collect();
+                        self.debug_lines.push(format!(
+                            "v@1={v:04X} (NT{} coarseY {} fineY {} coarseX {}) fx={fx} {} tiles: {}",
+                            (v >> 10) & 3, (v >> 5) & 31, (v >> 12) & 7, v & 31,
+                            if on { "on" } else { "off" }, tiles.join(" ")));
+                    }
+                }
                 // 1. Visible Screen Rendering (Skip during prefetch line)
                 if !is_prefetch && (1..=256).contains(&self.cycle) {
                     self.render_pixel(mapper, (self.cycle - 1) as usize);
+                } else if is_prefetch && (1..=256).contains(&self.cycle) {
+                    let _ = self.step_sprite_units();    // the units run, nothing is output
                 }
 
                 if is_prefetch && self.cycle == 1 {
@@ -296,71 +419,23 @@ impl NesPPU {
                     self.nmi_suppressed = false;
                 }
 
+                if self.cycle == 339 {
+                    // the sprite X counters are armed here; with rendering off at this dot
+                    // they stay at 0, so every sprite starts as soon as rendering resumes
+                    self.load_sprite_counters(rendering_enabled);
+                }
                 if rendering_enabled {
-                    match self.cycle {
-                        0 => {
-                            if !is_prefetch {
-                                self.evaluate_sprites_for_scanline(mapper);
-                            }
+                    if let Some(row) = self.oam_corrupt_row.take() {
+                        // OAM corruption: row 0 is copied over the row the secondary OAM
+                        // pointer was at when rendering was switched off
+                        let r = row as usize * 8;
+                        if r != 0 {
+                            let src: [u8; 8] = self.oam[0..8].try_into().unwrap();
+                            self.oam[r..r + 8].copy_from_slice(&src);
                         }
-                        // Background coarse X increments every 8 dots
-                        c if (9..=249).contains(&c) && c % 8 == 1 => {
-                            self.load_background_shifters(mapper);
-                            self.increment_coarse_x();
-                        }
-                        256 => {
-                            self.increment_coarse_x();
-                            self.increment_vertical_scroll();
-                            if self.scanline == 175 {
-                            }
-                        }
-                        257 => {
-                            self.collect_next_line_sprite_tiles();
-                            self.copy_horizontal(); // Update active X from temporary X
-                        }
-                        260 => {
-                            mapper.notify_scanline();
-                        }
-                        304 => {
-                            if is_prefetch {
-                                self.copy_vertical(); // Reset active Y for next frame
-                            }
-                        }
-                        328 => {
-                            self.load_background_shifters_high(mapper);
-                            self.increment_coarse_x();
-                        }
-                        336 => {
-                            self.load_background_shifters(mapper);
-                            self.increment_coarse_x();
-                        }
-                        _ => {}
+                        self.sec_oam[row as usize & 0x1F] = self.sec_oam[0];
                     }
-
-                    if (257..=320).contains(&self.cycle) {
-                       self.oam_addr = 0;
-                    }
-                    let first_sprite_dot = 256 + SPRITE_A12_PHASE;
-                    let in_sprite_region = (257..=320).contains(&self.cycle);
-                    let phase = if in_sprite_region { SPRITE_A12_PHASE } else { BG_A12_PHASE };
-
-                    if self.cycle % 8 == phase {
-                        let a12_addr = if in_sprite_region {
-                            let slot = ((self.cycle - first_sprite_dot) / 8) as usize;  // 260 -> slot 0
-                            if self.sprite_size == 16 {
-                                match self.a12_sprite_tiles[slot] {
-                                    Some(tile) if (tile & 0x01) != 0 => 0x1000,
-                                    Some(_) => 0x0000,
-                                    None => 0x1000,
-                                }
-                            } else {
-                                self.sprite_pattern_table
-                            }
-                        } else {
-                            self.background_pattern_table
-                        };
-                        mapper.update_a12(a12_addr, self.total_ppu_cycles);
-                    }
+                    self.render_line_dot(mapper, is_prefetch);
                 }
             }
 
@@ -368,9 +443,6 @@ impl NesPPU {
             240 => {
                 if self.cycle == 0 {
                     // End of frame: swap buffers safely
-                    if rendering_enabled {
-                        self.evaluate_sprite_overflow(240);
-                    }
 //                    let completed_buffer = std::mem::replace(&mut self.back_buffer, vec![0; 256 * 240 * 4]);
 //                    self.front_buffer = Arc::new(completed_buffer);
                     if let Ok(mut front) = self.front_buffer.lock() {
@@ -392,13 +464,10 @@ impl NesPPU {
             _ => unreachable!(),
         }
 
-//        if rendering_enabled && ((1..=256).contains(&self.cycle) || (321..=335).contains(&self.cycle)) {
-        if rendering_enabled && ((1..=256).contains(&self.cycle)) {
-            self.bg_shift_low <<= 1;
-            self.bg_shift_high <<= 1;
-            self.attr_shift_low <<= 1;
-            self.attr_shift_high <<= 1;
+        if self.sm_read_at != 0 && self.total_ppu_cycles >= self.sm_read_at {
+            self.finish_2007_read(mapper);
         }
+
         // 5. Always advance the cycle counters at the very end
         self.advance_cycle(mapper);
     }
@@ -409,11 +478,14 @@ impl NesPPU {
         self.cycle += 1;
         self.total_ppu_cycles += 1;
 
+        // the odd-frame skip follows $2001 without the rendering pipeline's lag
+        // (blargg ppu_vbl_nmi 10-even_odd_timing)
         let rendering_enabled = (self.mask & 0x18) != 0;
         let should_skip = rendering_enabled && self.scanline == 261 && self.cycle == 339 && self.is_odd_frame;
 
         if should_skip {
             self.cycle = 340; // Artificially skip directly to cycle 340, which wraps next
+            self.load_sprite_counters(true);
         }
 
         if self.cycle >= 341 {
@@ -429,6 +501,455 @@ impl NesPPU {
             }
         }
     }
+
+    /// One dot of a rendering line (0-239, and the pre-render line 261) with rendering on.
+    /// Fetch timing (each fetch takes 2 dots; the data is used on the second):
+    ///   dots 1-256, 321-336: per 8-dot tile: NT (2), AT (4), pattern low (6), high (8),
+    ///                        coarse X++ on dot 8; shifters reload on dots 9, 17, ... 257
+    ///                        (and 329/337 for the two tiles of the next line)
+    ///   dot 256: fine/coarse Y++   dot 257: horizontal bits t -> v
+    ///   dots 65-256: sprite evaluation for the next line (done at dot 65, overflow flag
+    ///                set on the dot the hardware would find it)
+    ///   dots 257-320: 8 sprite slots: garbage NT (2), garbage NT (4), pattern low (6), high (8)
+    ///   dots 338, 340: dummy NT fetches
+    /// Every fetch address goes to mapper.update_a12, so MMC3-style counters see the real
+    /// A12 pattern.
+    fn render_line_dot(&mut self, mapper: &mut dyn Mapper, is_prefetch: bool) {
+        let dot = self.cycle;
+        match dot {
+            1..=256 | 321..=336 => {
+                self.bg_fetch_step(mapper, dot);
+                if dot == 256 {
+                    self.increment_vertical_scroll();
+                }
+                if dot == 63 || dot == 255 {
+                    self.oam2_ovf = false;
+                }
+                if dot >= 321 {
+                    // $2004 sees secondary OAM at the pointer (index 0 normally)
+                    self.oam_buffer = self.sec_oam[self.sec_addr as usize & 0x1F];
+                }
+                if dot <= 256 && !is_prefetch {
+                    self.sprite_eval_dot(dot);
+                }
+                // no evaluation on the pre-render line: the stale secondary OAM (and its
+                // sprite-0 flag) is fetched as-is, range-checked against line 261 & 255 = 5
+            }
+            257..=320 => {
+                if dot == 257 && !self.oam2_ovf {
+                    self.sec_addr = 0;
+                }
+                if is_prefetch && (280..=304).contains(&dot) {
+                    self.copy_vertical();
+                }
+                if dot == 260 {
+                    mapper.notify_scanline();
+                }
+                self.oam_addr = 0;
+                self.sprite_fetch_step(mapper, dot);
+                if dot == 257 {
+                    // after this dot's NT address went out (from the old v)
+                    self.copy_horizontal();
+                }
+            }
+            337..=340 => {
+                self.oam_buffer = self.sec_oam[self.sec_addr as usize & 0x1F];
+                if dot == 339 {
+                    self.oam2_ovf = false;
+                }
+                let nt = 0x2000 | (self.v_addr & 0x0FFF);
+                if dot % 2 == 1 {
+                    self.bus_ale(mapper, nt);
+                } else {
+                    let b = mapper.read_nametable_byte(self.bus_addr(nt), &self.vram, false);   // dummy fetches
+                    self.bus_record(b);
+                }
+            }
+            _ => {}
+        }
+        // Shift after this dot's pixel was drawn. The two tiles fetched on 321-336 end up
+        // in the high byte / low byte, so the first is on screen at dot 1.
+        if (1..=256).contains(&dot) || (321..=336).contains(&dot) {
+            self.shift_bg();
+            // the tile fetched over the last 8 dots goes into the shifters at the end of
+            // the 8th dot (8, 16, ... 256 and 328, 336), after that dot's shift
+            if dot % 8 == 0 {
+                self.reload_shifters_low();
+            }
+        }
+    }
+
+    /// Put a PPU address on the bus. Mappers only see A12 *changes* (MMC3/RAMBO-1 act
+    /// on edges), which saves a virtual call on most fetches.
+    #[inline]
+    fn drive_a12(&mut self, mapper: &mut dyn Mapper, addr: u16, cycle: u64) {
+        let a12 = addr & 0x1000 != 0;
+        if a12 != self.a12_line {
+            self.a12_line = a12;
+            mapper.update_a12(addr, cycle);
+        }
+    }
+
+    /// $2006/$2007 put v on the PPU address bus, but only while the PPU is idle. During
+    /// rendering the bus carries the rendering fetches, so the mapper never sees v there
+    /// (a $2007 read mid-frame in Burai Fighter would otherwise clock MMC3 an extra time).
+    fn drive_a12_from_v(&mut self, mapper: &mut dyn Mapper, addr: u16) {
+        let rendering_line = self.scanline < 240 || self.scanline == 261;
+        if !(self.rendering_enabled() && rendering_line) {
+            self.drive_a12(mapper, addr, self.total_ppu_cycles);
+        }
+    }
+
+    fn reload_shifters_low(&mut self) {
+        self.bg_shift_low = (self.bg_shift_low & 0xFF00) | self.pt_lo_latch as u16;
+        self.bg_shift_high = (self.bg_shift_high & 0xFF00) | self.pt_hi_latch as u16;
+        let a0 = if self.at_latch & 1 != 0 { 0xFF } else { 0x00 };
+        let a1 = if self.at_latch & 2 != 0 { 0xFF } else { 0x00 };
+        self.attr_shift_low = (self.attr_shift_low & 0xFF00) | a0;
+        self.attr_shift_high = (self.attr_shift_high & 0xFF00) | a1;
+        self.attr_feed = self.at_latch;
+    }
+
+    /// The high pattern shifter shifts in 1s (the low one 0s); the attribute shifters shift in the 2-bit latch
+    /// loaded at the last reload. Only visible when a reload is skipped (rendering
+    /// toggled at the right moment) - AccuracyCoin "BG Serial In".
+    fn shift_bg(&mut self) {
+        self.bg_shift_low <<= 1;                            // low plane shifts in 0
+        self.bg_shift_high = (self.bg_shift_high << 1) | 1; // high plane shifts in 1
+        self.attr_shift_low = (self.attr_shift_low << 1) | (self.attr_feed & 1) as u16;
+        self.attr_shift_high = (self.attr_shift_high << 1) | ((self.attr_feed >> 1) & 1) as u16;
+    }
+
+    /// ALE dot: the address goes out, its low byte into the octal latch.
+    #[inline]
+    fn bus_ale(&mut self, mapper: &mut dyn Mapper, addr: u16) {
+        self.octal = addr as u8;
+        self.ale_addr = addr;
+        self.ale_dot = self.total_ppu_cycles;
+        self.drive_a12(mapper, addr, self.total_ppu_cycles);
+    }
+
+    /// Read dot: the high address bits as they are now, the low byte from the octal
+    /// latch (a $2006 write between the two dots gives a "hybrid" address).
+    #[inline]
+    fn bus_addr(&self, addr: u16) -> u16 {
+        (addr & 0x3F00) | self.octal as u16
+    }
+
+    #[inline]
+    fn bus_record(&mut self, value: u8) -> u8 {
+        self.render_read = value;
+        self.render_read_dot = self.total_ppu_cycles;
+        value
+    }
+
+    fn bg_fetch_step(&mut self, mapper: &mut dyn Mapper, dot: u32) {
+        // odd dot: address goes out (A12 changes here); even dot: data comes back
+        let v = self.v_addr;
+        let nt_addr = 0x2000 | (v & 0x0FFF);
+        let at_addr = 0x23C0 | (v & 0x0C00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07);
+        match dot % 8 {
+            1 => self.bus_ale(mapper, nt_addr),
+            2 => {
+                let b = mapper.read_nametable_byte(self.bus_addr(nt_addr), &self.vram, false);
+                self.nt_latch = self.bus_record(b);
+                if self.debug_v { self.debug_tiles.push(b); }
+            }
+            3 => self.bus_ale(mapper, at_addr),
+            4 => {
+                let byte = mapper.read_nametable_byte(self.bus_addr(at_addr), &self.vram, true);
+                self.bus_record(byte);
+                let shift = (((v >> 5) & 0x02) << 1) | (v & 0x02);   // (coarse_y bit1)*4 + (coarse_x bit1)*2
+                self.at_latch = (byte >> shift) & 0x03;
+            }
+            5 => { let a = self.bg_pattern_addr(); self.bus_ale(mapper, a) }
+            6 => {
+                let b = mapper.ppu_read_ctx(self.bus_addr(self.bg_pattern_addr()), true);
+                self.pt_lo_latch = self.bus_record(b);
+            }
+            7 => { let a = self.bg_pattern_addr() + 8; self.bus_ale(mapper, a) }
+            _ => {
+                let b = mapper.ppu_read_ctx(self.bus_addr(self.bg_pattern_addr() + 8), true);
+                self.pt_hi_latch = self.bus_record(b);
+                self.increment_coarse_x();
+            }
+        }
+    }
+
+    #[inline]
+    fn bg_pattern_addr(&self) -> u16 {
+        self.background_pattern_table + ((self.nt_latch as u16) << 4) + ((self.v_addr >> 12) & 7)
+    }
+
+    /// One dot of sprite evaluation (lines 0-239; the pre-render line keeps the stale
+    /// secondary OAM). OAMADDR itself is the pointer into OAM, so a misaligned OAMADDR
+    /// stays misaligned the way the hardware does:
+    ///   dots 1-64   clear secondary OAM to $FF (pointer = (dot-1)/2), $2004 reads $FF
+    ///   dots 65-256 odd: read OAM[OAMADDR]; even: act on it
+    ///     - Y byte: copy; in range -> copy the next 3 bytes too; out of range ->
+    ///       OAMADDR = (OAMADDR + 4) & $FC
+    ///     - after the 4th byte: +1, and realign (& $FC) if that byte isn't "in range"
+    ///     - with 8 found: in range -> overflow flag; out of range -> +5 (the hardware bug)
+    ///   the first sprite looked at becomes "sprite 0" for the hit test
+    fn sprite_eval_dot(&mut self, dot: u32) {
+        if dot <= 64 {
+            self.sec_addr = ((dot - 1) / 2) as u8;
+            if dot % 2 == 0 {
+                self.sec_oam[self.sec_addr as usize] = 0xFF;
+            }
+            self.oam_buffer = 0xFF;
+            return;
+        }
+        if dot == 65 {
+            self.sec_addr = 0;
+            self.eval_copying = false;
+            self.eval_first = true;
+            self.eval_done = false;
+            self.sec_full = false;
+            self.ovf_copy = 0;
+            self.sprite0_next = false;
+        }
+        if dot % 2 == 1 {
+            if self.sec_full && self.ovf_copy == 1 {
+                // last step of the overflow sprite's copy: no OAM read this dot
+                self.oam_buffer = self.sec_oam[self.sec_addr as usize & 0x1F];
+                return;
+            }
+            let mut b = self.oam[self.oam_addr as usize];
+            if self.oam_addr & 3 == 2 {
+                b &= 0xE3;      // attribute bytes have no bits 2-4
+            }
+            self.oam_buffer = b;
+            return;
+        }
+        let h: i32 = if (self.ctrl & 0x20) != 0 { 16 } else { 8 };
+        let line = self.scanline as i32;
+        let byte = self.oam_buffer;
+        let in_range = { let r = line - byte as i32; r >= 0 && r < h };
+
+        if self.eval_done {
+            // OAM keeps being read on odd dots; even dots read secondary OAM
+            self.oam_buffer = self.sec_oam[self.sec_addr as usize & 0x1F];
+            self.oam_addr = self.oam_addr.wrapping_add(4);
+        } else if !self.sec_full {
+            self.sec_oam[self.sec_addr as usize] = byte;
+            if !self.eval_copying {
+                let first = std::mem::replace(&mut self.eval_first, false);
+                if in_range {
+                    self.eval_copying = true;
+                    self.sprite0_next |= first;
+                    self.sec_addr += 1;
+                    self.oam_addr = self.oam_addr.wrapping_add(1);
+                } else {
+                    let (next, wrapped) = (self.oam_addr & 0xFC).overflowing_add(4);
+                    self.oam_addr = next;
+                    self.eval_done = wrapped;
+                }
+            } else {
+                let fourth = self.sec_addr & 3 == 3;
+                self.sec_addr += 1;
+                let (mut next, wrapped) = self.oam_addr.overflowing_add(1);
+                if fourth {
+                    if !in_range { next &= 0xFC; }
+                    self.eval_copying = false;
+                    if self.sec_addr >= 32 {
+                        self.sec_addr = 0;
+                        self.sec_full = true;
+                        self.oam2_ovf = true;
+                    }
+                }
+                self.oam_addr = next;
+                self.eval_done = wrapped;
+            }
+        } else {
+            // 8 sprites found: writes turn into reads, look for a 9th (with the m++ bug)
+            self.oam_buffer = self.sec_oam[self.sec_addr as usize & 0x1F];
+            if self.ovf_copy > 0 {
+                // after the overflow sprite: two more bytes, an idle read, then on to the
+                // next whole sprite; evaluation then keeps stepping +4 (wrapping) to dot 256
+                self.ovf_copy -= 1;
+                if self.ovf_copy == 0 {
+                    self.oam_addr = (self.oam_addr & 0xFC).wrapping_add(4);
+                    self.eval_done = true;
+                } else {
+                    self.oam_addr = self.oam_addr.wrapping_add(1);
+                }
+            } else if in_range {
+                self.overflow_delay = OVERFLOW_FLAG_DELAY;   // $2002 bit 5 shows up a dot later
+                self.ovf_copy = 4;
+                self.oam_addr = self.oam_addr.wrapping_add(1);
+            } else {
+                let hi = (self.oam_addr >> 2) as u16 + 1;
+                let lo = (self.oam_addr + 1) & 3;
+                self.oam_addr = (((hi << 2) as u8) & 0xFC) | lo;
+                self.eval_done = hi > 63;
+            }
+        }
+        if dot == 256 {
+            self.sprite_count = if self.sec_full { 8 } else { self.sec_addr >> 2 };
+        }
+    }
+
+    /// Dots 257-320: slot = (dot-257)/8, read from secondary OAM. Pattern low on the 6th
+    /// dot, high on the 8th. Empty slots fetch tile $FF (what cleared secondary OAM holds),
+    /// which matters for A12; only the first `sprite_count` slots are drawn.
+    fn sprite_fetch_step(&mut self, mapper: &mut dyn Mapper, dot: u32) {
+        let slot = ((dot - 257) / 8) as usize;
+        let phase = (dot - 257) % 8;
+        // everything comes through the secondary OAM pointer (so a pointer left
+        // misaligned or frozen by rendering toggles shows up here)
+        self.oam_buffer = self.sec_oam[self.sec_addr as usize & 0x1F];
+        match phase {
+            0 => self.fetch_y = self.oam_buffer,
+            1 => self.fetch_tile = self.oam_buffer,
+            2 => self.fetch_attr = self.oam_buffer,
+            3 => self.fetch_x = self.oam_buffer,
+            _ => {}
+        }
+        match phase {
+            0 | 2 => {
+                // two garbage nametable fetches (A12 low)
+                let addr = 0x2000 | (self.v_addr & 0x0FFF);
+                self.bus_ale(mapper, addr);
+            }
+            1 | 3 => {
+                let addr = self.bus_addr(0x2000 | (self.v_addr & 0x0FFF));
+                let b = mapper.read_nametable_byte(addr, &self.vram, false);
+                self.bus_record(b);
+            }
+            4 | 6 => {
+                let addr = self.sprite_pattern_addr();
+                self.bus_ale(mapper, if phase == 6 { addr + 8 } else { addr });
+            }
+            5 | 7 => {
+                let addr = self.sprite_pattern_addr();
+                let addr = self.bus_addr(if phase == 7 { addr + 8 } else { addr });
+                let byte = mapper.ppu_read_ctx(addr, false);
+                self.bus_record(byte);
+                // the fetch loads the sprite unit directly (if rendering is off during the
+                // fetch, the unit keeps its stale contents). The Y byte is range-checked
+                // against the line counter (261 & 255 = 5 on the pre-render line); out of
+                // range (e.g. empty $FF slots) loads transparent
+                let attr = self.fetch_attr;
+                let visible = self.fetch_in_range();
+                let mut byte = if visible { byte } else { 0 };
+                if attr & 0x40 != 0 { byte = byte.reverse_bits(); }   // flip: shifter outputs bit 7
+                let x = self.fetch_x;
+                let zero = slot == 0 && self.sprite0_next && visible;
+                let unit = &mut self.scanline_sprites[slot];
+                if phase == 5 {
+                    unit.1 = x;
+                    unit.0 = (unit.0 & SPR_COUNTING) | x as usize;   // counter = X
+                    unit.2 = byte;
+                    unit.4 = attr;
+                    unit.5 = zero;
+                } else {
+                    unit.3 = byte;
+                }
+            }
+            _ => {}
+        }
+        // pointer +1 after the Y, tile and attribute bytes, then holds on X until the
+        // slot's last dot
+        if matches!(phase, 0..=2 | 7) {
+            self.inc_sec_addr();
+        }
+    }
+
+    /// Secondary OAM pointer increment. Wrapping past 31 raises the "OAM2 overflowed"
+    /// flag, which freezes the pointer until rendering is on at dot 63, 255 or 339.
+    fn inc_sec_addr(&mut self) {
+        if self.oam2_ovf { return; }
+        self.sec_addr = (self.sec_addr + 1) & 0x1F;
+        if self.sec_addr == 0 {
+            self.oam2_ovf = true;
+        }
+    }
+
+    fn fetch_in_range(&self) -> bool {
+        let h: i32 = if (self.ctrl & 0x20) != 0 { 16 } else { 8 };
+        let r = (self.scanline as u8) as i32 - self.fetch_y as i32;
+        r >= 0 && r < h
+    }
+
+    fn sprite_pattern_addr(&self) -> u16 {
+        let tall = (self.ctrl & 0x20) != 0;
+        let (y, tile, attr) = (self.fetch_y, self.fetch_tile, self.fetch_attr);
+        let h: u8 = if tall { 16 } else { 8 };
+        // the pre-render line's counter reads as 261 & 255 = 5
+        let line = self.scanline as u8;
+        let mut row = line.wrapping_sub(y) & (h - 1);
+        if attr & 0x80 != 0 { row = h - 1 - row; }
+        if tall {
+            let bank = if tile & 1 != 0 { 0x1000 } else { 0x0000 };
+            let t = (tile & 0xFE) as u16 + if row >= 8 { 1 } else { 0 };
+            bank + t * 16 + (row as u16 & 7)
+        } else {
+            self.sprite_pattern_table + tile as u16 * 16 + row as u16
+        }
+    }
+
+    /// The Zapper's photodiode: it sees light when the pixel it points at was drawn
+    /// bright within the last ZAPPER_LIGHT_LINES scanlines (the sensor decays after that).
+    pub fn zapper_sees_light(&self, x: i32, y: i32) -> bool {
+        if !(0..256).contains(&x) || !(0..240).contains(&y) {
+            return false;
+        }
+        let (line, dot) = (self.scanline as i32, self.cycle as i32);
+        if line < y || line - y > ZAPPER_LIGHT_LINES || (line == y && dot <= x + 1) {
+            return false;
+        }
+        let i = (y as usize * 256 + x as usize) * 4;
+        let luma = |buf: &[u8]| -> u32 {
+            let (r, g, b) = (buf[i] as u32, buf[i + 1] as u32, buf[i + 2] as u32);
+            (r * 299 + g * 587 + b * 114) / 1000
+        };
+        // the frame being drawn; from line 240 on it has been handed to the front buffer
+        let l = if line < 240 {
+            luma(&self.back_buffer)
+        } else {
+            match self.front_buffer.lock() { Ok(f) => luma(&f), Err(_) => 0 }
+        };
+        l >= ZAPPER_BRIGHTNESS
+    }
+
+    /// Dot 339 (or 340 when the odd-frame skip jumps over 339): with rendering on, every
+    /// sprite unit switches to "counting". With it off they stay as they were - normally
+    /// "drawing", so they draw as soon as rendering resumes.
+    fn load_sprite_counters(&mut self, rendering: bool) {
+        if rendering {
+            for unit in self.scanline_sprites.iter_mut() {
+                unit.0 |= SPR_COUNTING;
+            }
+        }
+    }
+
+    /// One visible dot of the 8 sprite units. Counting units decrement every dot (even
+    /// with rendering off) and switch to drawing at 0; drawing units shift out a pixel
+    /// only while rendering is on. Returns the first opaque pixel:
+    /// (pixel, palette, priority, is sprite 0).
+    fn step_sprite_units(&mut self) -> Option<(u8, u8, u8, bool)> {
+        let rendering = self.rendering_enabled();
+        let mut out = None;
+        for unit in self.scanline_sprites.iter_mut() {
+            if unit.0 & SPR_COUNTING != 0 {
+                if unit.0 & 0xFF != 0 {
+                    unit.0 -= 1;
+                    continue;
+                }
+                unit.0 &= !SPR_COUNTING;
+            }
+            if !rendering { continue; }
+            let p = ((unit.3 >> 7) << 1) | (unit.2 >> 7);
+            unit.2 <<= 1;
+            unit.3 <<= 1;
+            if p != 0 && out.is_none() {
+                out = Some((p, unit.4 & 0x03, (unit.4 >> 5) & 1, unit.5));
+            }
+        }
+        out
+    }
+
 
     fn collect_next_line_sprite_tiles(&mut self) {
         self.a12_sprite_tiles = [None; 8];
@@ -485,9 +1006,34 @@ impl NesPPU {
         }
     }
 
+    /// Rendering on/off as the PPU's internals see it: a $2001 write reaches it
+    /// RENDER_DELAY dots later.
     fn rendering_enabled(&self) -> bool {
-        // Checks PPUMASK ($2001) Bit 3 (Background visibility) or Bit 4 (Sprite visibility)
-        (self.mask & 0x18) != 0
+        self.render_on
+    }
+
+    /// Advance the $2001 rendering-enable pipeline by one dot.
+    fn tick_render_delay(&mut self) {
+        if self.render_delay == 0 { return; }
+        self.render_delay -= 1;
+        if self.render_delay == 0 {
+            self.apply_render_on();
+        }
+    }
+
+    fn apply_render_on(&mut self) {
+        let was_on = self.render_on;
+        self.render_on = (self.mask & 0x18) != 0;
+        if was_on && !self.render_on && (self.scanline < 240 || self.scanline == 261) {
+            // seed for OAM corruption: the secondary OAM pointer (rounded up to a
+            // whole sprite during evaluation; 0 once secondary OAM is full)
+            let row = match self.cycle {
+                65..=256 if self.sec_full => 0,
+                65..=256 => (self.sec_addr + 3) & 0x1C,
+                _ => self.sec_addr,
+            };
+            self.oam_corrupt_row = Some(row & 0x1F);
+        }
     }
 
     fn increment_coarse_x(&mut self) {
@@ -579,27 +1125,12 @@ impl NesPPU {
         let mut sprite_priority = 0u8; 
         let mut is_sprite_zero = false;
 
-        if spr_show {
-            for sprite in &self.scanline_sprites {
-                let (_, s_x, s_low, s_high, s_attr, s_is_zero) = *sprite;
-                let s_x = s_x as usize;
-
-                if x >= s_x && x < s_x + 8 {
-                    let mut s_bit_shift = 7 - (x - s_x);
-                    if (s_attr & 0x40) != 0 { s_bit_shift = x - s_x; } // Horizontal flip
-
-                    let s_color_bit0 = (s_low >> s_bit_shift) & 1;
-                    let s_color_bit1 = (s_high >> s_bit_shift) & 1;
-                    let p_pixel = (s_color_bit1 << 1) | s_color_bit0;
-
-                    if p_pixel != 0 {
-                        sprite_pixel = p_pixel;
-                        sprite_palette_idx = s_attr & 0x03;
-                        sprite_priority = (s_attr >> 5) & 1;
-                        is_sprite_zero = s_is_zero;
-                        break; 
-                    }
-                }
+        if let Some((p, pal, prio, zero)) = self.step_sprite_units() {
+            if spr_show {
+                sprite_pixel = p;
+                sprite_palette_idx = pal;
+                sprite_priority = prio;
+                is_sprite_zero = zero;
             }
         }
 
@@ -630,6 +1161,31 @@ impl NesPPU {
         } else {
             0x00
         };
+
+        // debug layer hiding (output only)
+        let final_palette_offset = if self.debug_hide != 0 {
+            let spr = spr_opaque && self.debug_hide & 2 == 0;
+            let bg = bg_opaque && bg_show && self.debug_hide & 1 == 0;
+            if spr && (!bg || sprite_priority == 0) && bg_show | spr_show {
+                0x10 + (sprite_palette_idx as usize * 4) + sprite_pixel as usize
+            } else if bg {
+                (bg_palette_idx as usize * 4) + bg_pixel as usize
+            } else { 0 }
+        } else { final_palette_offset };
+
+        // With rendering off the PPU outputs the backdrop - or, if v points into palette
+        // RAM, the colour at v (games use this to show palette writes mid-screen)
+        let mut final_palette_offset = final_palette_offset;
+        if !self.rendering_enabled() {
+            let v = self.v_addr & 0x3FFF;
+            final_palette_offset = if v >= 0x3F00 {
+                let mut i = (v & 0x1F) as usize;
+                if i >= 0x10 && i % 4 == 0 { i -= 0x10; }
+                i
+            } else {
+                0
+            };
+        }
 
         // ---- 4. WRITE PIXEL TO BACK BUFFER ----
         let color_idx = self.palette_ram[final_palette_offset] & 0x3F;
@@ -857,11 +1413,49 @@ impl NesPPU {
         }
     }
 
-    pub fn cpu_read_reg(&mut self, mapper: &mut dyn Mapper, reg: u16, open_bus: u8) -> u8 {
-        match reg {
+    /// The I/O latch as it reads now, with bits that weren't refreshed in time decayed to 0.
+    fn io_latch_now(&mut self) -> u8 {
+        for b in 0..8 {
+            if self.io_latch & (1 << b) != 0
+                && self.total_ppu_cycles.wrapping_sub(self.io_refresh[b]) > IO_DECAY_DOTS {
+                self.io_latch &= !(1 << b);
+            }
+        }
+        self.io_latch
+    }
+
+    /// Drive `mask` bits of the latch with `value` (a write, or bits a read defines).
+    fn io_refresh(&mut self, value: u8, mask: u8) {
+        self.io_latch = (self.io_latch & !mask) | (value & mask);
+        for b in 0..8 {
+            if mask & (1 << b) != 0 { self.io_refresh[b] = self.total_ppu_cycles; }
+        }
+    }
+
+    /// CPU read of $2000-$3FFF. Undefined bits come from the PPU's own I/O latch, not the
+    /// CPU data bus; the bits the register does define refresh the latch.
+    pub fn cpu_read_reg(&mut self, mapper: &mut dyn Mapper, reg: u16, _cpu_open_bus: u8) -> u8 {
+        let latch = self.io_latch_now();
+        let (value, defined) = self.read_reg_raw(mapper, reg, latch);
+        self.io_refresh(value, defined);
+        (value & defined) | (latch & !defined)
+    }
+
+    /// (value, mask of the bits this register drives)
+    fn read_reg_raw(&mut self, mapper: &mut dyn Mapper, reg: u16, open_bus: u8) -> (u8, u8) {
+        let defined = match reg {
+            2 => 0xE0,
+            4 => 0xFF,
+            7 if (self.v_addr & 0x3FFF) >= 0x3F00 => 0x3F,
+            7 => 0xFF,
+            _ => 0x00,
+        };
+        let v = match reg {
             2 => { // $2002 - PPUSTATUS
                 let _is_currently_vblank = self.scanline >= 241 && self.scanline <= 260;
-                let res = (self.status & 0xE0) | (open_bus & 0x1F);
+                let mut res = (self.status & 0xE0) | (open_bus & 0x1F);
+                // (the sprite-0/overflow bits are re-sampled ~2 dots later by NesBus::read_byte)
+
                 if self.scanline == 241 && self.cycle == 1 {
                     self.vbl_suppressed = true;
                 }
@@ -877,6 +1471,10 @@ impl NesPPU {
                 res
             }
             4 => {
+                if self.rendering_enabled() && (self.scanline < 240 || self.scanline == 261) {
+                    // during rendering $2004 shows the sprite pipeline's internal latch
+                    return (self.oam_buffer, 0xFF);
+                }
                 let mut value = self.oam[self.oam_addr as usize];
                 if (self.oam_addr & 0x03) == 2 {
                     value &= 0xE3; // Keeps bits 7, 6, 5, 1, 0
@@ -885,23 +1483,54 @@ impl NesPPU {
             }
             7 => { // $2007 - PPUDATA
                 let current_vram_addr = self.v_addr & 0x3FFF;
-                let mut data = self.ppu_read(mapper, current_vram_addr, self.is_bg_fetch());
-
-                if current_vram_addr < 0x3F00 {
-                    let buffered_data = self.data_buffer;
-                    self.data_buffer = data;
-                    data = buffered_data;
-                } else {
-                    self.data_buffer = self.ppu_read(mapper, current_vram_addr - 0x1000, self.is_bg_fetch());
+                // the CPU gets the buffer; the PPU refills it SM_DELAY dots later (see
+                // finish_2007_read). Palette reads come straight from palette RAM.
+                if self.sm_read_at != 0 {
+                    self.finish_2007_read(mapper);    // back-to-back reads: finish the last one
+                }
+                self.sm_read_at = self.total_ppu_cycles + SM_DELAY;
+                self.sm_addr = current_vram_addr;
+                let mut data = self.data_buffer;
+                if current_vram_addr >= 0x3F00 {
+                    data = self.ppu_read(mapper, current_vram_addr, false);
+                    if self.mask & 0x01 != 0 {
+                        data &= 0x30;       // greyscale applies to palette reads too
+                    }
                     data = (data & 0x3F) | (open_bus & 0xC0);
                 }
-                self.increment_vram_address();
-//                self.v_addr = self.v_addr.wrapping_add(self.vram_increment as u16) & 0x3FFF;
-                mapper.update_a12(self.v_addr, self.total_ppu_cycles);
                 data
             }
             _ => open_bus
+        };
+        (v, defined)
+    }
+
+    /// The read half of the $2007 state machine, then v's increment. While rendering, the PPU is already
+    /// reading something on every other dot: if that's this dot, the buffer gets the
+    /// rendering read's value. If this dot is a rendering ALE dot, ALE and Read collide:
+    /// the octal latch keeps the data bus value and the read goes to (ALE high bits |
+    /// latch), which the next rendering read then uses as well (AccuracyCoin "ALE + Read").
+    /// Otherwise it reads v (palette addresses read the nametable underneath).
+    fn finish_2007_read(&mut self, mapper: &mut dyn Mapper) {
+        self.sm_read_at = 0;
+        let rendering = self.rendering_enabled() && (self.scanline < 240 || self.scanline == 261);
+        let now = self.total_ppu_cycles;
+        if rendering && self.render_read_dot == now {
+            self.data_buffer = self.render_read;
+        } else if rendering && self.ale_dot == now {
+            self.octal = self.render_read;
+            let addr = self.bus_addr(self.ale_addr);
+            let b = self.ppu_read(mapper, addr & 0x3FFF, self.is_bg_fetch());
+            self.data_buffer = self.bus_record(b);
+        } else {
+            let mut addr = self.sm_addr;
+            if addr >= 0x3F00 { addr -= 0x1000; }
+            self.data_buffer = self.ppu_read(mapper, addr, self.is_bg_fetch());
         }
+        // v increments at the end of the state machine (during rendering: the coarse X / Y
+        // glitch increments)
+        self.increment_vram_address();
+        self.drive_a12_from_v(mapper, self.v_addr);
     }
 
     fn increment_vram_address(&mut self) {
@@ -914,8 +1543,7 @@ impl NesPPU {
         }
     }
     pub fn cpu_write_reg(&mut self, mapper: &mut dyn crate::nes::mappers::Mapper, reg: u16, value: u8) {
-//        self.decay_timer_upper = 89342;
-//        self.decay_timer_lower = 89342;
+        self.io_refresh(value, 0xFF);   // any PPU register write sets the whole latch
         if self.scanline < 240 && self.cycle > 0 && self.cycle < 256 {
             if reg == 0 || reg == 1 || reg == 5 || reg == 6 {
                 self.mid_scanline_write = true;
@@ -936,13 +1564,23 @@ impl NesPPU {
             }
             1 => { // $2001 - PPUMASK
                 self.mask = value;
+                if RENDER_DELAY == 0 {
+                    self.apply_render_on();
+                } else {
+                    self.render_delay = RENDER_DELAY;
+                }
             }
             3 => { // $2003 - OAMADDR
                 self.oam_addr = value;
             }
             4 => { // $2004 - OAMDATA
-                self.oam[self.oam_addr as usize] = value;
-                self.oam_addr = self.oam_addr.wrapping_add(1);
+                if self.rendering_enabled() && (self.scanline < 240 || self.scanline == 261) {
+                    // no write during rendering, just a glitchy +4 of OAMADDR (low bits cleared)
+                    self.oam_addr = self.oam_addr.wrapping_add(4) & 0xFC;
+                } else {
+                    self.oam[self.oam_addr as usize] = value;
+                    self.oam_addr = self.oam_addr.wrapping_add(1);
+                }
             }
             5 => { // $2005 - PPUSCROLL
                 if self.w_latch == false {
@@ -979,10 +1617,12 @@ impl NesPPU {
                     }
                     // Second write: Low byte of destination target address
                     self.t_addr = (self.t_addr & 0xFF00) | (value as u16);
-                    self.v_addr = self.t_addr; // Latch copies address into current VRAM target
+                    // t is copied to v a few dots later (step_one_cycle); a nametable
+                    // fetch whose ALE came before and read after that gets the new high
+                    // bits with the old low byte (AccuracyCoin "Hybrid Addresses")
                     self.w_latch = false;
-//                    mapper.notify_vram_address(v & 0x3FFF, frame_cycle)
-                    mapper.update_a12(self.t_addr & 0x3FFF, self.total_ppu_cycles);
+                    self.v_update_delay = V_UPDATE_DELAY;
+                    let _ = old_v;
                 }
             }
             7 => { // $2007 - PPUDATA
@@ -993,7 +1633,7 @@ impl NesPPU {
 //                self.v_addr = self.v_addr.wrapping_add(self.vram_increment as u16) & 0x3FFF;
 //                mapper.notify_vram_address(v & 0x3FFF, frame_cycle)
                 self.increment_vram_address();
-                mapper.update_a12(self.v_addr, self.total_ppu_cycles);
+                self.drive_a12_from_v(mapper, self.v_addr);
             }
             _ => {}
         }
@@ -1007,5 +1647,29 @@ impl NesPPU {
         let nmi_occurred = (self.status & 0x80) != 0;
         let nmi_output = (self.ctrl & 0x80) != 0;
         nmi_occurred && nmi_output
+    }
+}
+#[cfg(test)]
+mod zapper_tests {
+    use super::*;
+
+    #[test]
+    fn zapper_sees_bright_pixel_for_a_while_after_the_beam() {
+        let mut ppu = NesPPU::new(Arc::new(AtomicBool::new(false)));
+        let i = (100 * 256 + 50) * 4;
+        ppu.back_buffer[i..i + 3].copy_from_slice(&[255, 255, 255]);
+        ppu.scanline = 99; ppu.cycle = 200;
+        assert!(!ppu.zapper_sees_light(50, 100), "beam hasn't drawn it yet");
+        ppu.scanline = 100; ppu.cycle = 40;
+        assert!(!ppu.zapper_sees_light(50, 100), "same line, before the pixel");
+        ppu.scanline = 100; ppu.cycle = 60;
+        assert!(ppu.zapper_sees_light(50, 100));
+        ppu.scanline = 118;
+        assert!(ppu.zapper_sees_light(50, 100));
+        ppu.scanline = 125;
+        assert!(!ppu.zapper_sees_light(50, 100), "photodiode has decayed");
+        ppu.scanline = 105;
+        assert!(!ppu.zapper_sees_light(51, 100), "dark pixel next to it");
+        assert!(!ppu.zapper_sees_light(-1, -1), "off screen");
     }
 }

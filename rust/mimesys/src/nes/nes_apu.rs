@@ -22,11 +22,22 @@ const NOISE_PERIOD_TABLE: [u16; 16] = [
 ];
 
 // NTSC DMC rate table: CPU cycles between output level changes
+/// APU parity (even_cycle after the toggle) on which a pending $4015-read IRQ clear lands
+const IRQ_CLEAR_PARITY: bool = true;
+
+/// The DMC timer reloads one cycle after it expires (so a $4010 write on the expiring
+/// cycle sets the new period) - AccuracyCoin "DMC Reload Timing"
+const DMC_RELOAD_LATE: bool = true;
+
 const DMC_RATE_TABLE: [u16; 16] = [
     428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54
 ];
 
 pub struct NesAPU {
+    /// last value written to $4017 (rewritten on reset)
+    last_4017: u8,
+    /// a $4015 read clears the frame IRQ flag at the next put->get transition
+    irq_clear_pending: bool,
     frame_counter: u32,
     mode_5_step: bool,
     irq_inhibit: bool,
@@ -107,7 +118,16 @@ pub struct NesAPU {
     dmc_silence_flag: bool,
     dmc_enabled: bool,           // from $4015 bit 4
     dmc_interrupt_flag: bool,
-    pub dmc_dma_request: bool,       // set when a byte needs fetching; bus/CPU should service it
+    pub dmc_dma_request: bool,       // unused (kept for save-state layout)
+    /// $4015 enable: the load DMA is requested 2-3 cycles after the write
+    dmc_transfer_start_delay: u8,
+    /// $4015 disable: takes effect 2-3 cycles after the write (and aborts a DMA in flight)
+    dmc_disable_delay: u8,
+    /// requests to the bus's DMA unit, raised during step_one_cycle / dmc_dma_complete
+    pub dmc_start_event: bool,
+    pub dmc_stop_event: bool,
+    /// the timer expired this cycle: its reload picks up a $4010 write made in this same cycle
+    dmc_reload_pending: bool,
 
     // Envelopes
     p1_env_volume: u8,
@@ -250,7 +270,10 @@ pub struct ApuState {
 
 impl NesAPU {
     pub fn new() -> Self {
-        Self { 
+        Self {
+            last_4017: 0, irq_clear_pending: false,
+            dmc_transfer_start_delay: 0, dmc_disable_delay: 0, dmc_start_event: false, dmc_stop_event: false,
+            dmc_reload_pending: false,
             frame_counter: 0, 
             mode_5_step: false, 
             irq_inhibit: false, 
@@ -321,7 +344,7 @@ impl NesAPU {
             dmc_bytes_remaining: 0,
             dmc_sample_buffer: None,
             dmc_shift_register: 0,
-            dmc_bits_remaining: 0,
+            dmc_bits_remaining: 8,
             dmc_silence_flag: true,
             dmc_enabled: false,
             dmc_interrupt_flag: false,
@@ -696,25 +719,30 @@ impl NesAPU {
                 // output level - that holds its last value, per hardware).
                 // Writing 1 only (re)starts the sample if bytes_remaining is 0;
                 // if a sample is already playing, it is NOT restarted.
+                // Both directions take effect after a short delay (2 or 3 cycles by APU
+                // parity): a disable aborts a DMA that hasn't got going yet, an enable with
+                // an empty sample restarts it and requests the first byte ("load DMA").
                 self.dmc_enabled = dmc_enable;
+                let odd = self.total_apu_cycles % 2 == 1;
                 if !dmc_enable {
-                    self.dmc_bytes_remaining = 0;
-                    self.dmc_dma_request = false;
+                    if self.dmc_disable_delay == 0 {
+                        self.dmc_disable_delay = if odd { 2 } else { 3 };
+                    }
                 } else if self.dmc_bytes_remaining == 0 {
-                    self.dmc_current_addr = 0xC000 + (self.dmc_sample_addr_reg as u16 * 64);
-                    self.dmc_bytes_remaining = (self.dmc_sample_length_reg as u16 * 16) + 1;
-//                    self.dmc_silence_flag = false;
+                    self.dmc_init_sample();
+                    self.dmc_transfer_start_delay = if odd { 2 } else { 3 };
                 }
             }
 
             // Frame Counter Mode
             0x4017 => {
+                self.last_4017 = data;
                 self.mode_5_step = (data & 0x80) != 0;
                 self.irq_inhibit = (data & 0x40) != 0;
                 if self.irq_inhibit {
                     self.frame_irq_flag = false;
                 }
-                let delay = if self.total_apu_cycles % 2 == 0 { 3 } else { 4 };
+                let delay = if self.total_apu_cycles % 2 == 0 { 4 } else { 3 };
                 self.frame_counter_reset_delay = delay;
                 if self.mode_5_step {
                     self.frame_counter_clock_immediately = true;
@@ -758,11 +786,22 @@ impl NesAPU {
         if self.frame_irq_flag { status |= 0x40; }
         if self.dmc_interrupt_flag { status |= 0x80; }
         
-        // Reading $4015 acknowledges and clears the Frame Counter IRQ flag!
-        self.frame_irq_flag = false;
+        // Reading $4015 acknowledges the frame IRQ, but the flag only actually clears at
+        // the next put -> get APU transition (see step_one_cycle)
+        self.irq_clear_pending = true;
         // Note: reading $4015 does NOT clear the DMC IRQ flag (it's cleared by
         // disabling the channel via $4015 write, or by $4010 clearing IRQ enable).
         status
+    }
+
+    /// Console reset: $4015 is cleared (all channels off) and the last $4017 value is
+    /// written again; the frame IRQ flag is cleared.
+    pub fn reset(&mut self) {
+        self.write_reg(0x4015, 0);
+        let v = self.last_4017;
+        self.write_reg(0x4017, v);
+        self.frame_irq_flag = false;
+        self.irq_clear_pending = false;
     }
 
     pub fn is_irq_asserted(&self) -> bool {
@@ -783,14 +822,18 @@ impl NesAPU {
 
     pub fn step_one_cycle(&mut self) {
         self.total_apu_cycles += 1;
-        self.even_cycle = !self.even_cycle;        
+        self.even_cycle = !self.even_cycle;
+        if self.irq_clear_pending && self.even_cycle == IRQ_CLEAR_PARITY {
+            self.irq_clear_pending = false;
+            self.frame_irq_flag = false;
+        }
         // Handle a pending $4017 write's delayed reset first — this needs to
         // resolve before anything else this cycle touches frame_counter.
         let just_reset = self.tick_frame_counter_reset_delay();
         self.tick_pulse_timers();
         self.tick_triangle_timer();
         self.tick_noise_timer();
-        self.tick_dmc_memory_reader();
+        self.tick_dmc_delays();
         self.tick_dmc_output_unit();
 
         let (tri_output, n_output) = self.mix_digital_outputs();
@@ -857,7 +900,9 @@ impl NesAPU {
     fn tick_triangle_timer(&mut self) {
         if self.tri_timer == 0 {
             self.tri_timer = self.tri_timer_reload;
-            if self.tri_length_counter > 0 && self.tri_linear_counter > 0 {
+            // timer < 2 is ultrasonic: games use it to "silence" the triangle; holding the step
+            // avoids the aliasing pop/whine (the real DAC output is filtered away anyway)
+            if self.tri_length_counter > 0 && self.tri_linear_counter > 0 && self.tri_timer_reload >= 2 {
                 self.tri_sequence_step = (self.tri_sequence_step + 1) & 31;
             }
         } else {
@@ -876,38 +921,82 @@ impl NesAPU {
         }
     }
 
-    fn tick_dmc_memory_reader(&mut self) {
-        if self.dmc_sample_buffer.is_some() || self.dmc_bytes_remaining == 0 { return; }
-        if self.dmc_dma_request { return; }
-        self.dmc_dma_request = true;
+    fn dmc_init_sample(&mut self) {
+        self.dmc_current_addr = 0xC000 + (self.dmc_sample_addr_reg as u16 * 64);
+        self.dmc_bytes_remaining = (self.dmc_sample_length_reg as u16 * 16) + 1;
     }
 
-    pub fn dmc_dma_address(&self) -> u16 { self.dmc_current_addr }
+    /// Ask the DMA unit for the next sample byte, if the buffer is empty and bytes remain.
+    fn dmc_start_transfer(&mut self) {
+        if self.dmc_sample_buffer.is_none() && self.dmc_bytes_remaining > 0 {
+            self.dmc_start_event = true;
+        }
+    }
 
-    pub fn dmc_dma_complete(&mut self, byte: u8) {
-        self.dmc_dma_request = false;
-        if self.dmc_bytes_remaining == 0 { return; }
-        self.dmc_sample_buffer = Some(byte);
-        self.dmc_current_addr = if self.dmc_current_addr == 0xFFFF { 0x8000 }
-                                else { self.dmc_current_addr + 1 };
-        self.dmc_bytes_remaining -= 1;
-        if self.dmc_bytes_remaining == 0 {
-            if self.dmc_loop {
-                self.dmc_current_addr = 0xC000 + (self.dmc_sample_addr_reg as u16 * 64);
-                self.dmc_bytes_remaining = (self.dmc_sample_length_reg as u16 * 16) + 1;
-            } else {
-//                self.dmc_silence_flag = true;
-                if self.dmc_irq_enabled { self.dmc_interrupt_flag = true; }
+    /// The delayed effects of a $4015 write.
+    fn tick_dmc_delays(&mut self) {
+        if self.dmc_disable_delay > 0 {
+            self.dmc_disable_delay -= 1;
+            if self.dmc_disable_delay == 0 {
+                self.dmc_bytes_remaining = 0;
+                self.dmc_stop_event = true;     // abort a DMA that hasn't fetched yet
+            }
+        }
+        if self.dmc_transfer_start_delay > 0 {
+            self.dmc_transfer_start_delay -= 1;
+            if self.dmc_transfer_start_delay == 0 {
+                self.dmc_start_transfer();
             }
         }
     }
 
+    pub fn dmc_dma_address(&self) -> u16 { self.dmc_current_addr }
+
+    /// The DMA unit fetched a sample byte.
+    pub fn dmc_dma_complete(&mut self, byte: u8) {
+        self.dmc_dma_request = false;
+        if self.dmc_bytes_remaining > 0 {
+            self.dmc_sample_buffer = Some(byte);
+            self.dmc_current_addr = if self.dmc_current_addr == 0xFFFF { 0x8000 }
+                                    else { self.dmc_current_addr + 1 };
+            self.dmc_bytes_remaining -= 1;
+            if self.dmc_bytes_remaining == 0 {
+                if self.dmc_loop {
+                    self.dmc_init_sample();     // a looping sample never raises the IRQ
+                } else if self.dmc_irq_enabled {
+                    self.dmc_interrupt_flag = true;
+                }
+            }
+        }
+        // 1-byte samples: when the fetch ends on the APU cycle before the bit counter
+        // reloads, the sample restarts and a DMA is requested then aborted a cycle later
+        // (one halted CPU cycle). ("Implicit DMA abort")
+        if self.dmc_sample_length_reg == 0 && !self.dmc_loop
+            && self.dmc_bits_remaining == 1 && !self.dmc_reload_pending && self.dmc_timer < 2 {
+            if let Some(b) = self.dmc_sample_buffer {
+                self.dmc_shift_register = b;
+            }
+            self.dmc_init_sample();
+            self.dmc_disable_delay = 3;
+        }
+    }
+
     fn tick_dmc_output_unit(&mut self) {
+        if self.dmc_reload_pending {
+            // the reload happened last cycle, with the rate as of the end of that cycle
+            self.dmc_reload_pending = false;
+            self.dmc_timer = DMC_RATE_TABLE[self.dmc_rate_index as usize] - 2;   // incl. this cycle
+            return;
+        }
         if self.dmc_timer != 0 {
             self.dmc_timer -= 1;
             return;
         }
-        self.dmc_timer = DMC_RATE_TABLE[self.dmc_rate_index as usize] - 1;
+        if DMC_RELOAD_LATE {
+            self.dmc_reload_pending = true;
+        } else {
+            self.dmc_timer = DMC_RATE_TABLE[self.dmc_rate_index as usize] - 1;
+        }
 
         if !self.dmc_silence_flag {
             if (self.dmc_shift_register & 1) == 1 {
@@ -918,14 +1007,16 @@ impl NesAPU {
         }
         self.dmc_shift_register >>= 1;
 
-        if self.dmc_bits_remaining > 0 {
-            self.dmc_bits_remaining -= 1;
-        }
+        self.dmc_bits_remaining = self.dmc_bits_remaining.saturating_sub(1);
         if self.dmc_bits_remaining == 0 {
             self.dmc_bits_remaining = 8;
             if let Some(byte) = self.dmc_sample_buffer.take() {
                 self.dmc_silence_flag = false;
                 self.dmc_shift_register = byte;
+                // a load DMA from a $4015 write is still pending: don't request twice
+                if self.dmc_transfer_start_delay == 0 {
+                    self.dmc_start_transfer();
+                }
             } else {
                 self.dmc_silence_flag = true;
             }
@@ -1048,10 +1139,9 @@ impl NesAPU {
 //        let tri_output = if self.tri_length_counter > 0 && self.tri_linear_counter > 0 {
 //            TRI_SEQUENCE[self.tri_sequence_step as usize] as f32
 //        } else { 0.0 };
+        // (the sequencer only moves in tick_triangle_timer: stepping it here as well ran the
+        // triangle at CPU rate, ~56 kHz, which aliased into a high-pitched whine)
         let tri_output = TRI_SEQUENCE[self.tri_sequence_step as usize] as f32;
-        if self.tri_length_counter > 0 && self.tri_linear_counter > 0 && self.tri_timer_reload >= 2 {
-            self.tri_sequence_step = (self.tri_sequence_step + 1) & 31;
-        }
 
         let n_output = if self.noise_length_counter > 0 && (self.n_shift_register & 1) == 0 {
             let vol = if self.n_constant_volume { self.n_volume } else { self.n_env_volume };
@@ -1069,47 +1159,35 @@ impl NesAPU {
         let mut env_clock = false;
         let mut len_clock = false;
 
+    // nesdev "APU Frame Counter", in CPU cycles since the counter was reset:
+    //   4-step: 7457 Q, 14913 Q+H, 22371 Q, 29828 IRQ, 29829 Q+H+IRQ, 29830 IRQ (+ wrap)
+    //   5-step: 7457 Q, 14913 Q+H, 22371 Q, 29829 -, 37281 Q+H, 37282 wrap
+    // (Q = envelopes + triangle linear counter, H = length counters + sweeps)
     if !self.mode_5_step {
         match self.frame_counter {
-            7457 | 22371 => {
-                env_clock = true;
-            }
-            14913 => {
-                env_clock = true;
-                len_clock = true;
-            }
-            29828 => {
-                env_clock = true;
-                len_clock = true;
-                if !self.irq_inhibit {
-                    self.frame_irq_flag = true;
-                }
-            }
-            _ => {
-                if self.frame_counter >= 29830 {
-                    self.frame_counter = 0;
-                }
-            }
+            7457 | 22371 => env_clock = true,
+            14913 | 29829 => { env_clock = true; len_clock = true; }
+            _ => {}
+        }
+        // The flag is set on 29828-29830. With IRQs inhibited it still shows up in $4015 on
+        // 29828 and 29829 and is cleared again on 29830; the IRQ line stays masked anyway
+        // (is_irq_asserted). AccuracyCoin "Frame Counter IRQ" J-L.
+        match self.frame_counter {
+            29828 | 29829 => self.frame_irq_flag = true,
+            29830 => self.frame_irq_flag = !self.irq_inhibit,
+            _ => {}
+        }
+        if self.frame_counter >= 29830 {
+            self.frame_counter = 0;
         }
     } else {
         match self.frame_counter {
-            7457 | 22371 => {
-                env_clock = true;
-            }
-            14913 => {
-                env_clock = true;
-                len_clock = true;
-            }
-            37281 => {
-                env_clock = true;
-                len_clock = true;
-                self.frame_counter = 0;
-            }
-            _ => {
-                if self.frame_counter > 37281 {
-                    self.frame_counter = 0;
-                }
-            }
+            7457 | 22371 => env_clock = true,
+            14913 | 37281 => { env_clock = true; len_clock = true; }
+            _ => {}
+        }
+        if self.frame_counter >= 37282 {
+            self.frame_counter = 0;
         }
     }
 
@@ -1161,4 +1239,28 @@ fn high_pass(state: &mut (f32, f32), x: f32, a: f32) -> f32 {
         self.audio_buffer.push(pulse_out + tnd_out);   // ~0.0..1.0
     }
 */
+}
+#[cfg(test)]
+mod tone_tests {
+    use super::*;
+    /// Play one note on a channel for ~1 s and dump the 44.1 kHz output to $APU_TONE_OUT/<name>.f32
+    fn render(name: &str, regs: &[(u16, u8)]) {
+        let Ok(dir) = std::env::var("APU_TONE_OUT") else { return };
+        let mut apu = NesAPU::new();
+        apu.write_reg(0x4017, 0x40);
+        for &(a, v) in regs { apu.write_reg(a, v); }
+        for _ in 0..1_789_773 { apu.step_one_cycle(); }
+        let pcm: Vec<u8> = apu.take_audio_samples().iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(format!("{dir}/{name}.f32"), pcm).unwrap();
+    }
+    #[test]
+    #[ignore]
+    fn apu_tones() {
+        // triangle ~220 Hz: f = 1789773 / (32 * (t + 1)), t = 253; linear counter "infinite"
+        render("triangle", &[(0x4015, 0x04), (0x4008, 0xFF), (0x400A, 0xFD), (0x400B, 0x08)]);
+        // pulse 1 ~440 Hz, 50% duty, constant volume 8: t = 1789773 / (16 * 440) - 1 = 253
+        render("pulse", &[(0x4015, 0x01), (0x4000, 0xB8), (0x4001, 0x00), (0x4002, 0xFD), (0x4003, 0x08)]);
+        // silence
+        render("silence", &[]);
+    }
 }

@@ -157,6 +157,8 @@ impl Bus for KonamiBus {
     }
 }
 
+pub type KonamiState = (crate::common::cpu::z80::Z80State, Vec<u8>, [Ay8910; 2], u8, u64, bool, u8, i64);
+
 pub struct KonamiSound {
     board: KonamiBoard,
     cpu: Z80Cpu,
@@ -187,6 +189,29 @@ impl KonamiSound {
         };
         s.set_gain(false);
         s
+    }
+
+    /// Save state: CPU, RAM, both AYs, latches.
+    pub fn save(&self) -> impl serde::Serialize + '_ {
+        (self.cpu.save_state(), &self.bus.ram, &self.bus.ay, self.bus.latch, self.bus.total_cycles,
+         self.irq_pending, self.control, self.cycle_debt)
+    }
+
+    pub fn load(&mut self, s: KonamiState) -> Result<(), String> {
+        let (cpu, ram, mut ay, latch, total_cycles, irq_pending, control, cycle_debt) = s;
+        if ram.len() != self.bus.ram.len() { return Err("sound RAM size mismatch".into()); }
+        self.cpu.load_state(&cpu);
+        self.bus.ram = ram;
+        for (new, old) in ay.iter_mut().zip(self.bus.ay.iter_mut()) {
+            new.out = std::mem::take(&mut old.out);
+        }
+        self.bus.ay = ay;
+        self.bus.latch = latch;
+        self.bus.total_cycles = total_cycles;
+        self.irq_pending = irq_pending;
+        self.control = control;
+        self.cycle_debt = cycle_debt;
+        Ok(())
     }
 
     /// Two chips share the output, so each gets less headroom.

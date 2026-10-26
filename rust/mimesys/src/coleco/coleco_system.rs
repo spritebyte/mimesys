@@ -127,6 +127,14 @@ impl System for ColecoSystem {
             fire_right: on(pad::B),
             key,
         };
+        let p2 = pad::player2(mask);
+        let on2 = |b: u32| p2 & b != 0;
+        self.bus.pads[1] = Pad {
+            up: on2(pad::UP), down: on2(pad::DOWN), left: on2(pad::LEFT), right: on2(pad::RIGHT),
+            fire_left: on2(pad::A),
+            fire_right: on2(pad::B),
+            key: None,
+        };
     }
 
     fn drain_audio(&mut self) -> Vec<f32> { std::mem::take(&mut self.bus.psg.out) }

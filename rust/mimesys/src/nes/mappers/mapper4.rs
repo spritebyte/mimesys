@@ -69,7 +69,11 @@ impl Mapper4 {
     pub fn new(_prg_banks: usize, chr_banks: usize, prg_rom: Vec<u8>, chr_rom: Vec<u8>, initial_mirroring: Mirroring, four_screen_bit: bool, mapper_id: u8, _submapper: u8) -> Self {
         let prg_ram = vec![0; 8192];
         let chr_ram = if chr_banks == 0 { vec![0; 8192] } else { vec![] };
-        let variant = if mapper_id == 118 { Mmc3Revision::Tlsrom } else { Mmc3Revision::RevB };
+        // NES 2.0 submapper 4 = MMC3A (old IRQ behaviour: reloading to 0 doesn't fire);
+        // a plain iNES header gets MMC3B/C, which is what almost every game has.
+        let variant = if mapper_id == 118 { Mmc3Revision::Tlsrom }
+                      else if _submapper == 4 { Mmc3Revision::RevA }
+                      else { Mmc3Revision::RevB };
         // Robustly determine the actual number of 8KB PRG banks from the ROM size.
         let prg_banks_8kb = prg_rom.len() / 8192;
 
@@ -202,7 +206,8 @@ fn recalculate_banks(&mut self) {
             let elapsed = ppu_cycles - self.debug_frame_start_cycle;
         }
         let current_counter = self.irq_counter.get();
-        let is_reload = current_counter == 0 || self.irq_reload_flag.get();
+        let forced_reload = self.irq_reload_flag.get();     // $C001 was written
+        let is_reload = current_counter == 0 || forced_reload;
 
         if is_reload {
             self.irq_counter.set(self.irq_latch.get());
@@ -215,7 +220,8 @@ fn recalculate_banks(&mut self) {
         match self.revision {
             Mmc3Revision::RevA => {
                 // Rev A: Only trigger IRQ if we decremented to 0. Reloading with 0 does NOT trigger IRQ.
-                if !is_reload && self.irq_counter.get() == 0 && self.irq_enabled.get() {
+                // ...but a reload forced by $C001 does.
+                if (!is_reload || forced_reload) && self.irq_counter.get() == 0 && self.irq_enabled.get() {
                     self.irq_active.set(true);
                 }
             }
@@ -439,6 +445,8 @@ impl Mapper for Mapper4 {
         }
         self.last_a12_state = current_a12;
     }
+    fn debug_irq_counter(&self) -> Option<u8> { Some(self.irq_counter.get()) }
+
     fn notify_frame_start(&mut self) {
         self.debug_frame += 1;
         self.debug_frame_started = true;   // capture the cycle on the next A12 call

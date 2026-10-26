@@ -8,6 +8,8 @@ pub struct FdsMapper {
 }
 
 impl Mapper for FdsMapper {
+    fn cpu_read_bus(&self, addr: u16, _open_bus: u8) -> u8 { self.cpu_read(addr) }
+
     fn read_prg(&self, addr: u16) -> u8 {
         match addr {
             0x6000..=0xEFFF => self.prg_ram[(addr - 0x6000) as usize], // Read from volatile RAM

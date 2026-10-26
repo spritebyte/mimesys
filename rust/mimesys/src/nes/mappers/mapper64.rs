@@ -1,13 +1,7 @@
 use crate::nes::mappers::{Mapper, Mirroring};
 use serde::{Serialize, Deserialize};
 use std::cell::Cell;
-/*
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mmc3Revision {
-    RevA,
-    RevB,
-}
-*/
+
 // Mapper 64 (Rambo-1)
 pub struct Mapper64 {
     prg_banks: usize, // Stored as count of 8KB banks
@@ -23,6 +17,7 @@ pub struct Mapper64 {
     cpu_cycle_prescaler: u32,
     irq_mode: u8, // 0 = Scanline, 1 = CPU Cycle
     ppu_a12_filter: u8,
+    a12_low_since: u64,
     // Scanline IRQ counter fields wrapped in Cell for interior mutability
     last_a12: Cell<u8>,
     a12_low_counter: Cell<u32>,
@@ -93,6 +88,7 @@ impl Mapper64 {
             irq_mode: 0,
             cpu_cycle_prescaler: 0,
             ppu_a12_filter: 0,
+            a12_low_since: 0,
             irq_latch: Cell::new(0),
             a12_low_counter: Cell::new(0),
             irq_counter: Cell::new(0),
@@ -128,10 +124,13 @@ impl Mapper64 {
             self.prg_offsets[1] = self.bank_registers[7] * 0x2000;   // $A000
             self.prg_offsets[2] = self.bank_registers[0xF] * 0x2000; // $C000
         } else {
-            self.prg_offsets[0] = second_last * 0x2000; // $8000
+            // RAMBO-1 swaps R6 and RF (no fixed second-last bank like MMC3):
+            // $8000 = RF, $A000 = R7, $C000 = R6  (nesdev RAMBO-1)
+            self.prg_offsets[0] = self.bank_registers[0xF] * 0x2000; // $8000
             self.prg_offsets[1] = self.bank_registers[7] * 0x2000;   // $A000
             self.prg_offsets[2] = self.bank_registers[6] * 0x2000;   // $C000
         }
+        let _ = second_last;
         self.prg_offsets[3] = last * 0x2000;
 
         let (r0, r1, r2, r3, r4, r5, r8, r9) = (
@@ -197,22 +196,28 @@ impl Mapper64 {
         }
     }
     
-    fn clock_irq_counter(&mut self) {
+    /// RAMBO-1 counter clock (nesdev): after a $C001 write the counter reloads from the
+    /// latch, ORed with 1 if non-zero (the "extra kick" Klax needs); otherwise it reloads
+    /// at 0 or decrements. Reaching 0 raises the IRQ `delay` CPU cycles later.
+    fn clock_irq_counter_with_delay(&mut self, delay: i8) {
+        let latch = self.irq_latch.get();
         if self.irq_reload_flag.get() {
-            let mut latch = self.irq_latch.get();
             self.irq_counter.set(if latch != 0 { latch | 1 } else { 0 });
             self.irq_reload_flag.set(false);
         } else if self.irq_counter.get() == 0 {
-            let latch = self.irq_latch.get();
-            self.irq_counter.set(if latch != 0 { latch | 1 } else { 0 });
+            self.irq_counter.set(latch);
         } else {
-//            let counter = self.irq_counter.get();
-            self.irq_counter.set(self.irq_counter.get().wrapping_sub(1));
+            self.irq_counter.set(self.irq_counter.get() - 1);
         }
 
         if self.irq_counter.get() == 0 && self.irq_enabled.get() {
-            self.irq_delay_cycles = 4; // Trigger IRQ 4 CPU cycles later
+            self.irq_delay_cycles = delay;
         }
+    }
+
+    /// Scanline mode (A12): the IRQ shows up 2 CPU cycles after the clock
+    fn clock_irq_counter(&mut self) {
+        self.clock_irq_counter_with_delay(2);
     }
 }
 
@@ -230,7 +235,7 @@ impl Mapper for Mapper64 {
             self.cpu_cycle_prescaler += cycles as u32;
             while self.cpu_cycle_prescaler >= 4 {
                 self.cpu_cycle_prescaler -= 4;
-                self.clock_irq_counter();
+                self.clock_irq_counter_with_delay(1);
             }
         }
     }
@@ -287,15 +292,13 @@ impl Mapper for Mapper64 {
         }
         else if addr >= 0xC000 && addr <= 0xDFFF {
             if (addr & 1) == 0 {
-                // $C000: IRQ Latch Register
+                // $C000: IRQ latch (reload value) only
                 self.irq_latch.set(value);
-                self.irq_reload_flag.set(true);
             } else {
                 // $C001: IRQ Mode and Reload
+                // $C001: IRQ mode; also forces a reload on the next clock
                 self.irq_mode = value & 0x01; // 0 = Scanline (A12), 1 = CPU Cycle
-                let latch = self.irq_latch.get();
-                self.irq_counter.set(if latch != 0 { latch | 1 } else { 0 });
-                self.irq_reload_flag.set(false);
+                self.irq_reload_flag.set(true);
                 self.cpu_cycle_prescaler = 0;
             }
         }
@@ -411,20 +414,21 @@ impl Mapper for Mapper64 {
         }
     }
 
-    fn update_a12(&mut self, addr: u16, _current_cycle: u64) {
+    fn debug_irq_counter(&self) -> Option<u8> { Some(self.irq_counter.get()) }
+
+    fn update_a12(&mut self, addr: u16, current_cycle: u64) {
         let current_a12 = (addr & 0x1000) != 0;
 
         if self.irq_mode == 0 {
-            // Emulating the M2 falling edge filter evaluation
+            // A12 filter (like MMC3's): a rising edge only counts after A12 was low for a
+            // while, so the brief lows between sprite fetches don't clock it. Measured in
+            // PPU dots since the PPU now reports every fetch, not one call per tile.
             if !self.last_a12_state && current_a12 {
-                if self.ppu_a12_filter >= 16 {
+                if current_cycle.saturating_sub(self.a12_low_since) > 10 {
                     self.clock_irq_counter();
                 }
-                self.ppu_a12_filter = 0;
-            } else if !current_a12 {
-                if self.ppu_a12_filter < 16 {
-                    self.ppu_a12_filter += 1;
-                }
+            } else if self.last_a12_state && !current_a12 {
+                self.a12_low_since = current_cycle;
             }
         }
         self.last_a12_state = current_a12;

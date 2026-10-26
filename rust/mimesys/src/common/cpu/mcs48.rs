@@ -22,15 +22,17 @@ const A_FLAG: u8 = 0x40;
 const F_FLAG: u8 = 0x20;
 const B_FLAG: u8 = 0x10;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 enum TimeCount { Off, Timer, Counter }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Mcs48 {
     pub a: u8,
     pub pc: u16,          // 12 bits
     pub psw: u8,          // C AC F0 BS 1 SP2 SP1 SP0 (bit 3 reads as 1)
     pub f1: bool,
     a11: u16,             // SEL MB0/MB1 -> 0x000 / 0x800 for the next JMP/CALL
+    #[serde(with = "serde_bytes")]
     pub ram: [u8; 64],    // 8035/MB8884: 64 bytes (registers, stack, scratch)
     p1: u8,
     p2: u8,

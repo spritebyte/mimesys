@@ -16,6 +16,10 @@ pub struct Mapper71 {
     chr_ram: Vec<u8>,
     current_cycle: i64,
     sram_dirty: bool,
+    /// BF9097 board (Fire Hawk): $9000-$9FFF selects one-screen mirroring and only
+    /// $C000-$FFFF switches PRG. Turned on by submapper 1 or the first $9xxx write;
+    /// otherwise (BF9093, e.g. Micro Machines) any $8000-$FFFF write switches PRG.
+    bf9097: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -24,6 +28,8 @@ pub struct Mapper71StateVariables {
     mirroring_mode: Mirroring,
     prg_ram: Vec<u8>, 
     chr_ram: Vec<u8>,
+    prg_bank: u8,
+    bf9097: bool,
 }
 
 impl Mapper71 {
@@ -46,6 +52,7 @@ impl Mapper71 {
             chr_ram,
             current_cycle: 0,
             sram_dirty: false,
+            bf9097: submapper == 1,
         }
     }
 
@@ -93,13 +100,14 @@ impl Mapper for Mapper71 {
     fn cpu_write(&mut self, addr: u16, value: u8) {
         if addr >= 0x9000 && addr <= 0x9FFF {
             // Camerica 1-Screen Mirroring (Fire Hawk)
+            self.bf9097 = true;
             let page = (value >> 4) & 1;
             self.mirroring_mode = if page == 0 {
                 Mirroring::SingleLower
             } else {
                 Mirroring::SingleUpper
             };
-        } else if addr >= 0xC000 {
+        } else if addr >= 0xC000 || (addr >= 0x8000 && !self.bf9097) {
             self.prg_bank = value % self.prg_banks;
         }
     }
@@ -154,6 +162,8 @@ impl Mapper for Mapper71 {
             mirroring_mode: self.mirroring_mode,
             prg_ram: self.prg_ram.clone(),
             chr_ram: self.chr_ram.clone(),
+            prg_bank: self.prg_bank,
+            bf9097: self.bf9097,
         };
         
         let config = bincode::config::standard().with_fixed_int_encoding();
@@ -167,6 +177,8 @@ impl Mapper for Mapper71 {
             self.mirroring_mode = variables.mirroring_mode;
             self.prg_ram = variables.prg_ram;
             self.chr_ram = variables.chr_ram;
+            self.prg_bank = variables.prg_bank;
+            self.bf9097 = variables.bf9097;
         }
     }
 }

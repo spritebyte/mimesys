@@ -2,6 +2,12 @@ use serde::{Serialize, Deserialize};
 
 pub trait Mapper {
     fn cpu_read(&self, addr: u16) -> u8;
+    /// CPU read of $4020-$FFFF as the bus sees it: nothing answers at $4020-$5FFF on most
+    /// boards, so the CPU reads open bus (the last value on the data bus). Mappers with
+    /// registers there (MMC5, FDS) override this.
+    fn cpu_read_bus(&self, addr: u16, open_bus: u8) -> u8 {
+        if addr < 0x6000 { open_bus } else { self.cpu_read(addr) }
+    }
     fn cpu_write(&mut self, addr: u16, value: u8);
     fn ppu_read(&self, addr: u16) -> u8;
     fn ppu_read_ctx(&self, addr: u16, is_bg_fetch: bool) -> u8 {
@@ -29,6 +35,11 @@ pub trait Mapper {
     fn clock_scanline(&mut self) {}
     fn notify_scanline(&mut self) {}
     fn notify_frame_start(&mut self) {}
+    /// A CPU write to a PPU register ($2000-$2007, reg = 0-7), before the PPU sees it.
+    /// MMC5 needs PPUCTRL's sprite size.
+    fn notify_ppu_write(&mut self, _reg: u16, _value: u8) {}
+    /// For the event trace: the scanline IRQ counter, if this mapper has one
+    fn debug_irq_counter(&self) -> Option<u8> { None }
     fn split_config(&self) -> Option<(bool,u8)> { None }
     fn read_split_tile(&self, _screen_x: usize, _scanline: usize) -> (u8,u8,u8) { (0,0,0) }
     fn save_state(&self) -> Vec<u8>;
@@ -112,6 +123,26 @@ pub fn make_mapper(
             println!("Mapper206 (DxROM) created");
             Ok(Box::new(super::mapper206::Mapper206::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen)))
         }
+        11 => {
+            println!("Mapper11 (Color Dreams) created");
+            Ok(Box::new(super::mapper11::Mapper11::new(prg_rom, chr_rom, initial_mirroring)))
+        }
+        21 | 22 | 23 | 25 => {
+            println!("Mapper{} (Konami VRC2/VRC4, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::vrc24::Vrc24::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        68 => {
+            println!("Mapper68 (Sunsoft-4) created");
+            Ok(Box::new(super::mapper68::Mapper68::new(prg_rom, chr_rom, initial_mirroring)))
+        }
+        87 => {
+            println!("Mapper87 (Jaleco/Konami CHR latch) created");
+            Ok(Box::new(super::mapper87::Mapper87::new(prg_rom, chr_rom, initial_mirroring)))
+        }
+        95 => {
+            println!("Mapper95 (Namcot 3425) created");
+            Ok(Box::new(super::mapper95::Mapper95::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring)))
+        }
         // Add future mappers here. The system file never has to change!
         _ => Err(format!("Mapper {} not implemented yet", mapper_id)),
     }
@@ -126,3 +157,24 @@ pub enum Mirroring {
 	FourScreen,
 }
 
+
+/// CIRAM offset ($000-$7FF, or $000-$FFF for four-screen) for a nametable address under
+/// a mirroring mode. Shared by the newer mappers.
+pub fn mirror_nt(mode: Mirroring, addr: u16) -> usize {
+    let v = (addr as usize) & 0x0FFF;
+    match mode {
+        Mirroring::Vertical => v & 0x07FF,
+        Mirroring::Horizontal => ((v >> 1) & 0x0400) | (v & 0x03FF),
+        Mirroring::SingleLower => v & 0x03FF,
+        Mirroring::SingleUpper => 0x0400 | (v & 0x03FF),
+        Mirroring::FourScreen => v,
+    }
+}
+
+/// bincode helpers for mapper save states
+pub fn encode_state<T: Serialize>(state: &T) -> Vec<u8> {
+    bincode::serde::encode_to_vec(state, bincode::config::standard().with_fixed_int_encoding()).unwrap_or_default()
+}
+pub fn decode_state<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Option<T> {
+    bincode::serde::decode_from_slice::<T, _>(bytes, bincode::config::standard().with_fixed_int_encoding()).ok().map(|(s, _)| s)
+}

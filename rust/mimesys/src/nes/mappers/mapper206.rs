@@ -214,6 +214,10 @@ impl Mapper for Mapper206 {
         let config = bincode::config::standard().with_fixed_int_encoding();
         if let Ok((variables, _bytes_read)) = bincode::serde::decode_from_slice::<Mapper206StateVariables, _>(state_bytes, config) {
             self.prg_banks = variables.prg_banks as usize;
+            self.bank_registers = variables.bank_registers;
+            self.bank_select = variables.bank_select;
+            self.prg_mode = variables.prg_mode;
+            self.chr_mode = variables.chr_mode;
             self.mirroring_mode = variables.mirroring_mode;
             self.prg_ram = variables.prg_ram;
             self.chr_ram = variables.chr_ram;

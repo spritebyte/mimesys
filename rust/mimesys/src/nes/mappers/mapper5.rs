@@ -49,6 +49,10 @@ pub struct Mapper5 {
     has_four_screen: bool,
     current_cycle: i64,
     sram_dirty: bool,
+    /// PPUCTRL bit 5 (seen through notify_ppu_write): 8x16 sprites use set A for sprites
+    /// and set B for the background; with 8x8 sprites the last-written set is used for both
+    sprite_8x16: bool,
+    last_set_b: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -130,6 +134,8 @@ impl Mapper5 {
             has_four_screen: four_screen_bit,
             current_cycle: 0,
             sram_dirty: false,
+            sprite_8x16: false,
+            last_set_b: false,
         }
     }
 
@@ -137,55 +143,34 @@ impl Mapper5 {
         self.ram_protect_1 == 0b10 && self.ram_protect_2 == 0b01
     }
 
+    /// (is_ram, 8K bank, offset). $6000 is always RAM ($5113). In the bigger modes the
+    /// whole window follows ONE register, including its ROM/RAM bit:
+    ///   mode 0: $8000-$FFFF 32K from $5117 (ROM)
+    ///   mode 1: $8000-$BFFF 16K from $5115, $C000-$FFFF 16K from $5117 (ROM)
+    ///   mode 2: $8000-$BFFF 16K from $5115, $C000 8K $5116, $E000 8K $5117 (ROM)
+    ///   mode 3: 8K each from $5114-$5117 ($E000 always ROM)
     fn resolve_prg(&self, addr: u16) -> (bool, usize, usize) {
         let offset = (addr & 0x1FFF) as usize;
-
-        let slot = match addr {
-            0x6000..=0x7FFF => 0,
-            0x8000..=0x9FFF => 1,
-            0xA000..=0xBFFF => 2,
-            0xC000..=0xDFFF => 3,
-            _ => 4,
+        if addr < 0x8000 {
+            return (true, (self.prg_regs[0] & 0x07) as usize, offset);
+        }
+        let slot = ((addr - 0x8000) / 0x2000) as usize;          // 0-3 for $8000/$A000/$C000/$E000
+        let (reg, size_8k, rom_only) = match (self.prg_mode, slot) {
+            (0, _) => (4, 4, true),
+            (1, 0 | 1) => (2, 2, false),
+            (1, _) => (4, 2, true),
+            (2, 0 | 1) => (2, 2, false),
+            (2, 2) => (3, 1, false),
+            (2, _) => (4, 1, true),
+            (_, 3) => (4, 1, true),
+            (_, s) => (s + 1, 1, false),
         };
-
-        let reg_val = self.prg_regs[slot];
-
-        let is_ram = if slot == 0 {
-            true
-        } else if slot == 4 {
-            false
-        } else {
-            (reg_val & 0x80) == 0
-        };
-
-        let bank: usize = match self.prg_mode {
-            0 => {
-                let base = (self.prg_regs[4] & 0x7C) as usize;
-                let slot_offset = if slot > 0 { slot - 1 } else { 0 };
-                base + slot_offset
-            }
-            1 => {
-                if slot <= 2 {
-                    let base = (self.prg_regs[2] & 0x7E) as usize;
-                    base + if slot > 0 { slot - 1 } else { 0 }
-                } else {
-                    let base = (self.prg_regs[4] & 0x7E) as usize;
-                    base + if slot > 0 { slot - 3 } else { 0 }
-                }
-            }
-            2 => {
-                if slot <= 2 {
-                    let base = (self.prg_regs[2] & 0x7E) as usize;
-                    base + (slot - 1)
-                } else {
-                    (self.prg_regs[slot] & 0x7F) as usize
-                }
-            }
-            3 => (reg_val & 0x7F) as usize,
-            _ => unreachable!(),
-        };
-
-        (is_ram, bank, offset)
+        let v = self.prg_regs[reg];
+        let is_ram = !rom_only && v & 0x80 == 0;
+        let first = slot - slot % size_8k;                       // first 8K slot of this window
+        let bank = (v & 0x7F) as usize & !(size_8k - 1);
+        let bank = bank + (slot - first);
+        if is_ram { (true, bank & 0x07, offset) } else { (false, bank, offset) }
     }
 
     fn read_prg(&self, addr: u16) -> u8 {
@@ -200,18 +185,21 @@ impl Mapper5 {
         }
     }
 
+    /// CHR bank lookup honouring the bank size ($5101: 0 = 8K, 1 = 4K, 2 = 2K, 3 = 1K).
+    /// Set A ($5120-$5127) maps the whole 8K with the last register of each window;
+    /// set B ($5128-$512B) is 4K wide and repeats for $1000-$1FFF.
     fn read_chr(&self, addr: u16, is_bg_fetch: bool) -> u8 {
-        let local = (addr & 0x03FF) as usize;
-
-        let bank: u16 = if is_bg_fetch {
-            let slot = ((addr / 0x0400) as usize) % 4;
-            self.chr_regs_b[slot] | (self.chr_upper_bits << 8)
-        } else {
-            let slot = ((addr / 0x0400) as usize) % 8;
-            self.chr_regs_a[slot] | (self.chr_upper_bits << 8)
+        let a = (addr & 0x1FFF) as usize;
+        let use_b = if self.sprite_8x16 { is_bg_fetch } else { self.last_set_b };
+        let (size, reg) = match self.chr_mode {
+            0 => (0x2000, if use_b { self.chr_regs_b[3] } else { self.chr_regs_a[7] }),
+            1 => (0x1000, if use_b { self.chr_regs_b[3] } else { self.chr_regs_a[3 + 4 * (a / 0x1000)] }),
+            2 => (0x0800, if use_b { self.chr_regs_b[1 + 2 * ((a / 0x800) & 1)] }
+                          else { self.chr_regs_a[1 + 2 * (a / 0x800)] }),
+            _ => (0x0400, if use_b { self.chr_regs_b[(a / 0x400) & 3] } else { self.chr_regs_a[a / 0x400] }),
         };
-
-        self.chr_fetch(addr, (bank as usize * 0x0400) + local, is_bg_fetch)
+        let bank = (reg | (self.chr_upper_bits << 8)) as usize;
+        self.chr_fetch(addr, bank * size + (a & (size - 1)), is_bg_fetch)
     }
 
     fn chr_fetch(&self, raw_addr: u16, addr: usize, is_bg_fetch: bool) -> u8 {
@@ -246,7 +234,7 @@ impl Mapper5 {
         match mode {
             0 => ppu_vram[offset & 0x0FFF],
             1 => ppu_vram[(0x0400 + offset) & 0x0FFF],
-            2 => self.ex_ram[offset & 0x03FF],
+            2 => if self.exram_mode <= 1 { self.ex_ram[offset & 0x03FF] } else { 0 },
             3 => {
                 if offset < 0x03C0 { self.fill_tile } else { self.fill_attr }
             }
@@ -254,23 +242,17 @@ impl Mapper5 {
         }
     }
 
-fn maybe_latch_exram(&self, addr: u16) {
-    if self.exram_mode == 1 {
-        // 1. Find which nametable (0 to 3) the address belongs to
-        let nt_index = ((addr - 0x2000) / 0x0400) as usize % 4;
-        
-        // 2. Check the MMC5's current nametable mapping mode
-        let mode = self.nt_map[nt_index];
-        
-        // 3. We ONLY latch if the current nametable is mapped to ExRAM (mode 2)
-        if mode == 2 {
+    /// ExRAM mode 1 (extended attributes): every nametable tile fetch also reads ExRAM at
+    /// the same offset; that byte gives this tile's 4K CHR bank (bits 0-5) and palette
+    /// (bits 6-7). Independent of where the nametable itself is mapped.
+    fn maybe_latch_exram(&self, addr: u16) {
+        if self.exram_mode == 1 {
             let offset = (addr & 0x03FF) as usize;
             if offset < 0x03C0 {
                 self.latched_exram_byte.set(self.ex_ram[offset]);
             }
         }
     }
-}
 
     fn clock_irq_counter(&mut self) {
         if !self.in_frame.get() {
@@ -311,6 +293,13 @@ impl Mapper for Mapper5 {
         self.irq_pending.get()
     }
 
+    fn cpu_read_bus(&self, addr: u16, open_bus: u8) -> u8 {
+        match addr {
+            0x5204..=0x5206 | 0x5C00..=0x5FFF | 0x6000..=0xFFFF => self.cpu_read(addr),
+            _ => open_bus,
+        }
+    }
+
     fn cpu_read(&self, addr: u16) -> u8 {
         match addr {
             0x5204 => {
@@ -322,7 +311,8 @@ impl Mapper for Mapper5 {
             }
             0x5205 => ((self.mult_a as u16 * self.mult_b as u16) & 0xFF) as u8,
             0x5206 => ((self.mult_a as u16 * self.mult_b as u16) >> 8) as u8,
-            0x5C00..=0x5FFF => self.ex_ram[(addr - 0x5C00) as usize],
+            // ExRAM reads only work in modes 2/3 (as RAM)
+            0x5C00..=0x5FFF if self.exram_mode >= 2 => self.ex_ram[(addr - 0x5C00) as usize],
             0x6000..=0xFFFF => self.read_prg(addr),
             _ => 0,
         }
@@ -353,16 +343,19 @@ impl Mapper for Mapper5 {
             }
             0x5120..=0x5127 => {
                 self.chr_regs_a[(addr - 0x5120) as usize] = value as u16;
+                self.last_set_b = false;
             }
             0x5128..=0x512B => {
                 self.chr_regs_b[(addr - 0x5128) as usize] = value as u16;
+                self.last_set_b = true;
             }
             0x5130 => self.chr_upper_bits = (value & 0x03) as u16,
             0x5203 => self.irq_target = value,
             0x5204 => self.irq_enabled = (value & 0x80) != 0,
             0x5205 => self.mult_a = value,
             0x5206 => self.mult_b = value,
-            0x5C00..=0x5FFF => {
+            // mode 3 = read-only
+            0x5C00..=0x5FFF if self.exram_mode != 3 => {
                 self.ex_ram[(addr - 0x5C00) as usize] = value;
             }
             0x6000..=0xFFFF => {
@@ -386,6 +379,12 @@ impl Mapper for Mapper5 {
             self.read_chr(addr, false)
         } else {
             0
+        }
+    }
+
+    fn notify_ppu_write(&mut self, reg: u16, value: u8) {
+        if reg == 0 {
+            self.sprite_8x16 = value & 0x20 != 0;
         }
     }
 

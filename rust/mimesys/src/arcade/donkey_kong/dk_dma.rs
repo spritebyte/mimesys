@@ -1,4 +1,4 @@
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct I8257 {
     pub addr: [u16; 4],
     pub count: [u16; 4],

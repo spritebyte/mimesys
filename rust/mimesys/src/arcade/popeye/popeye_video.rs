@@ -40,6 +40,9 @@ pub struct PopeyeVideo {
 }
 
 impl PopeyeVideo {
+    /// After loading a state: recompute the palette on the next frame.
+    pub fn invalidate_palette(&mut self) { self.palette_bank_cache = None; }
+
     pub fn new(gfx1: &[u8], gfx2: &[u8], proms: &[u8], sprpal: &[u8]) -> Result<Self, String> {
         if gfx1.len() < 0x800 { return Err(format!("gfx1 is 0x{:X} bytes, expected 0x800", gfx1.len())); }
         if gfx2.len() < 0x8000 { return Err(format!("gfx2 is 0x{:X} bytes, expected 0x8000", gfx2.len())); }

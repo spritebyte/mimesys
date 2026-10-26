@@ -6,7 +6,13 @@ use crate::arcade::galaxian::galaxian_bus::{GalaxianBus, Layout, SoundBoard};
 use crate::arcade::galaxian::konami_sound::{self, KonamiBoard, KonamiSound, KONAMI_SOUND_CLOCK};
 use crate::arcade::galaxian::galaxian_video::{GalaxianVideo, Extension, SCREEN_W, SCREEN_H, VBLANK_START};
 use crate::arcade::galaxian::galaxian_sound::{GalaxianSound, Mixing};
+use crate::arcade::galaxian::galaxian_bus::BusState;
+use crate::arcade::hiscore::HiScoreMem;
+use crate::arcade::state;
+use crate::common::cpu::z80::{Bus, Z80State};
 use std::collections::HashMap;
+
+const STATE_VERSION: u32 = 1;
 
 // 18.432 MHz crystal: Z80 at 3.072 MHz, 384 pixel clocks (6.144 MHz) per line
 // -> 192 CPU cycles per line, 264 lines, 60.6 frames per second. Same as Pac-Man.
@@ -219,10 +225,30 @@ impl System for GalaxianSystem {
         }
     }
 
-    fn save_state(&self) -> Vec<u8> { Vec::new() }
-    fn load_state(&mut self, _data: &[u8]) -> Result<(), String> {
-        Err("save states not implemented for Galaxian yet".into())
+    fn save_state(&self) -> Vec<u8> {
+        let s = (self.cpu.save_state(), self.bus.save(), self.line_cycles, self.nmi_line,
+                 self.sample_debt, self.sound_cycle_debt, self.current_frame);
+        state::encode(&self.save_filename, STATE_VERSION, &s)
     }
+
+    fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let (cpu, bus, line_cycles, nmi_line, sample_debt, sound_cycle_debt, frame):
+            (Z80State, BusState, i32, bool, u64, i64, u64) =
+            state::decode(&self.save_filename, STATE_VERSION, data)?;
+        self.bus.load(bus)?;
+        self.cpu.load_state(&cpu);
+        self.line_cycles = line_cycles;
+        self.nmi_line = nmi_line;
+        self.sample_debt = sample_debt;
+        self.sound_cycle_debt = sound_cycle_debt;
+        self.current_frame = frame;
+        Ok(())
+    }
+}
+
+impl HiScoreMem for GalaxianSystem {
+    fn hs_read(&mut self, addr: u16) -> u8 { self.bus.read(addr) }
+    fn hs_write(&mut self, addr: u16, v: u8) { self.bus.write(addr, v) }
 }
 
 /// Moon Cresta program ROM scramble (MAME decode_mooncrst): two data bits flip each

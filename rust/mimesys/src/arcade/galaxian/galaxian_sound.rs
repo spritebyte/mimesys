@@ -17,9 +17,10 @@
 const SOUND_CLOCK: f64 = 1_536_000.0;   // 18.432 MHz / 12
 const NOISE_SAMPLE_HZ: f64 = 60.0 * 264.0 / 2.0;   // noise is latched on the 2V line signal
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Mixing { Galaxian, MoonCresta }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct GalaxianSound {
     rate: f64,
     mixing: Mixing,
@@ -54,6 +55,7 @@ pub struct GalaxianSound {
     fire_phase: f64,
 
     dc: (f64, f64),
+    #[serde(skip)]
     pub out: Vec<f32>,
 }
 
@@ -202,6 +204,7 @@ fn fire_555_freq(vc: f64) -> f64 {
 }
 
 /// RBJ band-pass biquad.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Biquad { b0: f64, b2: f64, a1: f64, a2: f64, x1: f64, x2: f64, y1: f64, y2: f64 }
 
 impl Biquad {

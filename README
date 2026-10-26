@@ -1,0 +1,59 @@
+Systems currently supported:
+Atari 2600
+Atari 7800
+Colecovision
+NES
+Sega Master System/Game Gear
+Gameboy/Gameboy Color
+GBA
+TG-16
+Some Arcade - list below
+
+Arcade Games currently supported:
+Donkey Kong, Donkey Kong Jr.
+Pacman, Ms Pacman, Pengo
+Popeye
+Galaxian, Frogger, Moon Cresta, Amidar, Turtles
+Double Dragon 1&2
+Paperboy
+Green Beret/Rush N' Attack
+
+Save states not completed for Gameboy or Arcade, should work on other systems. F6/F7 to switch save slots. F5 to save state and F8 to load
+
+Fullscreen Mode - use F11
+
+Can enter Game Genie codes in cheat menu (Under EmulationMenu or hit CTRL+H)
+Only supported for Gameboy and NES currently 
+
+Zapper support using mouse - Only for NES currently. Need to go under Settings menu and check option to enable.
+
+Can change controls by system under Settings/Controls
+Not all systems support 2nd player controls yet, mainly TG-16, Arcade cocktail controls, and Coleco P2 keypad.
+
+Default buttons are:
+Up - 'W'
+Down - 'S'
+Left - 'A'
+Right - 'D'
+Select - Tab
+Start - Enter
+B - 'K'
+A/Fire - 'L'
+Insert Coin (arcade) - F1 or select button on joystick
+Button 3 in Double Dragon 2 - 'J'
+
+Some systems require BIOS file to be put in $USERDATA/BIOS folder.
+Colecovision (may be optional in future, some games like Venture would freeze when skipping)
+Gameboy/Gameboy Color has option to skip
+Gameboy Advance will use replacement BIOS if the official BIOS doesn't exist. License in the rusr/mimesys/src/gba directory.
+Q-bert (optional, but sc01a.bin required for speech sounds)
+
+Planned TODO:
+Add GBA (will require BIOS), Atari 5200 (will require BIOS), more arcade
+Possibly SNES and Genesis.
+Save states for Gameboy
+Change palette for Gameboy games
+Add debugging tools for all systems
+Video recording
+Rewind
+

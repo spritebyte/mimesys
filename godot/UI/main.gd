@@ -39,6 +39,8 @@ var local_input: Dictionary = {}
 
 # NEW: GUI pass
 const STATE_SLOTS := 10                 # slots 0-9 (slot 0 = your existing save states)
+var _zapper_on := false                 # NEW (zapper): mouse drives the NES Zapper
+var _pointer := Vector3i(-1, -1, 0)     # NEW (zapper): x, y in emulator pixels (-1 = off), buttons
 var current_system_id := ""             # "nes", "pce", "arcade"... picks the controls profile
 var view_menu: PopupMenu
 var slot_menu: PopupMenu
@@ -55,6 +57,8 @@ var system_pick: SystemPickDialog              # NEW (ROM detection)
 var net_dialog: NetLinkDialog                  # NEW (network link)
 var _net_status := ""
 var _net_poll_msec := 0
+var _trace_file: FileAccess = null              # GBA link log being written (debugging)
+var _trace_msec := 0
 var _paused_before_dialog := false
 var _toast_panel: PanelContainer
 var _toast_label: Label
@@ -69,6 +73,15 @@ enum ViewMenuID { FULLSCREEN }
 # Called when the node enters the scene tree for the first time.
 func _ready() -> void:
 	get_tree().set_auto_accept_quit(false)
+	# battery saves / arcade high scores: write changes every 30 s, not only on exit,
+	# so a crash doesn't lose them (only touches the disk when something changed)
+	var sram_timer := Timer.new()
+	sram_timer.wait_time = 30.0
+	sram_timer.autostart = true
+	sram_timer.timeout.connect(func():
+		if emu_system != null and emu_system.has_method("check_and_save_sram"):
+			emu_system.check_and_save_sram())
+	add_child(sram_timer)
 	init_menus()
 	_init_toast()
 	remap_dialog = InputRemapDialog.new()
@@ -117,8 +130,8 @@ func init_menus():
 	recent_menu.name = "RecentMenu"
 	file_menu.add_child(recent_menu)
 	file_menu.add_submenu_item("Recent ROMs", "RecentMenu")
-	file_menu.add_item("Link Cable: 2 Game Boys...", FileMenuID.LINK)
-	file_menu.add_item("Network Link (Game Boy)...", FileMenuID.NETWORK)
+	file_menu.add_item("Link Cable: 2 players...", FileMenuID.LINK)
+	file_menu.add_item("Network Link...", FileMenuID.NETWORK)
 	recent_menu.about_to_popup.connect(_refresh_recent_menu)
 	recent_menu.id_pressed.connect(_on_recent_menu)
 #	file_menu.add_item("Reload ROM", FileMenuID.RELOAD_ROM)
@@ -151,20 +164,21 @@ func init_menus():
 
 	# EMULATION
 	emu_menu.add_item("Reset", EmuMenuID.RESET)
-	emu_menu.add_item("Pause", EmuMenuID.PAUSE)
-	emu_menu.add_item("Resume", EmuMenuID.RESUME)
-	emu_menu.set_item_disabled(emu_menu.get_item_index(EmuMenuID.RESUME), true)
-	emu_menu.add_item("Step CPU", EmuMenuID.STEP_CPU)
+#	emu_menu.add_item("Pause", EmuMenuID.PAUSE)
+#	emu_menu.add_item("Resume", EmuMenuID.RESUME)
+#	emu_menu.set_item_disabled(emu_menu.get_item_index(EmuMenuID.RESUME), true)
+#	emu_menu.add_item("Step CPU", EmuMenuID.STEP_CPU)
 	emu_menu.add_separator()
 	emu_menu.add_item("Cheats...   (Ctrl+H)", EmuMenuID.CHEATS)
 
 	emu_menu.id_pressed.connect(_on_emu_menu)
 
 	# DEBUG
-	debug_menu.add_item("CPU Registers", DebugMenuID.CPU_REGISTERS)
-	debug_menu.add_item("Audio Registers", DebugMenuID.AUDIO_REGISTERS)
+	top_menu_bar.set_menu_hidden(4, true)
+#	debug_menu.add_item("CPU Registers", DebugMenuID.CPU_REGISTERS)
+#	debug_menu.add_item("Audio Registers", DebugMenuID.AUDIO_REGISTERS)
 
-	debug_menu.id_pressed.connect(_on_debug_menu)
+#	debug_menu.id_pressed.connect(_on_debug_menu)
 
 func _on_settings_menu(id):
 	match id:
@@ -196,10 +210,10 @@ func _on_file_menu(id):
 			link_dialog.open()
 
 		FileMenuID.NETWORK:
-			if emu_system == null or current_system_id != "gb" or link_mode:
-				_toast("Load a Game Boy game first")
+			if emu_system == null or not (current_system_id in LINK_SYSTEMS) or link_mode:
+				_toast("Load a Game Boy or GBA game first")
 			else:
-				net_dialog.open()
+				net_dialog.open(SystemPickDialog.display_name(current_system_id))
 
 #		FileMenuID.RELOAD_ROM:
 #			emu_system.reload_rom()
@@ -403,16 +417,51 @@ func _apply_display_options() -> void:
 			* (float(w) / info.visible_width) / (float(h) / info.visible_height)
 	EmulatorScreen.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR \
 		if AppSettings.get_option(sys, "smooth") else CanvasItem.TEXTURE_FILTER_NEAREST
+	# NEW (zapper): light gun in port 2
+	_zapper_on = sys == "nes" and AppSettings.get_option(sys, "zapper")
+	emu_mutex.lock()
+	emu_system.set_option("zapper", 1 if _zapper_on else 0)
+	# GBA cartridge clock (Pokemon etc.): local time = UTC + this many minutes
+	emu_system.set_option("rtc_utc_offset", Time.get_time_zone_from_system().bias)
+	emu_mutex.unlock()
+	EmulatorScreen.mouse_default_cursor_shape = Control.CURSOR_CROSS \
+		if _zapper_on else Control.CURSOR_ARROW
+
+# ---------------- NEW (zapper) ----------------
+## Mouse position over the game picture -> emulator framebuffer pixel, plus buttons.
+## Clicks only count while the mouse is over the picture (not on menus).
+func _update_pointer() -> void:
+	if not _zapper_on:
+		return
+	var local: Vector2 = EmulatorScreen.get_local_mouse_position()
+	var size: Vector2 = EmulatorScreen.size
+	if size.x <= 0 or size.y <= 0 or not Rect2(Vector2.ZERO, size).has_point(local):
+		_pointer = Vector3i(-1, -1, 0)
+		return
+	var region := Rect2(0, 0, 256, 240)
+	var atlas := EmulatorScreen.texture as AtlasTexture
+	if atlas:
+		region = atlas.region      # the visible (cropped) part of the framebuffer
+	var x := int(region.position.x + local.x / size.x * region.size.x)
+	var y := int(region.position.y + local.y / size.y * region.size.y)
+	var buttons := 0
+	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		buttons |= 1
+	if Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		buttons |= 2
+	_pointer = Vector3i(x, y, buttons)
 
 # ---------------- NEW (network link) ----------------
 # The networking is all Rust (gb_netlink.rs); these just call it and show what it says.
 func _net_host(port: int) -> void:
 	_net_call("net_host", [port])
+	_start_trace()
 	AppSettings.net_port = port
 	AppSettings.save_settings()
 
 func _net_join(address: String, port: int) -> void:
 	_net_call("net_join", [address, port])
+	_start_trace()
 	AppSettings.net_ip = address
 	AppSettings.net_port = port
 	AppSettings.save_settings()
@@ -436,7 +485,7 @@ func _poll_net_status(force := false) -> void:
 	if not force and now - _net_poll_msec < 500:
 		return
 	_net_poll_msec = now
-	if emu_system == null or current_system_id != "gb" or link_mode:
+	if emu_system == null or not (current_system_id in LINK_SYSTEMS) or link_mode:
 		return
 	emu_mutex.lock()
 	var s: String = emu_system.net_status()
@@ -476,6 +525,8 @@ func _exit_tree():
 
 func _process(_delta):
 	_poll_net_status()   # NEW (network link)
+	_poll_trace()
+	_update_pointer()    # NEW (zapper)
 	var now = Time.get_ticks_msec()
 	_real_frame_count += 1
 	if emu_system and (now - _fps_timer_msec >= 1000):
@@ -497,7 +548,10 @@ func _process(_delta):
 const INPUT_BITS := {
 	"c1_up": 0, "c1_down": 1, "c1_left": 2, "c1_right": 3,
 	"c1_b": 4, "c1_a": 5, "c1_select": 6, "c1_start": 7,
-	"coin": 16, "c2_start": 17,
+	"coin": 16, "c2_start": 17, "c1_x": 18, "c2_x": 19, "c1_l1": 20, "c1_r1": 21,
+	# player 2: bits 24-31, same order as player 1 (c2_start also sets bit 31, below)
+	"c2_up": 24, "c2_down": 25, "c2_left": 26, "c2_right": 27,
+	"c2_b": 28, "c2_a": 29, "c2_select": 30,
 }
 
 const KEYPAD_ACTIONS := ["c1_0", "c1_1", "c1_2", "c1_3", "c1_4", "c1_5",
@@ -509,6 +563,8 @@ func _get_serialized_input() -> int:
 	for action in INPUT_BITS:
 		if Input.is_action_pressed(action):
 			mask |= 1 << INPUT_BITS[action]
+	if mask & (1 << 17):
+		mask |= 1 << 31     # P2 Start in the player 2 byte too
 
 	# --- High Byte (Bits 8-15): Keypad (Serialized as a 4-bit nibble) ---
 	# Instead of giving each key its own bit, compress the pressed key
@@ -534,7 +590,10 @@ func _thread_loop():
 			continue
 
 		var input_mask = _get_serialized_input()
+		var pointer := _pointer
 		emu_mutex.lock()
+		if _zapper_on:
+			emu_system.set_pointer(pointer.x, pointer.y, pointer.z)
 		emu_system.run_slice(input_mask)
 		emu_system.update_audio_buffer();
 		emu_mutex.unlock()
@@ -624,32 +683,86 @@ func execute_load(path: String, internal_zip_file: String = "") -> void:
 	link_mode = false
 	_start_system(new_system, profile, title)
 
-## NEW (link cable): two Game Boys side by side, joined by a link cable. Tab switches controls.
-func execute_link_load(path_a: String, path_b: String) -> void:
+## Systems with a link cable (local pair and network).
+const LINK_SYSTEMS := ["gb", "gba"]
+
+## NEW (link cable): two Game Boys or two GBAs side by side, joined by a link cable.
+## Tab switches controls.
+func execute_link_load(system_id: String, path_a: String, path_b: String) -> void:
 	_stop_current()
 	var a := _read_rom(path_a)
 	var b := _read_rom(path_b)
 	if a.is_empty() or b.is_empty():
 		OS.alert("Couldn't read %s" % (path_a if a.is_empty() else path_b).get_file())
 		return
-	var bios: PackedByteArray = RomLoader.load_bios(AppSettings.bios_path("gb", "user://BIOS/gbc_bios.bin"))
 	var sys = EmuSystem.new()
-	if not sys.load_gb_link(a["data"], a["name"], b["data"], b["name"], bios):
+	var ok := false
+	if system_id == "gba":
+		var gba_bios: PackedByteArray = RomLoader.load_bios(AppSettings.bios_path("gba", "user://BIOS/gba_bios.bin"))
+		ok = sys.load_gba_link(a["data"], a["name"], b["data"], b["name"], gba_bios)
+	else:
+		var bios: PackedByteArray = RomLoader.load_bios(AppSettings.bios_path("gb", "user://BIOS/gbc_bios.bin"))
+		ok = sys.load_gb_link(a["data"], a["name"], b["data"], b["name"], bios)
+	if not ok:
 		OS.alert("Couldn't start the link cable (see the Output panel)")
 		return
 	link_mode = true
 	link_focus = 0
-	_start_system(sys, "gb", "%s + %s" % [a["name"], b["name"]])
-	_toast("Link cable on  —  Tab switches which Game Boy you control")
+	_start_system(sys, system_id, "%s + %s" % [a["name"], b["name"]])
+	_start_trace()
+	_toast("Link cable on  —  Tab switches which %s you control" % _link_unit())
+
+## "Game Boy" / "GBA", for messages about the linked pair.
+func _link_unit() -> String:
+	return "GBA" if current_system_id == "gba" else "Game Boy"
 
 func _switch_link_focus() -> void:
 	link_focus = 1 - link_focus
 	emu_mutex.lock()
 	emu_system.set_option("link_focus", link_focus)
 	emu_mutex.unlock()
-	_toast("Controlling Game Boy %d (%s side)" % [link_focus + 1, ["left", "right"][link_focus]])
+	_toast("Controlling %s %d (%s side)" % [_link_unit(), link_focus + 1, ["left", "right"][link_focus]])
+
+## Link log (File > Link Cable / Network Link: "Record a link log"): the GBA link port's
+## register writes, changed reads and transfers, written to user://link_trace.txt.
+func _start_trace() -> void:
+	_stop_trace()
+	if not AppSettings.link_trace or emu_system == null or current_system_id != "gba":
+		return
+	_trace_file = FileAccess.open("user://link_trace.txt", FileAccess.WRITE)
+	if _trace_file == null:
+		return
+	emu_mutex.lock()
+	emu_system.set_option("link_trace", 1)
+	emu_mutex.unlock()
+	_toast("Recording a link log to " + ProjectSettings.globalize_path("user://link_trace.txt"))
+
+func _poll_trace() -> void:
+	if _trace_file == null or emu_system == null:
+		return
+	var now := Time.get_ticks_msec()
+	if now - _trace_msec < 500:
+		return
+	_trace_msec = now
+	emu_mutex.lock()
+	var lines: PackedStringArray = emu_system.take_trace()
+	emu_mutex.unlock()
+	for l in lines:
+		_trace_file.store_line(l)
+	_trace_file.flush()
+
+func _stop_trace() -> void:
+	if _trace_file:
+		_poll_trace_now()
+		_trace_file.close()
+		_trace_file = null
+
+func _poll_trace_now() -> void:
+	_trace_msec = 0
+	_poll_trace()
 
 func _stop_current() -> void:
+	_stop_trace()
 	if emu_system:
 		emu_system.power_off()
 	if cpu_thread.is_alive():
@@ -673,6 +786,7 @@ func _start_system(new_system, system_id: String, title: String) -> void:
 		print("Could not get display info")
 
 ## A .gb/.gbc file, or the first one inside a zip: {"data": PackedByteArray, "name": String}
+## A game for the link cable: the file itself, or the first Game Boy / GBA game in a zip.
 func _read_rom(path: String) -> Dictionary:
 	if path.get_extension().to_lower() != "zip":
 		var data := FileAccess.get_file_as_bytes(path)
@@ -681,7 +795,7 @@ func _read_rom(path: String) -> Dictionary:
 	if zip.open(path) != OK:
 		return {}
 	for f in zip.get_files():
-		if f.get_extension().to_lower() in ["gb", "gbc"]:
+		if f.get_extension().to_lower() in ["gb", "gbc", "gba", "agb"]:
 			var data := zip.read_file(f)
 			zip.close()
 			return {"data": data, "name": f.get_file().get_basename().to_lower().validate_filename()}

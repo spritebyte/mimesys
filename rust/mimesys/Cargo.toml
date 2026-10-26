@@ -3,6 +3,10 @@ name = "mimesys"
 version = "0.1.0"
 edition = "2024"
 
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"
+
 [lib]
 crate-type = ["cdylib"]
 

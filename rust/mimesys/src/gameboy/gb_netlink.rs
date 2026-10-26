@@ -1,10 +1,13 @@
 // Link cable over the network (TCP). Plain std::net: no Godot, no extra crates.
 //
 // One side hosts (listens on a port), the other joins (connects to host IP + port).
-// Each runs its own game and save. Messages are 3 bytes: [kind, value, seq]
+// Each runs its own game and save. Messages are 7 bytes: [kind, mode, value (4, LE), seq]
 //   HELLO  value = protocol version (sent by both on connect)
-//   XFER   "I drove a transfer, here's my byte"     -> the other side runs external_clock()
+//   XFER   "I drove a transfer, here's my data"     -> the other side clocks it in
 //   REPLY  "...and here's mine back" (same seq)     -> the driver's transfer finishes
+//   STATE  value = our port state (GBA: bit 0 = in multiplayer mode), sent when it changes
+// `mode` is 0 for the Game Boy (1 byte); the GBA uses its SIO mode (8/32-bit, multiplayer).
+// The cable works with any link port through `NetPort` (Game Boy serial, GBA SIO).
 //
 // The Game Boy that drives a transfer stops (its frame freezes) until the REPLY arrives:
 // emulated time doesn't pass, so the game can't tell the byte took a network round trip.
@@ -20,10 +23,40 @@ use crate::gameboy::gb_link::LinkCable;
 use crate::gameboy::gb_serial::Serial;
 
 pub const DEFAULT_PORT: u16 = 47100;
-const VERSION: u8 = 1;
+const VERSION: u8 = 3;
+const MSG: usize = 7;
+
+/// What a link port offers the network cable.
+pub trait NetPort {
+    /// Our finished transfer, waiting for the other side's answer: (mode, value).
+    fn outgoing(&self) -> Option<(u8, u32)>;
+    /// The other side drove a transfer: clock its value in, return ours.
+    fn external(&mut self, mode: u8, value: u32) -> u32;
+    /// The answer to our transfer arrived.
+    fn finish(&mut self, value: u32);
+    /// Nobody connected: finish our transfer with the idle line (all ones).
+    fn unplugged(&mut self);
+    /// Port state the other side should know about (GBA: in multiplayer mode).
+    fn local_state(&self) -> u8 { 0 }
+    /// The other side's port state (0 when nobody is connected).
+    fn set_remote_state(&mut self, _state: u8) {}
+}
+
+impl NetPort for Serial {
+    fn outgoing(&self) -> Option<(u8, u32)> { self.awaiting.map(|b| (0, b as u32)) }
+    fn external(&mut self, _mode: u8, value: u32) -> u32 { self.external_clock(value as u8) as u32 }
+    fn finish(&mut self, value: u32) { Serial::finish(self, value as u8) }
+    fn unplugged(&mut self) { Serial::finish(self, 0xFF) }
+}
+
+fn msg(kind: u8, mode: u8, value: u32, seq: u8) -> [u8; MSG] {
+    let v = value.to_le_bytes();
+    [kind, mode, v[0], v[1], v[2], v[3], seq]
+}
 const HELLO: u8 = 0x01;
 const XFER: u8 = 0x02;
 const REPLY: u8 = 0x03;
+const STATE: u8 = 0x04;
 
 enum State {
     Listening(TcpListener),
@@ -41,6 +74,10 @@ pub struct NetLink {
     /// seq of the XFER we sent and are waiting a REPLY for
     waiting_seq: Option<u8>,
     peer_ok: bool,
+    /// we host (listen); for the GBA the host is the multiplayer parent
+    host: bool,
+    /// port state last sent to the other side
+    sent_state: Option<u8>,
 }
 
 impl NetLink {
@@ -50,7 +87,9 @@ impl NetLink {
             .map_err(|e| format!("can't listen on port {port}: {e}"))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-        Ok(Self::with_state(State::Listening(listener), port))
+        let mut l = Self::with_state(State::Listening(listener), port);
+        l.host = true;
+        Ok(l)
     }
 
     /// Connect to a host. Returns at once; the connection is made in the background.
@@ -64,10 +103,13 @@ impl NetLink {
     }
 
     fn with_state(state: State, port: u16) -> Self {
-        Self { state, port, inbuf: Vec::new(), outbuf: Vec::new(), seq: 0, waiting_seq: None, peer_ok: false }
+        Self { state, port, inbuf: Vec::new(), outbuf: Vec::new(), seq: 0, waiting_seq: None, peer_ok: false, host: false, sent_state: None }
     }
 
     pub fn port(&self) -> u16 { self.port }
+
+    /// This side hosts the game (listens).
+    pub fn is_host(&self) -> bool { self.host }
 
     pub fn is_connected(&self) -> bool {
         matches!(self.state, State::Connected(..)) && self.peer_ok
@@ -88,7 +130,8 @@ impl NetLink {
         }
         self.inbuf.clear();
         self.outbuf.clear();
-        self.outbuf.extend_from_slice(&[HELLO, VERSION, 0]);
+        self.sent_state = None;
+        self.outbuf.extend_from_slice(&msg(HELLO, 0, VERSION as u32, 0));
         self.state = State::Connected(stream, peer);
     }
 
@@ -134,57 +177,74 @@ impl NetLink {
         }
     }
 
-    fn handle_messages(&mut self, serial: &mut Serial) {
-        while self.inbuf.len() >= 3 {
-            let (kind, value, seq) = (self.inbuf[0], self.inbuf[1], self.inbuf[2]);
-            self.inbuf.drain(..3);
+    fn handle_messages<P: NetPort + ?Sized>(&mut self, port: &mut P) {
+        // a version-1 peer sends 3-byte HELLOs: catch that before framing goes wrong
+        if !self.peer_ok && self.inbuf.len() >= 3 && self.inbuf[0] == HELLO && self.inbuf[1] == 1 {
+            self.close(format!("the other emulator speaks link protocol v1, this one v{VERSION} (update both)"));
+            return;
+        }
+        while self.inbuf.len() >= MSG {
+            let kind = self.inbuf[0];
+            let mode = self.inbuf[1];
+            let value = u32::from_le_bytes([self.inbuf[2], self.inbuf[3], self.inbuf[4], self.inbuf[5]]);
+            let seq = self.inbuf[6];
+            self.inbuf.drain(..MSG);
             match kind {
-                HELLO if value == VERSION => self.peer_ok = true,
+                HELLO if value == VERSION as u32 => self.peer_ok = true,
                 HELLO => {
-                    self.close(format!("the other emulator speaks link protocol v{value}, this one v{VERSION}"));
+                    self.close(format!("the other emulator speaks link protocol v{value}, this one v{VERSION} (update both)"));
                     return;
                 }
                 XFER => {
-                    let reply = serial.external_clock(value);
-                    self.outbuf.extend_from_slice(&[REPLY, reply, seq]);
+                    let reply = port.external(mode, value);
+                    self.outbuf.extend_from_slice(&msg(REPLY, mode, reply, seq));
                 }
                 REPLY if self.waiting_seq == Some(seq) => {
                     self.waiting_seq = None;
-                    if serial.awaiting.is_some() {
-                        serial.finish(value);
+                    if port.outgoing().is_some() {
+                        port.finish(value);
                     }
                 }
                 REPLY => {}                                     // stale (transfer was cancelled)
+                STATE => port.set_remote_state(value as u8),
                 _ => { self.close("garbled data from the other side"); return; }
             }
         }
     }
 }
 
-impl LinkCable for NetLink {
-    fn service(&mut self, serial: &mut Serial, wait: Duration) {
+impl NetLink {
+    /// Handle traffic for any link port: deliver the other side's transfers, send ours,
+    /// and if we're waiting for a reply wait up to `wait` for it.
+    pub fn service_port<P: NetPort + ?Sized>(&mut self, port: &mut P, wait: Duration) {
         let deadline = Instant::now() + wait;
         loop {
             self.pump();
-            self.handle_messages(serial);
+            self.handle_messages(port);
             if !self.is_connected() {
                 // nobody on the other end: behave like an unplugged port
-                if serial.awaiting.is_some() {
-                    serial.finish(0xFF);
+                port.set_remote_state(0);
+                if port.outgoing().is_some() {
+                    port.unplugged();
                 }
                 return;
             }
-            if let Some(out) = serial.awaiting {
+            let state = port.local_state();
+            if self.sent_state != Some(state) {
+                self.sent_state = Some(state);
+                self.outbuf.extend_from_slice(&msg(STATE, 0, state as u32, 0));
+            }
+            if let Some((mode, out)) = port.outgoing() {
                 if self.waiting_seq.is_none() {
                     self.seq = self.seq.wrapping_add(1);
                     self.waiting_seq = Some(self.seq);
-                    self.outbuf.extend_from_slice(&[XFER, out, self.seq]);
+                    self.outbuf.extend_from_slice(&msg(XFER, mode, out, self.seq));
                     continue;                                   // send it now
                 }
             } else {
                 self.waiting_seq = None;
             }
-            if serial.awaiting.is_none() || Instant::now() >= deadline {
+            if port.outgoing().is_none() || Instant::now() >= deadline {
                 self.pump();                                    // flush any reply we owe
                 return;
             }
@@ -192,7 +252,7 @@ impl LinkCable for NetLink {
         }
     }
 
-    fn status(&self) -> String {
+    pub fn status_line(&self) -> String {
         match &self.state {
             State::Listening(_) => format!("Hosting: waiting for a player on {}:{}", local_ip(), self.port),
             State::Connecting(_, addr) => format!("Connecting to {addr}..."),
@@ -201,6 +261,11 @@ impl LinkCable for NetLink {
             State::Closed(why) => format!("Not connected: {why}"),
         }
     }
+}
+
+impl LinkCable for NetLink {
+    fn service(&mut self, serial: &mut Serial, wait: Duration) { self.service_port(serial, wait) }
+    fn status(&self) -> String { self.status_line() }
 }
 
 /// This computer's LAN address (what the other player types in). No packets are sent:

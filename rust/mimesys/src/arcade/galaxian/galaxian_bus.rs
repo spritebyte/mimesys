@@ -40,6 +40,9 @@ pub enum SoundBoard {
     Konami(KonamiSound),       // Frogger, Amidar, Turtles: Z80 + AY-3-8910(s)
 }
 
+pub type BusState = (Vec<u8>, [Ppi8255; 2], bool, usize, crate::arcade::galaxian::galaxian_video::VideoState,
+                     (Option<GalaxianSound>, Option<crate::arcade::galaxian::konami_sound::KonamiState>));
+
 pub struct GalaxianBus {
     layout: Layout,
     rom: Vec<u8>,
@@ -77,6 +80,33 @@ impl GalaxianBus {
     }
 
     pub fn layout(&self) -> Layout { self.layout }
+
+    pub fn save(&self) -> impl serde::Serialize + '_ {
+        let sound: (Option<&GalaxianSound>, Option<_>) = match &self.sound {
+            SoundBoard::Discrete(s) => (Some(s), None),
+            SoundBoard::Konami(k) => (None, Some(k.save())),
+        };
+        (&self.ram, &self.ppi, self.nmi_enable, self.current_line, self.video.save(), sound)
+    }
+
+    pub fn load(&mut self, s: BusState) -> Result<(), String> {
+        let (ram, ppi, nmi_enable, current_line, video, sound) = s;
+        if ram.len() != self.ram.len() { return Err("RAM size mismatch".into()); }
+        match (&mut self.sound, sound) {
+            (SoundBoard::Discrete(cur), (Some(mut new), None)) => {
+                new.out = std::mem::take(&mut cur.out);
+                *cur = new;
+            }
+            (SoundBoard::Konami(cur), (None, Some(k))) => cur.load(k)?,
+            _ => return Err("save state is for a different sound board".into()),
+        }
+        self.video.load(video)?;
+        self.ram = ram;
+        self.ppi = ppi;
+        self.nmi_enable = nmi_enable;
+        self.current_line = current_line;
+        Ok(())
+    }
 
     /// Translate a Moon Cresta address to the Galaxian one, so both share one decoder.
     /// (The 0x4000 blocks line up as 8000->4000, 9000->5000, A000->6000, ... B800->7800.)

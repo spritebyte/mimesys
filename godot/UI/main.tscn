@@ -1,6 +1,6 @@
 [gd_scene format=3 uid="uid://dmqrip33lf7oq"]
 
-[ext_resource type="Script" uid="uid://c5qy27hh664xf" path="res://UI/main.gd" id="1_vnck2"]
+[ext_resource type="Script" uid="uid://cuqyssr24etd4" path="res://UI/main.gd" id="1_vnck2"]
 [ext_resource type="PackedScene" uid="uid://dyaexwn1jr3ym" path="res://UI/rewind.tscn" id="2_emhnf"]
 [ext_resource type="PackedScene" uid="uid://brrr00aq7vgcg" path="res://UI/debug.tscn" id="3_uw6j2"]
 
@@ -21,15 +21,20 @@ layout_mode = 2
 
 [node name="FileMenu" type="PopupMenu" parent="MainVerticalStack/TopMenuBar" unique_id=684819892]
 oversampling_override = 1.0
+title = "File"
 size = Vector2i(135, 116)
 
 [node name="SettingsMenu" type="PopupMenu" parent="MainVerticalStack/TopMenuBar" unique_id=2133986329]
+title = "Settings"
 
 [node name="EmulationMenu" type="PopupMenu" parent="MainVerticalStack/TopMenuBar" unique_id=1255017904]
 oversampling_override = 1.0
+title = "Emulation"
 
 [node name="DebugMenu" type="PopupMenu" parent="MainVerticalStack/TopMenuBar" unique_id=1380072654]
 oversampling_override = 1.0
+title = "Debug"
+allow_search = false
 
 [node name="ScreenContainer" type="AspectRatioContainer" parent="MainVerticalStack" unique_id=871644046]
 unique_name_in_owner = true
@@ -45,6 +50,7 @@ layout_mode = 2
 expand_mode = 1
 
 [node name="FrameControl" parent="MainVerticalStack" unique_id=1514795349 instance=ExtResource("2_emhnf")]
+visible = false
 layout_mode = 2
 
 [node name="RomDialog" type="FileDialog" parent="." unique_id=828783176]
@@ -67,26 +73,6 @@ offset_bottom = 311.0
 [node name="DebugWindow" parent="." unique_id=983059263 instance=ExtResource("3_uw6j2")]
 unique_name_in_owner = true
 visible = false
-
-[node name="NesSettingsWindow" type="Window" parent="." unique_id=177773859]
-oversampling_override = 1.0
-initial_position = 5
-size = Vector2i(400, 300)
-visible = false
-
-[node name="GbSettingsWindow" type="Window" parent="." unique_id=1319007589]
-oversampling_override = 1.0
-initial_position = 5
-size = Vector2i(400, 300)
-visible = false
-
-[node name="Button" type="Button" parent="GbSettingsWindow" unique_id=24472045]
-visible = false
-offset_left = 334.0
-offset_top = 258.0
-offset_right = 384.0
-offset_bottom = 289.0
-text = "Close"
 
 [connection signal="confirmed" from="RomDialog" to="." method="_on_rom_selection_dialog_confirmed"]
 [connection signal="file_selected" from="RomDialog" to="." method="_on_rom_dialog_file_selected"]

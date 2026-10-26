@@ -118,8 +118,17 @@ impl System for SmsSystem {
         if on(pad::RIGHT) { dc &= !0x08; }
         if on(pad::B) { dc &= !0x10; }
         if on(pad::A) { dc &= !0x20; }
+        let p2 = pad::player2(mask);
+        let on2 = |b: u32| p2 & b != 0;
+        if on2(pad::UP) { dc &= !0x40; }
+        if on2(pad::DOWN) { dc &= !0x80; }
+        let mut dd = 0xFFu8;
+        if on2(pad::LEFT) { dd &= !0x01; }
+        if on2(pad::RIGHT) { dd &= !0x02; }
+        if on2(pad::B) { dd &= !0x04; }    // button 1 (TL)
+        if on2(pad::A) { dd &= !0x08; }    // button 2 (TR)
         self.bus.port_dc = dc;
-        self.bus.port_dd = 0xFF;
+        self.bus.port_dd = dd;
 
         let start = on(pad::START);
         if self.bus.game_gear {

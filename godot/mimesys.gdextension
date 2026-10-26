@@ -6,8 +6,8 @@ reloadable = true
 [libraries]
 linux.debug.x86_64 =     "res://../rust/mimesys/target/release/libmimesys.so"
 linux.release.x86_64 =   "res://../rust/mimesys/target/release/libmimesys.so"
-windows.debug.x86_64 =   "res://../rust/mimesys/target/debug/mimesys.dll"
-windows.release.x86_64 = "res://../rust/mimesys/target/release/mimesys.dll"
+windows.debug.x86_64 =   "res://../rust/mimesys/target/x86_64-pc-windows-gnu/release/mimesys.dll"
+windows.release.x86_64 = "res://../rust/mimesys/target/x86_64-pc-windows-gnu/release/mimesys.dll"
 macos.debug =            "res://../rust/mimesys/target/debug/libmimesys.dylib"
 macos.release =          "res://../rust/mimesys/target/release/libmimesys.dylib"
 macos.debug.arm64 =      "res://../rust/mimesys/target/debug/libmimesys.dylib"

@@ -64,8 +64,10 @@ fn load_cartridge(system: CartSystem, rom: &[u8], filename: &str, bios: Option<V
             Ok(Box::new(core))
         }
         CartSystem::Gba => {
-            let _bios = bios.ok_or("GBA requires a BIOS image")?;
-            Err("GBA core not yet implemented yet".into())
+            // no BIOS: the cartridge starts directly (BIOS functions won't work)
+            let core = crate::gba::gba_system::GbaSystem::from_rom(rom, filename, bios_or_empty)
+                .map_err(|e| format!("GBA from_rom failed: {e}"))?;
+            Ok(Box::new(core))
         }
         CartSystem::Coleco => {
             let core = ColecoSystem::from_rom(rom, filename, bios_or_empty)

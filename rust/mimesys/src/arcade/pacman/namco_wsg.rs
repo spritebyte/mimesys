@@ -1,6 +1,6 @@
 pub const WSG_CLOCK: f64 = 96_000.0;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct Voice {
     counter: u32,
     frequency: u32,
@@ -8,9 +8,11 @@ struct Voice {
     volume: u8,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NamcoWsg {
     regs: [u8; 32],
     voices: [Voice; 3],
+    #[serde(skip)]
     wave_prom: Vec<u8>,
     pub enabled: bool,
 
@@ -18,10 +20,20 @@ pub struct NamcoWsg {
     phase: f64,
     acc: f32,
     acc_n: u32,
+    #[serde(skip)]
     pub out: Vec<f32>,
 }
 
 impl NamcoWsg {
+    /// A copy for a save state (no wave PROM, no pending output).
+    pub fn save_copy(&self) -> Self {
+        Self { regs: self.regs, voices: self.voices, wave_prom: Vec::new(), enabled: self.enabled,
+               out_rate: self.out_rate, phase: self.phase, acc: self.acc, acc_n: self.acc_n, out: Vec::new() }
+    }
+
+    /// After loading a state: take the wave PROM back from the chip being replaced.
+    pub fn keep_static(&mut self, old: &mut Self) { self.wave_prom = std::mem::take(&mut old.wave_prom); }
+
     pub fn new(wave_prom: &[u8], out_rate: u32) -> Self {
         let mut prom = wave_prom.to_vec();
         prom.resize(0x100, 0);

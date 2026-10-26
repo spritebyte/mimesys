@@ -107,6 +107,14 @@ func _rebuild() -> void:
 	smooth.toggled.connect(func(on): _put("smooth", on))
 	_row("Filter", smooth)
 
+	# Light gun (NES Zapper in port 2, played with the mouse)
+	if sys == "nes":
+		var zap := CheckBox.new()
+		zap.text = "Zapper in port 2 (aim with the mouse, left click fires, right click fires off screen)"
+		zap.button_pressed = _opt("zapper")
+		zap.toggled.connect(func(on): _put("zapper", on))
+		_row("Light gun", zap)
+
 	# Overscan crop
 	var crop := HBoxContainer.new()
 	for side in [["crop_top", "Top"], ["crop_bottom", "Bottom"], ["crop_left", "Left"], ["crop_right", "Right"]]:

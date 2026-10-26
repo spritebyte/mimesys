@@ -36,6 +36,8 @@ pub struct A7800Bus {
     pub nmi_line: bool,
     /// player 1 buttons: [right (INPT0), left (INPT1)]
     pub buttons: [bool; 2],
+    /// player 2 buttons: [right (INPT2), left (INPT3)]
+    pub buttons2: [bool; 2],
     data_bus: u8,
 }
 
@@ -57,7 +59,7 @@ impl A7800Bus {
         Self {
             maria: Maria::new(), tia: Tia::new(out_rate), riot: Riot::new(), cart,
             ram: vec![0; 0x1000], clocks: 0, cycles: 0, wsync: false, nmi_line: false,
-            buttons: [false; 2], data_bus: 0,
+            buttons: [false; 2], buttons2: [false; 2], data_bus: 0,
         }
     }
 
@@ -74,7 +76,9 @@ impl A7800Bus {
             0x08 => if self.buttons[0] { 0x80 } else { 0 },                   // INPT0: right
             0x09 => if self.buttons[1] { 0x80 } else { 0 },                   // INPT1: left
             0x0C => if self.buttons[0] || self.buttons[1] { 0 } else { 0x80 }, // INPT4
-            0x0D => 0x80,                                                     // INPT5
+            0x0A => if self.buttons2[0] { 0x80 } else { 0 },                  // INPT2: P2 right
+            0x0B => if self.buttons2[1] { 0x80 } else { 0 },                  // INPT3: P2 left
+            0x0D => if self.buttons2[0] || self.buttons2[1] { 0 } else { 0x80 }, // INPT5
             _ => 0,
         };
         hi | (self.data_bus & 0x3F)

@@ -7,6 +7,7 @@
 //   bit 1: B is input, bit 0: C lower is input. A mode set clears the output latches.
 // Control word, bit 7 = 0: set/reset one bit of port C (bits 1-3 = bit number, bit 0 = value).
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ppi8255 {
     pub out: [u8; 3],     // output latches
     control: u8,

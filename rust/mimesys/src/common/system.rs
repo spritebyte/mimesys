@@ -39,8 +39,18 @@ pub trait System: Send {
     fn set_audio_rate_adjust(&mut self, _factor: f32) {}
     fn cheats_mut(&mut self) -> Option<&mut crate::common::cheats::Cheats> { None }
     fn set_option(&mut self, _key: &str, _value: i64) {}
+    /// Pointer for light guns: position in framebuffer pixels (-1 = off screen) and mouse
+    /// buttons (bit 0 left, bit 1 right). Systems without one ignore it.
+    fn set_pointer(&mut self, _x: i32, _y: i32, _buttons: u32) {}
     fn link_partner(&mut self) -> Option<&mut dyn System> { None }
     fn attach_cable(&mut self, _cable: Option<Box<dyn crate::gameboy::gb_link::LinkCable>>) -> bool { false }
+    /// Plug a network link cable in (None = unplug). Systems with a link port that isn't
+    /// the Game Boy's (GBA) override this; the default hands it to `attach_cable`.
+    fn attach_net(&mut self, link: Option<crate::gameboy::gb_netlink::NetLink>) -> bool {
+        self.attach_cable(link.map(|l| Box::new(l) as Box<dyn crate::gameboy::gb_link::LinkCable>))
+    }
     /// The cable's status line for the UI ("" = no cable).
-    fn cable_status(&self) -> String { String::new() }    
+    fn cable_status(&self) -> String { String::new() }
+    /// Debug trace lines collected since the last call (GBA link log; "link_trace" option).
+    fn take_trace(&mut self) -> Vec<String> { Vec::new() }    
 }

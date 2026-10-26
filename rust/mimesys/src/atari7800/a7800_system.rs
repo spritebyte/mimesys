@@ -162,8 +162,15 @@ impl System for A7800System {
         if on(pad::LEFT) { swcha &= !0x40; }
         if on(pad::DOWN) { swcha &= !0x20; }
         if on(pad::UP) { swcha &= !0x10; }
+        let p2 = pad::player2(mask);
+        let on2 = |b: u32| p2 & b != 0;
+        if on2(pad::RIGHT) { swcha &= !0x08; }
+        if on2(pad::LEFT) { swcha &= !0x04; }
+        if on2(pad::DOWN) { swcha &= !0x02; }
+        if on2(pad::UP) { swcha &= !0x01; }
         self.bus.riot.swcha_in = swcha;
         self.bus.buttons = [on(pad::B), on(pad::A)];
+        self.bus.buttons2 = [on2(pad::B), on2(pad::A)];
         let mut swchb = 0x0Bu8;                       // RESET, SELECT, PAUSE up; difficulty B
         if on(pad::START2) { swchb &= !0x01; }
         if on(pad::SELECT) { swchb &= !0x02; }

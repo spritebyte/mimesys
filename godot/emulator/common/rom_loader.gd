@@ -1,6 +1,8 @@
 class_name RomLoader
 
 const ARCADE_DB_PATH := "user://arcade_games.json"
+const BIOS_DIR := "user://BIOS"
+const HISCORE_DAT_PATH := "user://hiscore.dat"
 const SKIP_EXT := ["txt", "md", "nfo", "htm", "html", "jpg", "png", "pdf"]
 
 # Loading a game is three steps (main.gd's execute_load does them in order):
@@ -63,7 +65,7 @@ static func guess_system(data: PackedByteArray, path: String) -> Dictionary:
 	return {"clear": lines.size() > 0 and lines[0] == "clear", "guesses": guesses}
 
 
-## Build the system. `system_id`: nes gb gbc sms gg coleco pce a2600 a7800
+## Build the system. `system_id`: nes gb gbc gba sms gg coleco pce a2600 a7800
 static func create_system(system_id: String, data: PackedByteArray, name: String) -> Variant:
 	var bios := PackedByteArray()
 	match system_id:
@@ -73,6 +75,10 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 				print("Warning: no ColecoVision BIOS; most games won't start.")
 		"gb", "gbc":
 			bios = load_bios(AppSettings.bios_path("gb", "user://BIOS/gbc_bios.bin"))
+		"gba":
+			bios = load_bios(AppSettings.bios_path("gba", "user://BIOS/gba_bios.bin"))
+			if bios.is_empty():
+				print("Warning: no GBA BIOS; starting the cartridge directly (BIOS calls won't work).")
 	var sys := EmuSystem.new()
 	if not sys.load_cartridge(system_id, data, name, bios):
 		return null
@@ -97,6 +103,12 @@ static func load_arcade(zip_path: String) -> EmuSystem:
 	var found := resolve_arcade(zip_path, _load_arcade_db())
 	if found.is_empty():
 		return null
+	# MAME's hiscore.dat (user:// or the BIOS folder): the core picks this set's entry
+	# and saves the score table for boards without battery RAM
+	for p in [HISCORE_DAT_PATH, BIOS_DIR.path_join("hiscore.dat")]:
+		if FileAccess.file_exists(p):
+			found["regions"]["hiscore.dat"] = FileAccess.get_file_as_bytes(p)
+			break
 	var sys := EmuSystem.new()
 	if not sys.load_arcade(found["driver"], found["set_id"], found["regions"]):
 		return null
@@ -116,8 +128,12 @@ static func resolve_arcade(zip_path: String, db: Dictionary) -> Dictionary:
 	var candidates: Array = []
 	if db.has(zip_id):
 		candidates.append(zip_id)
+	# A zip named after a known set only falls back to sets of the same family (its
+	# parent and clones). Without this, a set with one ROM missing could quietly load a
+	# different game that happens to share a few chips (Double Dragon II -> Double Dragon).
+	var family := _root_of(db, zip_id) if db.has(zip_id) else ""
 	for set_id in _sets_by_overlap(db, own):
-		if set_id != zip_id:
+		if set_id != zip_id and (family == "" or _root_of(db, set_id) == family):
 			candidates.append(set_id)
 	if candidates.is_empty():
 		push_error("%s doesn't match any arcade set in the database" % zip_path.get_file())
@@ -126,12 +142,18 @@ static func resolve_arcade(zip_path: String, db: Dictionary) -> Dictionary:
 	var first_missing: Array = []
 	for set_id in candidates:
 		var pool: Array = [own]
-		for id in [set_id] + _parents_of(db, set_id):
+		# parents' zips, then device zips (MAME keeps chip ROMs like the Votrax's
+		# sc01a.bin in their own zip, e.g. votrsc01a.zip)
+		for id in [set_id] + _parents_of(db, set_id) + _devices_of(db, set_id):
 			if id == zip_id:
 				continue
 			var idx := _zip_index(cache, folder, id)
 			if not idx.is_empty():
 				pool.append(idx)
+		# last resort: the BIOS folder, for chip ROMs shared by several games (sc01a.bin)
+		var bios := _bios_index(cache)
+		if not bios.is_empty():
+			pool.append(bios)
 		var built := _build_regions(db, set_id, pool)
 		if built["missing"].is_empty():
 			if set_id != zip_id:
@@ -171,6 +193,41 @@ static func _zip_index(cache: Dictionary, folder: String, id: String) -> Diction
 	return idx
 
 
+## Loose files and the contents of zips in the BIOS folder (user://BIOS), by SHA-1 and name.
+static func _bios_index(cache: Dictionary) -> Dictionary:
+	const KEY := "<bios>"
+	if cache.has(KEY):
+		return cache[KEY]
+	var idx := {}
+	var dir := DirAccess.open(BIOS_DIR)
+	if dir != null:
+		idx = {"by_sha1": {}, "by_name": {}}
+		for f in dir.get_files():
+			var path := BIOS_DIR.path_join(f)
+			if f.get_extension().to_lower() == "zip":
+				var zip := ZIPReader.new()
+				if zip.open(path) == OK:
+					for inner in zip.get_files():
+						if inner.ends_with("/"):
+							continue
+						var data := zip.read_file(inner)
+						if not data.is_empty():
+							idx["by_name"][inner.get_file().to_lower()] = data
+							idx["by_sha1"][_sha1(data)] = data
+					zip.close()
+			else:
+				var file := FileAccess.open(path, FileAccess.READ)
+				if file == null or file.get_length() > 1024 * 1024:   # skip anything big
+					continue
+				var data := file.get_buffer(file.get_length())
+				file.close()
+				if not data.is_empty():
+					idx["by_name"][f.to_lower()] = data
+					idx["by_sha1"][_sha1(data)] = data
+	cache[KEY] = idx
+	return idx
+
+
 static func _sha1(data: PackedByteArray) -> String:
 	var ctx := HashingContext.new()
 	ctx.start(HashingContext.HASH_SHA1)
@@ -191,6 +248,12 @@ static func _sets_by_overlap(db: Dictionary, idx: Dictionary) -> Array:
 			scored.append([hits, set_id])
 	scored.sort_custom(func(a, b): return a[0] > b[0])
 	return scored.map(func(s): return s[1])
+
+
+## The top parent of a set (the set itself if it has none).
+static func _root_of(db: Dictionary, set_id: String) -> String:
+	var parents := _parents_of(db, set_id)
+	return parents[-1] if not parents.is_empty() else set_id
 
 
 static func _parents_of(db: Dictionary, set_id: String) -> Array:
@@ -220,13 +283,20 @@ static func _build_regions(db: Dictionary, set_id: String, pool: Array) -> Dicti
 	var regions := _resolve_regions(db, set_id)
 	for region_name in regions:
 		var region: Dictionary = regions[region_name]
+		# "optional": true = the game runs without it (e.g. a speech chip ROM)
+		var optional: bool = region.get("optional", false)
+		var found_any := false
 		var buf := PackedByteArray()
 		buf.resize(region["size"].hex_to_int())   # zero-filled
 		for rom in region["roms"]:
 			var data := _find_rom(pool, rom)
 			if data.is_empty():
-				missing.append("%s (sha1 %s)" % [rom["name"], rom.get("sha1", "?")])
+				if optional:
+					print("Optional ROM not found: %s (region %s)" % [rom["name"], region_name])
+				else:
+					missing.append("%s (sha1 %s)" % [rom["name"], rom.get("sha1", "?")])
 				continue
+			found_any = true
 			var file_off: int = rom.get("file_offset", "0x0").hex_to_int()
 			var size: int = rom["size"].hex_to_int()
 			if data.size() < file_off + size:
@@ -234,8 +304,12 @@ static func _build_regions(db: Dictionary, set_id: String, pool: Array) -> Dicti
 				continue
 			var chunk := data.slice(file_off, file_off + size)
 			var nibble: String = rom.get("nibble", "")
+			# "step": 2 = every other byte (MAME ROM_LOAD16_BYTE)
+			var step: int = rom.get("step", "0x1").hex_to_int()
 			for off in [rom["offset"]] + rom.get("reload", []):
-				_copy_into(buf, off.hex_to_int(), chunk, nibble)
+				_copy_into(buf, off.hex_to_int(), chunk, nibble, step)
+		if optional and not found_any:
+			continue
 		out[region_name] = buf
 	return {"regions": out, "missing": missing}
 
@@ -250,6 +324,16 @@ static func _resolve_regions(db: Dictionary, set_id: String) -> Dictionary:
 	return regions
 
 
+## Device zips a set can take ROMs from ("devices": ["votrsc01a"]), inherited from parents.
+static func _devices_of(db: Dictionary, set_id: String) -> Array:
+	var out: Array = []
+	for id in [set_id] + _parents_of(db, set_id):
+		for d in db.get(id, {}).get("devices", []):
+			if not out.has(d):
+				out.append(d)
+	return out
+
+
 # Variants inherit "driver" from the parent if they don't set it
 static func _driver_of(db: Dictionary, set_id: String) -> String:
 	var game: Dictionary = db[set_id]
@@ -259,12 +343,14 @@ static func _driver_of(db: Dictionary, set_id: String) -> String:
 
 
 # nibble: "" = overwrite, "low" = OR into bits 0-3, "high" = OR into bits 4-7
-static func _copy_into(dst: PackedByteArray, offset: int, src: PackedByteArray, nibble: String = "") -> void:
+# step: distance between destination bytes (2 for MAME ROM_LOAD16_BYTE)
+static func _copy_into(dst: PackedByteArray, offset: int, src: PackedByteArray, nibble: String = "", step: int = 1) -> void:
 	for i in src.size():
+		var d := offset + i * step
 		match nibble:
-			"low":  dst[offset + i] |= src[i] & 0x0F
-			"high": dst[offset + i] |= (src[i] & 0x0F) << 4
-			_:      dst[offset + i] = src[i]
+			"low":  dst[d] |= src[i] & 0x0F
+			"high": dst[d] |= (src[i] & 0x0F) << 4
+			_:      dst[d] = src[i]
 
 
 static func _load_arcade_db() -> Dictionary:

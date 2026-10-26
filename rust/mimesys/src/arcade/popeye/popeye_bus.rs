@@ -38,7 +38,45 @@ pub struct PopeyeBus {
     dsw_bit: u8,
 }
 
+/// Save state of the board: RAMs, AY, protection chip, latches. Serialized from references,
+/// deserialized into owned values (same layout).
+pub type PopeyeBusState = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, [u8; 3], u8, bool,
+                           Ay8910, [u8; 3], u8, u8);
+
 impl PopeyeBus {
+    pub fn save(&self) -> impl serde::Serialize + '_ {
+        let v = &self.video;
+        (&self.ram, &v.video_ram, &v.color_ram, &v.background_ram, &v.sprite_ram, v.scroll,
+         v.palette_bank, v.flip, &self.ay, [self.prot0, self.prot1, self.prot_shift],
+         self.field, self.dsw_bit)
+    }
+
+    pub fn load(&mut self, s: PopeyeBusState) -> Result<(), String> {
+        let (ram, video_ram, color_ram, background_ram, sprite_ram, scroll, palette_bank, flip,
+             mut ay, prot, field, dsw_bit) = s;
+        let v = &mut self.video;
+        if ram.len() != self.ram.len() || video_ram.len() != v.video_ram.len()
+            || color_ram.len() != v.color_ram.len() || background_ram.len() != v.background_ram.len()
+            || sprite_ram.len() != v.sprite_ram.len() {
+            return Err("save state doesn't fit this board".into());
+        }
+        self.ram = ram;
+        v.video_ram = video_ram;
+        v.color_ram = color_ram;
+        v.background_ram = background_ram;
+        v.sprite_ram = sprite_ram;
+        v.scroll = scroll;
+        v.palette_bank = palette_bank;
+        v.flip = flip;
+        v.invalidate_palette();
+        ay.out = std::mem::take(&mut self.ay.out);
+        self.ay = ay;
+        [self.prot0, self.prot1, self.prot_shift] = prot;
+        self.field = field;
+        self.dsw_bit = dsw_bit;
+        Ok(())
+    }
+
     pub fn new(rom: Vec<u8>, video: PopeyeVideo, ay: Ay8910, has_protection: bool) -> Self {
         Self {
             rom,

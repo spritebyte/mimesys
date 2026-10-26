@@ -27,6 +27,16 @@ pub mod mapper69;
 pub mod mapper71;
 #[path = "mappers/mapper206.rs"]
 pub mod mapper206;
+#[path = "mappers/mapper11.rs"]
+pub mod mapper11;
+#[path = "mappers/mapper68.rs"]
+pub mod mapper68;
+#[path = "mappers/mapper87.rs"]
+pub mod mapper87;
+#[path = "mappers/mapper95.rs"]
+pub mod mapper95;
+#[path = "mappers/vrc24.rs"]
+pub mod vrc24;
 pub mod nes_system;
 pub mod nes_bus;
 pub mod nes_apu;
@@ -34,3 +44,4 @@ pub mod nes_ppu;
 pub mod cartridge;
 pub mod nes_state;
 pub mod nes_rewind;
+pub mod rom_db;

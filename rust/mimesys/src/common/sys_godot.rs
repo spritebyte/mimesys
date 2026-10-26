@@ -335,10 +335,33 @@ impl EmuSystem {
         true
     }
 
+    /// Two GBAs side by side, joined by a link cable (GBA 1 = multiplayer parent).
+    #[func]
+    fn load_gba_link(&mut self, rom_a: PackedByteArray, name_a: String,
+                     rom_b: PackedByteArray, name_b: String, bios: PackedByteArray) -> bool {
+        use crate::gba::{gba_link::GbaLinkPair, gba_system::GbaSystem};
+        let a = match GbaSystem::from_rom(rom_a.as_slice(), &name_a, bios.as_slice()) {
+            Ok(s) => s, Err(e) => { godot_error!("GBA 1: {e}"); return false; }
+        };
+        let b = match GbaSystem::from_rom(rom_b.as_slice(), &name_b, bios.as_slice()) {
+            Ok(s) => s, Err(e) => { godot_error!("GBA 2: {e}"); return false; }
+        };
+        self.system = Some(Box::new(GbaLinkPair::new(a, b)));
+        true
+    }
+
     #[func]
     fn set_option(&mut self, key: GString, value: i64) {
         if let Some(sys) = &mut self.system {
             sys.set_option(&key.to_string(), value);
+        }
+    }
+
+    /// Light gun pointer (framebuffer pixels, -1 = off screen; buttons bit 0 left, bit 1 right)
+    #[func]
+    fn set_pointer(&mut self, x: i64, y: i64, buttons: i64) {
+        if let Some(sys) = &mut self.system {
+            sys.set_pointer(x as i32, y as i32, buttons as u32);
         }
     }
 
@@ -356,7 +379,7 @@ impl EmuSystem {
         let Some(sys) = &mut self.system else { return "Load a game first".into(); };
         match NetLink::host(port as u16) {
             Ok(link) => {
-                if sys.attach_cable(Some(Box::new(link))) { GString::new() }
+                if sys.attach_net(Some(link)) { GString::new() }
                 else { "This system has no link port".into() }
             }
             Err(e) => GString::from(e.as_str()),
@@ -368,7 +391,7 @@ impl EmuSystem {
         let Some(sys) = &mut self.system else { return "Load a game first".into(); };
         match NetLink::join(&address.to_string(), port as u16) {
             Ok(link) => {
-                if sys.attach_cable(Some(Box::new(link))) { GString::new() }
+                if sys.attach_net(Some(link)) { GString::new() }
                 else { "This system has no link port".into() }
             }
             Err(e) => GString::from(e.as_str()),
@@ -378,7 +401,16 @@ impl EmuSystem {
     #[func]
     fn net_disconnect(&mut self) {
         if let Some(sys) = &mut self.system {
-            sys.attach_cable(None);
+            sys.attach_net(None);
+        }
+    }
+
+    /// Debug log lines collected since the last call (GBA link log when "link_trace" is on).
+    #[func]
+    fn take_trace(&mut self) -> PackedStringArray {
+        match &mut self.system {
+            Some(sys) => PackedStringArray::from_iter(sys.take_trace().iter().map(|l| GString::from(l.as_str()))),
+            None => PackedStringArray::new(),
         }
     }
 

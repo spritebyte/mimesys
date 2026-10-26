@@ -1,7 +1,8 @@
 class_name NetLinkDialog
 extends AcceptDialog
-## File > Network Link (Game Boy). Only the buttons live here; the networking itself is Rust
-## (gb_netlink.rs), reached through EmuSystem.net_host / net_join / net_disconnect / net_status.
+## File > Network Link (Game Boy or GBA). Only the buttons live here; the networking itself is
+## Rust (gb_netlink.rs), reached through EmuSystem.net_host / net_join / net_disconnect / net_status.
+## For the GBA the host is player 1 (the multiplayer parent).
 
 signal host_requested(port: int)
 signal join_requested(address: String, port: int)
@@ -11,6 +12,7 @@ var _host_port := SpinBox.new()
 var _join_ip := LineEdit.new()
 var _join_port := SpinBox.new()
 var _status := Label.new()
+var _trace_box: CheckBox
 
 
 func _init() -> void:
@@ -57,6 +59,12 @@ func _init() -> void:
 	disc.pressed.connect(func(): disconnect_requested.emit())
 	box.add_child(disc)
 
+	var trace := CheckBox.new()
+	trace.text = "Record a link log (for debugging, GBA): user://link_trace.txt"
+	trace.button_pressed = AppSettings.link_trace
+	trace.toggled.connect(func(on): AppSettings.link_trace = on; AppSettings.save_settings())
+	_trace_box = trace
+	box.add_child(trace)
 	box.add_child(HSeparator.new())
 	_status.text = "Not connected"
 	box.add_child(_status)
@@ -79,7 +87,10 @@ func _join() -> void:
 		join_requested.emit(_join_ip.text.strip_edges(), int(_join_port.value))
 
 
-func open() -> void:
+## `system_name` goes in the title, e.g. "Game Boy Advance".
+func open(system_name := "Game Boy") -> void:
+	title = "Network Link (%s)" % system_name
+	_trace_box.button_pressed = AppSettings.link_trace
 	_join_ip.text = AppSettings.net_ip
 	_host_port.value = AppSettings.net_port
 	_join_port.value = AppSettings.net_port

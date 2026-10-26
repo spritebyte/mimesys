@@ -31,7 +31,49 @@ pub struct PacmanBus {
     pub irq_vector: u8,
 }
 
+/// Save state: RAM, latches and chips (no ROMs or graphics).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PacmanBusState {
+    bank: usize,
+    ram: Vec<u8>,
+    video: (Vec<u8>, Vec<u8>, [u8; 16], [u8; 16], bool, [u8; 4]),
+    wsg: NamcoWsg,
+    irq_enable: bool,
+    irq_line: bool,
+    irq_vector: u8,
+}
+
 impl PacmanBus {
+    pub fn save(&self) -> PacmanBusState {
+        let v = &self.video;
+        PacmanBusState {
+            bank: self.bank,
+            ram: self.ram.clone(),
+            video: (v.video_ram.clone(), v.color_ram.clone(), v.sprite_ram, v.sprite_pos, v.flip,
+                    [v.char_bank, v.sprite_bank, v.palette_bank, v.colortable_bank]),
+            wsg: self.wsg.save_copy(),
+            irq_enable: self.irq_enable, irq_line: self.irq_line, irq_vector: self.irq_vector,
+        }
+    }
+
+    pub fn load(&mut self, mut s: PacmanBusState) -> Result<(), String> {
+        if s.bank >= self.banks.len() || s.ram.len() != self.ram.len()
+            || s.video.0.len() != self.video.video_ram.len() || s.video.1.len() != self.video.color_ram.len() {
+            return Err("save state doesn't fit this board".into());
+        }
+        self.bank = s.bank;
+        self.ram = s.ram;
+        let v = &mut self.video;
+        (v.video_ram, v.color_ram, v.sprite_ram, v.sprite_pos, v.flip) = (s.video.0, s.video.1, s.video.2, s.video.3, s.video.4);
+        [v.char_bank, v.sprite_bank, v.palette_bank, v.colortable_bank] = s.video.5;
+        s.wsg.keep_static(&mut self.wsg);
+        self.wsg = s.wsg;
+        self.irq_enable = s.irq_enable;
+        self.irq_line = s.irq_line;
+        self.irq_vector = s.irq_vector;
+        Ok(())
+    }
+
     pub fn new(board: Board, banks: Vec<Vec<u8>>, opcodes: Option<Vec<u8>>, ms_traps: bool, video: PacmanVideo, wsg: NamcoWsg) -> Self {
         let bank = banks.len() - 1;
         let (dsw1, dsw2) = match board {

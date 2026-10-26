@@ -131,6 +131,19 @@ pub struct M6502Cpu {
     pub branch_taken: bool,
     pub branch_page_crossed: bool,
     branch_next_pc: u16,
+    /// Crash log: the last 64 instruction starts (pc << 16 | opcode << 8 | 0) and
+    /// interrupt entries (pc << 16 | 0xFF00 | 1 = NMI, 2 = IRQ). Printed on a bad opcode.
+    history: [u32; 256],
+    /// registers at each history entry: A << 24 | X << 16 | Y << 8 | P, and SP
+    history_regs: [u32; 256],
+    history_sp: [u8; 256],
+    history_pos: usize,
+    /// Set the first time a BRK ($00) executes after power-on: games that never use BRK
+    /// only get there by running off into data, so this marks where things went wrong.
+    pub first_brk_log: Option<String>,
+    /// A JAM/KIL opcode ($02, $12, ... $F2) locks the real CPU up until reset. The rest of
+    /// the console keeps running.
+    pub jammed: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -208,6 +221,12 @@ impl M6502Cpu {
             },
         };
         Self {
+            history: [0; 256],
+            history_regs: [0; 256],
+            history_sp: [0; 256],
+            history_pos: 0,
+            first_brk_log: None,
+            jammed: false,
             pc: 0,
             sp: 0xfd,
             a: 0,
@@ -313,6 +332,7 @@ impl M6502Cpu {
 
     pub fn power_on(&mut self, bus: &mut dyn AddressBus) {
         self.is_running = true;
+        self.jammed = false;
         self.a = 0; self.x = 0; self.y = 0;
         self.sp = 0xFD;
         self.status.interrupt_disable = true;
@@ -338,6 +358,7 @@ impl M6502Cpu {
     }
 
     pub fn reset(&mut self, bus: &mut dyn AddressBus) {
+        self.jammed = false;
         self.sp = self.sp.wrapping_sub(3);
         self.status.interrupt_disable = true;
         self.nmi_pending = false;
@@ -347,10 +368,18 @@ impl M6502Cpu {
         self.last_opcode = 0;
         self.total_cycles = 0;
         self.operand_address_crossed_page = false;
-        self.is_running = false;
+        self.cycles_remaining = 0;          // abandon whatever instruction was in flight
+        // The reset sequence takes 7 cycles like an interrupt (3 stack "pushes" turned into
+        // reads, hence SP -= 3), the last two fetch the vector
+        for _ in 0..5 {
+            bus.step_cycles(1);
+        }
+        bus.begin_cpu_cycle();
         let lo = bus.read_byte(0xFFFC) as u16;
+        bus.begin_cpu_cycle();
         let hi = bus.read_byte(0xFFFD) as u16;
         self.pc = (hi << 8) | lo;
+        self.total_cycles = 7;
     }
 
     pub fn sample_interrupt_lines(&mut self, bus: &mut dyn AddressBus) {
@@ -365,6 +394,9 @@ impl M6502Cpu {
     }
 
     pub fn step_one_cycle(&mut self, bus: &mut dyn AddressBus) {
+        if self.jammed {
+            return;
+        }
         let in_interrupt_sequence = matches!(self.current_op,
             Operation::Nmi | Operation::Irq | Operation::Brk);
         let suppress_poll = self.branch_taken
@@ -383,6 +415,19 @@ impl M6502Cpu {
             if !self.check_interrupts(bus) {
                 // CYCLE 1: FETCH STAGE
                 self.current_opcode = bus.read_byte(self.pc);
+                self.record_history(((self.pc as u32) << 16) | ((self.current_opcode as u32) << 8));
+                if self.current_opcode == 0x00 && self.first_brk_log.is_none() {
+                    self.first_brk_log = Some(format!("First BRK at {:04X}\n{}", self.pc, self.history_dump()));
+                }
+                if matches!(self.current_opcode, 0x02 | 0x12 | 0x22 | 0x32 | 0x42 | 0x52 | 0x62 | 0x72 | 0x92 | 0xB2 | 0xD2 | 0xF2) {
+                    self.jammed = true;
+                    println!("CPU jammed: opcode {:02X} at {:04X} (the real CPU locks up here until reset)", self.current_opcode, self.pc);
+                    println!("{}", self.history_dump());
+                    if let Some(log) = &self.first_brk_log {
+                        println!("--- Before that, the first BRK ---\n{log}");
+                    }
+                    return;
+                }
 
 /*                if self.total_cycles >= 85000 && self.total_cycles <= 8585050 {
                     let result = bus.read_byte(0x6000);
@@ -1132,7 +1177,7 @@ impl M6502Cpu {
             }
             0x1A | 0x7A | 0xDA | 0xFA => (Operation::Nop, AddressingMode::Implied, 2),
             // 0xD2 is valid op on 65C816.
-            0x80 | 0x82 | 0xC2 | 0xD2 | 0xE2 => (Operation::Nop, AddressingMode::Immediate, 2),
+            0x80 | 0x82 | 0xC2 | 0xE2 => (Operation::Nop, AddressingMode::Immediate, 2),
             0x44 => (Operation::Nop, AddressingMode::ZeroPage, 3),
             0x54 => (Operation::Nop, AddressingMode::ZeroPageX, 4),
             0x5C => (Operation::Nop, AddressingMode::AbsoluteX, 4),
@@ -1143,8 +1188,56 @@ impl M6502Cpu {
             0x1B => (Operation::Slo, AddressingMode::AbsoluteY, 7),
             0x1F => (Operation::Slo, AddressingMode::AbsoluteX, 7),
             _=> { println!("Opcode unimplemented: {:02X}. {:04X}", opcode, self.pc);
+                println!("{}", self.history_dump());
                 todo!() },
         }
+    }
+
+    /// The SH* family (SHA, SHX, SHY, SHS): store reg & (H + 1), H = high byte of the
+    /// base address before indexing. If indexing crossed a page, that value also replaces
+    /// the high byte of the target address. If a DMA halted the CPU on the read just
+    /// before this write, the "& (H + 1)" drops out: it becomes a plain store of reg.
+    fn write_sh_unstable(&mut self, bus: &mut dyn AddressBus, reg: u8) {
+        if bus.dma_on_last_read() {
+            bus.write_byte(self.effective_addr, reg);
+            return;
+        }
+        let value = reg & self.temp_addr_high.wrapping_add(1);
+        let mut target = self.effective_addr;
+        if (target >> 8) as u8 != self.temp_addr_high {
+            target = (target & 0x00FF) | ((value as u16) << 8);
+        }
+        bus.write_byte(target, value);
+    }
+
+    fn record_history(&mut self, entry: u32) {
+        let i = self.history_pos;
+        self.history[i] = entry;
+        self.history_regs[i] = (self.a as u32) << 24 | (self.x as u32) << 16 | (self.y as u32) << 8
+            | self.status.to_u8(false) as u32;
+        self.history_sp[i] = self.sp;
+        self.history_pos = (i + 1) % 256;
+    }
+
+    /// The last 256 instructions, oldest first (see `history`), with the registers as
+    /// they were when each instruction started.
+    pub fn history_dump(&self) -> String {
+        let mut out = String::from("Last instructions (oldest first):\n");
+        for k in 0..256 {
+            let i = (self.history_pos + k) % 256;
+            let e = self.history[i];
+            if e == 0 { continue; }
+            let pc = e >> 16;
+            let r = self.history_regs[i];
+            let regs = format!("A={:02X} X={:02X} Y={:02X} P={:02X} SP={:02X}",
+                               r >> 24, (r >> 16) & 0xFF, (r >> 8) & 0xFF, r & 0xFF, self.history_sp[i]);
+            match e & 0xFFFF {
+                0xFF01 => out += &format!("  -- NMI (interrupted at {pc:04X})  {regs}\n"),
+                0xFF02 => out += &format!("  -- IRQ (interrupted at {pc:04X})  {regs}\n"),
+                x => out += &format!("  {pc:04X}: {:02X}   {regs}\n", x >> 8),
+            }
+        }
+        out
     }
 
     fn check_interrupts(&mut self, bus: &mut dyn AddressBus) -> bool {
@@ -1157,12 +1250,14 @@ impl M6502Cpu {
             self.nmi_pending = false; // Clear edge trigger flag
             self.nmi_pending_shadow = false;
             self.nmi_polled = false;
+            self.record_history(((self.pc as u32) << 16) | 0xFF01);
             self.setup_hardware_interrupt(Operation::Nmi, bus);
             return true;
         }
         
         if self.irq_polled {
             self.irq_polled = false;
+            self.record_history(((self.pc as u32) << 16) | 0xFF02);
             self.setup_hardware_interrupt(Operation::Irq, bus);
             return true;
         }
@@ -1318,8 +1413,8 @@ impl M6502Cpu {
                         let _dummy = bus.read_byte(self.branch_next_pc);
                         self.pc = self.effective_addr;
                     }
-                    4 => {  // Branch occurs to different page
-                        let _dummy = bus.read_byte(self.effective_addr);
+                    4 => {  // Branch occurs to different page: the high byte isn't fixed yet
+                        let _dummy = bus.read_byte((self.branch_next_pc & 0xFF00) | (self.effective_addr & 0x00FF));
                         self.pc = self.effective_addr;
                     }
                     _=> { }
@@ -1721,7 +1816,11 @@ impl M6502Cpu {
                     (Operation::Rts, 5) => { self.sp = self.sp.wrapping_add(1); self.temp_addr_high = bus.read_byte(STACK_BASE + self.sp as u16);
                         // emu_print!("**RTS** PC={:04X}|SP={:04X}|cycles_remaining={ }, instruction_step={ } ", self.pc, self.sp, self.cycles_remaining, self.instruction_step); 
                     }
-                    (Operation::Rts, 6) => { let _dummy = bus.read_byte(self.pc); self.pc = ((self.temp_addr_high as u16) << 8) | (self.temp_addr_low as u16); self.pc = self.pc.wrapping_add(1);
+                    (Operation::Rts, 6) => {
+                        // dummy read from the pulled return address, then PC + 1
+                        self.pc = ((self.temp_addr_high as u16) << 8) | (self.temp_addr_low as u16);
+                        let _dummy = bus.read_byte(self.pc);
+                        self.pc = self.pc.wrapping_add(1);
                         // emu_print!("**RTS** PC={:04X}|SP={:04X}|cycles_remaining={ }, instruction_step={ } ", self.pc, self.sp, self.cycles_remaining, self.instruction_step);
                     }
                     _=> { }
@@ -2073,44 +2172,18 @@ impl M6502Cpu {
 //                self.test_prints = 3;
             }
             Operation::Sha => {
-                // High byte of the target address + 1
-                let value = self.a & self.x & self.temp_addr_high.wrapping_add(1);
-                let mut target = self.effective_addr;
-                if (target >> 8) as u8 != self.temp_addr_high {
-                // page crossed: high byte of the address is replaced by the value
-                    target = (target & 0x00FF) | ((value as u16) << 8);
-                }
-                bus.write_byte(target, value);
+                let reg = self.a & self.x;
+                self.write_sh_unstable(bus, reg);
             }
 
             Operation::Shx => {
-                let high_plus_one = self.temp_addr_high.wrapping_add(1);
-                let val_to_write = self.x & high_plus_one;
-                
-                // Crucial hardware quirk: If a page cross ACTUALLY occurred, 
-                // the written value replaces the high byte of the address on the bus.
-                let page_crossed = (self.temp_addr_low as u16 + self.y as u16) > 0xFF; // Note: SHX uses Y index
-                if page_crossed {
-                    let final_addr = ((val_to_write as u16) << 8) | (self.effective_addr & 0x00FF);
-                    bus.write_byte(final_addr, val_to_write);
-                } else {
-                    bus.write_byte(self.effective_addr, val_to_write);
-                }
+                let reg = self.x;
+                self.write_sh_unstable(bus, reg);
             }
 
             Operation::Shy => {
-                let high_plus_one = self.temp_addr_high.wrapping_add(1);
-                let val_to_write = self.y & high_plus_one;
-                
-                // Crucial hardware quirk: If a page cross ACTUALLY occurred,
-                // the written value replaces the high byte of the address on the bus.
-                let page_crossed = (self.temp_addr_low as u16 + self.x as u16) > 0xFF; // Note: SHY uses X index
-                if page_crossed {
-                    let final_addr = ((val_to_write as u16) << 8) | (self.effective_addr & 0x00FF);
-                    bus.write_byte(final_addr, val_to_write);
-                } else {
-                    bus.write_byte(self.effective_addr, val_to_write);
-                }
+                let reg = self.y;
+                self.write_sh_unstable(bus, reg);
             }
 
             Operation::Slo => {
@@ -2151,16 +2224,10 @@ impl M6502Cpu {
                 bus.write_byte(self.effective_addr, 0x00);
             }
             Operation::Tas => {
-                // 1. Bitwise AND A and X 
-                let intermediate = self.a & self.x;
-                self.sp = intermediate; // Overwrites the CPU stack pointer!
-    
-                // 2. Compute the value to drop onto the memory bus
-                let high_plus_one = ((self.effective_addr >> 8) + 1) as u8;
-                let val_to_write = intermediate & high_plus_one;
-    
-                // 3. Perform the memory store
-                bus.write_byte(self.effective_addr, val_to_write);
+                // SHS/TAS: SP = A & X, then store like SHA
+                let reg = self.a & self.x;
+                self.sp = reg;
+                self.write_sh_unstable(bus, reg);
             }
             Operation::Tax => { self.x = self.a; self.update_nz_flags(self.x); }
             Operation::Tay => { self.y = self.a; self.update_nz_flags(self.y); }
@@ -2282,4 +2349,8 @@ pub trait AddressBus {
     fn is_nmi_enabled(&mut self) -> bool;
     fn step_cycles(&mut self, _cycles: u64);
     fn begin_cpu_cycle(&mut self);
+    /// True if a DMA halted the CPU on its most recent read (NES: DMC DMA). The SH*
+    /// unofficial opcodes lose their "& (H+1)" term when that read was the cycle right
+    /// before their write.
+    fn dma_on_last_read(&self) -> bool { false }
 }

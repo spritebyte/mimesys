@@ -3,21 +3,31 @@ use crate::arcade::donkey_kong::dk_bus::DKBus;
 use crate::arcade::donkey_kong::dk_sound::{SoundCpu, Mcs48, DacResampler, DkSfx, run_sound_line};
 use crate::arcade::donkey_kong::dk_video::{DKVideo, SCREEN_W, SCREEN_H, FIRST_VISIBLE_LINE, VBLANK_START};
 use crate::common::system::{System,DisplayInfo,Rotation};
-use crate::common::snapshot::Snapshot;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::collections::HashMap;
-use std::io::Cursor;
+use crate::arcade::donkey_kong::dk_bus::DkBusState;
+use crate::arcade::hiscore::HiScoreMem;
+use crate::arcade::state;
+use crate::common::cpu::mcs48::Mcs48 as Mcs48Cpu;
+use crate::common::cpu::z80::Bus;
+
+const STATE_VERSION: u32 = 3;
 use crate::arcade::take_region;
 use crate::common::input as pad;
-use serde::{Serialize, Deserialize};
 
 const CYCLES_PER_LINE: i32 = 192;
 const LINES_PER_FRAME: u16 = 264;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Variant {
+    DonkeyKong,
+    DonkeyKongJr,
+    DonkeyKong3,
+}
+
 pub struct DKSystem {
     pub cpu: Z80Cpu,
     pub bus: DKBus,
+    variant: Variant,
     line_cycles: i32,
     current_frame: u64,
     save_filename: String,
@@ -28,18 +38,8 @@ pub struct DKSystem {
     sound_budget: i32,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct DKSaveState {
-    pub version: f32,
-    pub cpu: Z80State,
-//    pub ppu: PpuState,
-//    pub apu: ApuState,
-    #[serde(with = "serde_bytes")]
-    pub ram: [u8; 2048], 
-}
-
 impl DKSystem {
-    pub fn new(set_name: String, mut regions: HashMap<String, Vec<u8>>) -> Result<Self, String> {
+    pub fn new(variant: Variant, set_name: String, mut regions: HashMap<String, Vec<u8>>) -> Result<Self, String> {
         let rom   = take_region(&mut regions, "maincpu")?;
         let gfx1  = take_region(&mut regions, "gfx1")?;
         let gfx2  = take_region(&mut regions, "gfx2")?;
@@ -50,14 +50,15 @@ impl DKSystem {
         let video = DKVideo::new(&gfx1, &gfx2, &proms)?;
         let mut dk = Self {
             cpu: Z80Cpu::new(),
-            bus: DKBus::new(rom, video, sound_rom),
+            variant,
+            bus: DKBus::new(rom, video, sound_rom, variant),
             line_cycles: 0,
             current_frame: 0,
             save_filename: set_name.to_string(),
             save_path: "user://Arcade/DK/State".to_string(),
             sound_cpu: None,
             resampler: DacResampler::new(44100),
-            sfx: DkSfx::new(44100),
+            sfx: DkSfx::new(44100, variant == Variant::DonkeyKongJr),
             sound_budget: 0,
         };
         if has_sound {
@@ -112,7 +113,7 @@ impl System for DKSystem {
         self.bus.in2 = in2;
     }
 
-    fn drain_audio(&mut self) -> Vec<f32> { std::mem::take(&mut self.resampler.out) } // silent for now
+    fn drain_audio(&mut self) -> Vec<f32> { std::mem::take(&mut self.resampler.out) }
     fn sample_rate(&self) -> u32 { 44100 }
     fn power_on(&mut self) { }
     fn power_off(&mut self) { }
@@ -124,7 +125,7 @@ impl System for DKSystem {
     fn clear_sram_dirty(&mut self) { }
     fn get_current_frame(&self) -> i64 { self.current_frame as i64 }
     fn get_sram(&self) -> Option<&[u8]> { None }
-    fn load_sram(&mut self, data: &[u8]) { }
+    fn load_sram(&mut self, _data: &[u8]) { }
 
     fn framebuffer(&self) -> &[u8] { &self.bus.video.framebuffer }
 
@@ -134,6 +135,7 @@ impl System for DKSystem {
         if self.sound_cpu.is_some() {
             self.attach_sound_cpu(Box::new(Mcs48::new()))
         }
+        let _ = self.variant;
     }
 
     fn display_info(&self) -> DisplayInfo {
@@ -150,11 +152,32 @@ impl System for DKSystem {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        todo!("hook up DK Arcade save state")
+        let sound_cpu = self.sound_cpu.as_ref().and_then(|c| c.mcs48());
+        let s = (self.cpu.save_state(), self.bus.save(), self.line_cycles, self.current_frame,
+                 sound_cpu, &self.resampler, &self.sfx, self.sound_budget);
+        state::encode(&self.save_filename, STATE_VERSION, &s)
     }
 
     fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
-        let _ = data;
-        todo!("hook up DK Arcade load state")
+        let (cpu, bus, line_cycles, frame, sound_cpu, mut resampler, sfx, sound_budget):
+            (Z80State, DkBusState, i32, u64, Option<Mcs48Cpu>, DacResampler, DkSfx, i32) =
+            state::decode(&self.save_filename, STATE_VERSION, data)?;
+        self.bus.load(bus)?;
+        self.cpu.load_state(&cpu);
+        if let (Some(cur), Some(saved)) = (self.sound_cpu.as_mut().and_then(|c| c.mcs48_mut()), sound_cpu) {
+            *cur = saved;
+        }
+        resampler.keep_output(&mut self.resampler);
+        self.resampler = resampler;
+        self.sfx = sfx;
+        self.sound_budget = sound_budget;
+        self.line_cycles = line_cycles;
+        self.current_frame = frame;
+        Ok(())
     }
+}
+
+impl HiScoreMem for DKSystem {
+    fn hs_read(&mut self, addr: u16) -> u8 { self.bus.read(addr) }
+    fn hs_write(&mut self, addr: u16, v: u8) { self.bus.write(addr, v) }
 }

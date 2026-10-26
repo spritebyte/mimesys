@@ -7,8 +7,15 @@ use crate::arcade::pacman::pacman_video::{PacmanVideo, SCREEN_W, SCREEN_H};
 use crate::arcade::pacman::namco_wsg::NamcoWsg;
 use crate::arcade::pacman::mspacman;
 use crate::common::encryption::sega_crypt;
-use crate::common::snapshot::Snapshot;
+use crate::arcade::pacman::pacman_bus::PacmanBusState;
+use crate::arcade::hiscore::HiScoreMem;
+use crate::arcade::state;
+use crate::common::cpu::z80::{Bus, Z80State};
 use std::collections::HashMap;
+
+const STATE_VERSION: u32 = 1;
+
+type PacmanState = (Z80State, PacmanBusState, i32, bool, u8, u64);
 
 const CYCLES_PER_LINE: i32 = 192;
 const LINES_PER_FRAME: u16 = 264;
@@ -185,11 +192,25 @@ impl System for PacmanSystem {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        todo!("hook up Pacman Arcade save state")
+        let s: PacmanState = (self.cpu.save_state(), self.bus.save(), self.line_cycles,
+                              self.coin_was_down, self.coin_pulse, self.current_frame);
+        state::encode(&self.save_filename, STATE_VERSION, &s)
     }
 
     fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
-        let _ = data;
-        todo!("hook up Pacman Arcade load state")
+        let (cpu, bus, line_cycles, coin_was_down, coin_pulse, frame): PacmanState =
+            state::decode(&self.save_filename, STATE_VERSION, data)?;
+        self.bus.load(bus)?;
+        self.cpu.load_state(&cpu);
+        self.line_cycles = line_cycles;
+        self.coin_was_down = coin_was_down;
+        self.coin_pulse = coin_pulse;
+        self.current_frame = frame;
+        Ok(())
     }
+}
+
+impl HiScoreMem for PacmanSystem {
+    fn hs_read(&mut self, addr: u16) -> u8 { self.bus.read(addr) }
+    fn hs_write(&mut self, addr: u16, v: u8) { self.bus.write(addr, v) }
 }

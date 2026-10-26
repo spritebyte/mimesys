@@ -28,6 +28,8 @@ pub enum Extension {
     Turtles,      // Amidar/Turtles: solid background color from 3 latches, no stars
 }
 
+pub type VideoState = (Vec<u8>, Vec<u8>, bool, bool, [u8; 3], [bool; 3], bool, u32);
+
 pub struct GalaxianVideo {
     pub video_ram: Vec<u8>,         // 0x400 tile codes
     pub obj_ram: Vec<u8>,           // 0x100: column scroll/color, sprites, bullets
@@ -99,6 +101,21 @@ impl GalaxianVideo {
     }
 
     /// 7004 / B004. On the rising edge the star shift register restarts from "now".
+    /// Save state: RAMs and latches (graphics and star tables are rebuilt from ROMs).
+    pub fn save(&self) -> VideoState {
+        (self.video_ram.clone(), self.obj_ram.clone(), self.flip_x, self.flip_y, self.gfx_bank,
+         self.background, self.stars_enabled, self.star_origin)
+    }
+
+    pub fn load(&mut self, s: VideoState) -> Result<(), String> {
+        if s.0.len() != self.video_ram.len() || s.1.len() != self.obj_ram.len() {
+            return Err("video RAM size mismatch".into());
+        }
+        (self.video_ram, self.obj_ram, self.flip_x, self.flip_y, self.gfx_bank,
+         self.background, self.stars_enabled, self.star_origin) = s;
+        Ok(())
+    }
+
     pub fn set_stars_enabled(&mut self, on: bool, line: usize) {
         if on && !self.stars_enabled {
             self.star_origin = (STAR_PERIOD - (line as u32 * 512) % STAR_PERIOD) % STAR_PERIOD;
