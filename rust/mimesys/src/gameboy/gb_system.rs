@@ -3,6 +3,10 @@ use crate::gameboy::gb_bus::GameBoyBus;
 use crate::gameboy::gb_common::GbVariant;
 use crate::gameboy::gb_cartridge::{GbCartridge, CartType};
 use crate::gameboy::gb_palette::*;
+use crate::gameboy::gb_sgb::{Sgb, SGB_H, SGB_W};
+
+/// Shades 0-3 as colours (blue channel), for the SGB to colour itself.
+const SGB_SHADES: DmgPaletteSet = DmgPaletteSet { bg: [0, 1, 2, 3], obp0: [0, 1, 2, 3], obp1: [0, 1, 2, 3] };
 use crate::gameboy::gb_mbc;
 use crate::gameboy::gb_link::LinkUnit;
 use crate::gameboy::gb_serial::Serial;
@@ -15,7 +19,7 @@ use std::sync::Arc;
 use std::io::Cursor;
 
 const STATE_MAGIC: &[u8; 4] = b"GBST";
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;   // 2: Super Game Boy, SGB multiplayer pads
 
 fn state_config() -> impl bincode::config::Config {
     bincode::config::standard().with_fixed_int_encoding()
@@ -51,25 +55,29 @@ pub enum Model {
     Dmg,
     /// DMG games run in the CGB's compatibility mode, coloured by its boot ROM
     Cgb,
+    /// Super Game Boy: a DMG inside a border, coloured by the game's SGB commands
+    Sgb,
 }
 
 /// Boot ROMs and start-up choices from the frontend.
 ///
 /// The frontend sends one blob: "GBBC" then entries of tag (4 bytes), length (u32 LE) and
-/// data. Tags: "MODL" (1 byte: 0 auto, 1 DMG, 2 CGB), "SKIP" (1 byte: 1 = run the boot ROM
-/// instantly, no logo animation), "DMG0" (256-byte DMG boot ROM), "CGB0" (2304-byte CGB
-/// boot ROM). A bare file (older frontends) counts as the DMG or CGB boot ROM by its size.
+/// data. Tags: "MODL" (1 byte: 0 auto, 1 DMG, 2 CGB, 3 SGB), "SKIP" (1 byte: 1 = run the
+/// boot ROM instantly, no logo animation), "DMG0" (256-byte DMG boot ROM), "CGB0" (2304-byte
+/// CGB boot ROM), "SGB0" (256-byte SGB boot ROM). A bare file (older frontends) counts as the DMG or CGB boot ROM by its size.
 /// Missing boot ROMs are replaced by SameBoy's open-source ones (bootroms/, MIT licence).
 #[derive(Clone, Default)]
 pub struct BootConfig {
     pub dmg: Option<Vec<u8>>,
     pub cgb: Option<Vec<u8>>,
+    pub sgb: Option<Vec<u8>>,
     pub model: Option<Model>,
     pub skip: bool,
 }
 
 static OPEN_DMG_BOOT: &[u8] = include_bytes!("bootroms/dmg_boot.bin");
 static OPEN_CGB_BOOT: &[u8] = include_bytes!("bootroms/cgb_boot.bin");
+static OPEN_SGB_BOOT: &[u8] = include_bytes!("bootroms/sgb_boot.bin");
 const DMG_BOOT_SIZE: usize = 0x100;
 const CGB_BOOT_SIZE: usize = 0x900;
 
@@ -83,10 +91,12 @@ impl BootConfig {
                 let len = u32::from_le_bytes([blob[i + 4], blob[i + 5], blob[i + 6], blob[i + 7]]) as usize;
                 let Some(data) = blob.get(i + 8..i + 8 + len) else { break };
                 match tag {
-                    b"MODL" => c.model = data.first().map(|&m| match m { 1 => Model::Dmg, 2 => Model::Cgb, _ => Model::Auto }),
+                    b"MODL" => c.model = data.first().map(|&m| match m {
+                        1 => Model::Dmg, 2 => Model::Cgb, 3 => Model::Sgb, _ => Model::Auto }),
                     b"SKIP" => c.skip = data.first().is_some_and(|&v| v != 0),
                     b"DMG0" => c.add_rom(data),
                     b"CGB0" => c.add_rom(data),
+                    b"SGB0" if data.len() == DMG_BOOT_SIZE => c.sgb = Some(data.to_vec()),
                     _ => {}
                 }
                 i += 8 + len;
@@ -109,6 +119,7 @@ impl BootConfig {
     fn rom_for(&self, hw: GbVariant) -> (Vec<u8>, bool) {
         match hw {
             GbVariant::Cgb => match &self.cgb { Some(r) => (r.clone(), true), None => (OPEN_CGB_BOOT.to_vec(), false) },
+            GbVariant::Sgb => match &self.sgb { Some(r) => (r.clone(), true), None => (OPEN_SGB_BOOT.to_vec(), false) },
             _ => match &self.dmg { Some(r) => (r.clone(), true), None => (OPEN_DMG_BOOT.to_vec(), false) },
         }
     }
@@ -132,6 +143,7 @@ impl GbSystem {
         match model {
             "dmg" => cfg.model = Some(Model::Dmg),
             "cgb" => cfg.model = Some(Model::Cgb),
+            "sgb" => cfg.model = Some(Model::Sgb),
             "auto" => cfg.model = Some(Model::Auto),
             _ => {}
         }
@@ -144,6 +156,7 @@ impl GbSystem {
             Model::Auto => if cart_wants_cgb(rom) { GbVariant::Cgb } else { GbVariant::Dmg },
             Model::Dmg => GbVariant::Dmg,
             Model::Cgb => GbVariant::Cgb,
+            Model::Sgb => GbVariant::Sgb,
         };
         let (boot, real) = cfg.rom_for(hw);
         println!("Game Boy: {:?} hardware, {} boot ROM{}", hw, if real { "your" } else { "open-source (SameBoy)" },
@@ -165,6 +178,7 @@ impl GbSystem {
             Model::Auto => if cart_wants_cgb(rom) { GbVariant::Cgb } else { GbVariant::Dmg },
             Model::Dmg => GbVariant::Dmg,
             Model::Cgb => GbVariant::Cgb,
+            Model::Sgb => GbVariant::Sgb,
         };
         let mut sys = Self::new_machine(rom, base_name, hw, None)?;
         sys.boot = cfg;
@@ -212,6 +226,11 @@ impl GbSystem {
             bus.ppu.get_mut().set_compat_palettes(p.bg.map(to555), p.obp0.map(to555), p.obp1.map(to555));
             bus.ppu.get_mut().write_register(0xFF6C, 1);
         }
+        if variant == GbVariant::Sgb {
+            // the PPU hands the SGB its shades 0-3 (stored in the blue channel)
+            bus.ppu.get_mut().set_palette(SGB_SHADES);
+            bus.sgb = Some(Sgb::new(Sgb::header_unlocks(bytes)));
+        }
         let cgb_mode = bus.cgb_mode;
         Ok(Self {
             bus,
@@ -227,6 +246,14 @@ impl GbSystem {
             cable: None, last_poll: 0,
             boot: BootConfig::default(),
         })
+    }
+
+    /// The SGB picture from the frame just finished.
+    fn sgb_frame(&mut self) {
+        if let Some(sgb) = &mut self.bus.sgb {
+            let shades: Vec<u8> = self.frame_cache.chunks_exact(4).map(|p| p[2] & 3).collect();
+            sgb.end_frame(&shades);
+        }
     }
 
     /// Hardware this game is running on.
@@ -284,6 +311,7 @@ impl GbSystem {
             let front_guard = ppu.front_buffer.lock().unwrap();
             front_guard.clone()
         };
+        self.sgb_frame();
     }  
 }
 
@@ -299,11 +327,7 @@ impl System for GbSystem {
             self.tick();
         }
         self.bus.apply_cheat_writes();
-        self.frame_cache = {
-            let ppu = self.bus.ppu.get_mut();
-            let front_guard = ppu.front_buffer.lock().unwrap();
-            front_guard.clone()
-        };
+        self.refresh_frame_cache();
     }
 
     // Function is setting bits high for pressed, gameboy expects bits to be low for pressed
@@ -325,6 +349,8 @@ impl System for GbSystem {
         if (input_mask & (1 << 1)) != 0 { gb_pad_state |= 1 << 7; } // Down   -> Bit 7
         self.bus.pad1_state = gb_pad_state;
         */
+        // Super Game Boy multiplayer: pad 2 is player 2
+        self.bus.joypad.others[0] = (input_mask >> 24) as u8;
         self.bus.joypad.set_button_state(input_mask as u8, &mut self.bus.iflags);
     }
 
@@ -386,7 +412,10 @@ impl System for GbSystem {
     }
 
     fn framebuffer(&self) -> &[u8] {
-        &self.frame_cache
+        match &self.bus.sgb {
+            Some(s) => &s.framebuffer,
+            None => &self.frame_cache,
+        }
     }
 
     /// Power cycle: the same game, model and boot ROM; battery RAM, cheats and the link
@@ -407,6 +436,18 @@ impl System for GbSystem {
     }
 
     fn display_info(&self) -> DisplayInfo {
+        if self.bus.sgb.is_some() {
+            return DisplayInfo {
+                buffer_width: SGB_W as i32,
+                buffer_height: SGB_H as i32,
+                visible_x: 0,
+                visible_y: 0,
+                visible_width: SGB_W as i32,
+                visible_height: SGB_H as i32,
+                target_aspect_ratio: 8.0 / 7.0,   // SNES pixels on a 4:3 TV
+                rotation: Rotation::None,
+            };
+        }
         DisplayInfo {
             buffer_width: 160,
             buffer_height: 144,
@@ -453,6 +494,9 @@ impl System for GbSystem {
         bus.boot_rom = std::mem::take(&mut self.bus.boot_rom);
         std::mem::swap(&mut bus.cheats, &mut self.bus.cheats);
         bus.ppu.get_mut().active_palette = self.bus.ppu.get_mut().active_palette;
+        if let (Some(new), Some(old)) = (&mut bus.sgb, &mut self.bus.sgb) {
+            new.keep_static(old);
+        }
         self.bus = bus;
         self.cpu = s.cpu;
         self.current_frame = s.frame;

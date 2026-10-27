@@ -7,6 +7,12 @@ pub struct Joypad {
     pub a: bool, pub b: bool, pub select: bool, pub start: bool,
     pub right: bool, pub left: bool, pub up: bool, pub down: bool,
     
+    /// Super Game Boy multiplayer: players 2-4 (input masks, same bits as player 1) and
+    /// which player P1 reads now (0 = player 1)
+    #[serde(default)]
+    pub others: [u8; 3],
+    #[serde(default)]
+    pub active: u8,
     // Latch lower 4 bits output to detect transitions
     last_p1_nibble: u8,
     pub pending_low_transition: bool,
@@ -18,6 +24,7 @@ impl Joypad {
             p1_select: 0x30, // Default both deselected (bits 4, 5 = 1)
             a: false, b: false, select: false, start: false,
             right: false, left: false, up: false, down: false,
+            others: [0; 3], active: 0,
             last_p1_nibble: 0x0F, // All released (high)
             pending_low_transition: false,
         }
@@ -25,6 +32,9 @@ impl Joypad {
 
     /// Evaluates the lower 4 bits of $FF00 based on current button states and active selection.
     pub fn read_p1_nibble(&self) -> u8 {
+        if self.active > 0 {
+            return Self::nibble_from_mask(self.others[(self.active as usize - 1).min(2)], self.p1_select);
+        }
         let mut nibble = 0x0F; // Active Low: 1 = unpressed
 
         // Bit 4 = 0: Direction keys selected
@@ -44,6 +54,25 @@ impl Joypad {
         }
 
         nibble
+    }
+
+    /// P1's low nibble for an input mask (bits: 0 up, 1 down, 2 left, 3 right, 4 B, 5 A,
+    /// 6 select, 7 start).
+    fn nibble_from_mask(m: u8, select: u8) -> u8 {
+        let mut n = 0x0F;
+        if select & 0x10 == 0 {
+            if m & 0x08 != 0 { n &= !0x01; }
+            if m & 0x04 != 0 { n &= !0x02; }
+            if m & 0x01 != 0 { n &= !0x04; }
+            if m & 0x02 != 0 { n &= !0x08; }
+        }
+        if select & 0x20 == 0 {
+            if m & 0x20 != 0 { n &= !0x01; }
+            if m & 0x10 != 0 { n &= !0x02; }
+            if m & 0x40 != 0 { n &= !0x04; }
+            if m & 0x80 != 0 { n &= !0x08; }
+        }
+        n
     }
 
     /// Re-evaluates state and updates interrupt / transition flags.

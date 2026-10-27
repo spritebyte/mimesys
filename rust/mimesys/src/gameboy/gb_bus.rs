@@ -57,6 +57,9 @@ pub struct GameBoyBus {
     pub dma_stall_m_cycles: u64,
     /// CGB features on (false on a DMG, and on a CGB running a DMG game)
     pub cgb_mode: bool,
+    /// Super Game Boy: the SNES side, fed through the joypad port
+    #[serde(default)]
+    pub sgb: Option<crate::gameboy::gb_sgb::Sgb>,
 }
 
 fn no_cheats() -> Cheats { Cheats::new(CheatSystem::GameBoy) }
@@ -93,6 +96,7 @@ impl GameBoyBus {
             open_bus: 0,
             dma_stall_m_cycles: 0,
             cgb_mode: variant == GbVariant::Cgb,
+            sgb: None,
             // CGB Fields
             svbk: 0x01, 
             key0: 0, key1: 0,
@@ -130,7 +134,10 @@ impl GameBoyBus {
 
     fn _read_io(&mut self, addr: u16) -> u8 {
         match addr {
-            0xFF00 => self.joypad.read_p1(),
+            0xFF00 => match self.sgb.as_ref().and_then(|s| s.p1_id()) {
+                Some(id) => 0xF0 | id,
+                None => self.joypad.read_p1(),
+            },
             0xFF01 => self.serial.read_sb(),
             0xFF02 => self.serial.read_sc(),
             0xFF04..=0xFF07 => unsafe { (*self.timer.get()).read(addr) }
@@ -165,7 +172,13 @@ impl GameBoyBus {
 
     fn _write_io(&mut self, addr: u16, value: u8) {
         match addr {
-            0xFF00 => self.joypad.write_p1(value, &mut self.iflags),
+            0xFF00 => {
+                if let Some(s) = &mut self.sgb {
+                    s.p1_write(value);
+                    self.joypad.active = s.player;
+                }
+                self.joypad.write_p1(value, &mut self.iflags)
+            }
             0xFF01 => self.serial.write_sb(value),
             0xFF02 => self.serial.write_sc(value, self.double_speed),
             0xFF04..=0xFF07 => unsafe { (*self.timer.get()).write(addr, value) },

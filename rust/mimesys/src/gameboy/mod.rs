@@ -3,6 +3,7 @@
 mod gb_cpu;
 //mod gb_godot;
 pub mod gb_system;
+pub mod gb_sgb;
 mod gb_bus;
 mod gb_joypad;
 mod gb_mbc;

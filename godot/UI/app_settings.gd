@@ -53,11 +53,13 @@ const OPTION_DEFAULTS := {
 	"bios": "",              # "" = the default path below
 	"skip_bios": false,      # boot without the BIOS / boot ROM (where the system allows it)
 	"zapper": false,         # NES: Zapper light gun in port 2, aimed with the mouse
-	"gb_model": "auto",      # Game Boy: "auto" (colour games on a GBC), "dmg", "cgb"
+	"gb_model": "auto",      # Game Boy: "auto" (colour games on a GBC), "dmg", "cgb", "sgb"
 	"bios_dmg": "",          # Game Boy: original Game Boy boot ROM ("" = default path)
+	"bios_sgb": "",          # Game Boy: Super Game Boy boot ROM ("" = default path)
 }
 ## Game Boy boot ROMs: "bios" (above) is the Game Boy Color one, this is the original's.
 const GB_DMG_BIOS_DEFAULT := "user://BIOS/dmg_boot.bin"
+const GB_SGB_BIOS_DEFAULT := "user://BIOS/sgb_boot.bin"
 ## Systems that load a BIOS, and where it's looked for by default.
 const BIOS_DEFAULTS := {
 	"coleco": "user://BIOS/colecovision.rom",

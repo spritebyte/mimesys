@@ -135,7 +135,8 @@ func _rebuild() -> void:
 	if sys == "gb":
 		var model := OptionButton.new()
 		var models := [["auto", "Auto (Game Boy Color for colour games)"], ["dmg", "Game Boy"],
-			["cgb", "Game Boy Color (colours DMG games too)"]]
+			["cgb", "Game Boy Color (colours DMG games too)"],
+			["sgb", "Super Game Boy (border and colours for SGB games)"]]
 		for i in models.size():
 			model.add_item(models[i][1])
 			if _opt("gb_model") == models[i][0]:
@@ -143,6 +144,7 @@ func _rebuild() -> void:
 		model.item_selected.connect(func(i): _put("gb_model", models[i][0]))
 		_row("Model", model)
 		_row("Game Boy boot ROM", _path_field("bios_dmg", AppSettings.GB_DMG_BIOS_DEFAULT))
+		_row("Super Game Boy boot ROM", _path_field("bios_sgb", AppSettings.GB_SGB_BIOS_DEFAULT))
 
 	# BIOS (only for systems that use one)
 	if AppSettings.BIOS_DEFAULTS.has(sys):

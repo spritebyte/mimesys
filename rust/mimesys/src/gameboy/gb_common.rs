@@ -62,9 +62,9 @@ impl GbCpuConfig {
             },
             GbVariant::Sgb | GbVariant::Sgb2 => Self {
                 variant,
-                initial_a: 0x01,  // Identifies as a classic monochrome Game Boy
-                initial_f: 0xB0,
-                initial_bc: 0x0013,
+                initial_a: if variant == GbVariant::Sgb2 { 0xFF } else { 0x01 },
+                initial_f: 0x00,
+                initial_bc: 0x0014,   // C = 14: how games detect a Super Game Boy
                 initial_de: 0x00D8,
                 initial_hl: 0x014D,
                 initial_sp: 0xFFFE,

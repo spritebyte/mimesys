@@ -91,7 +91,7 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 static func gb_boot_blob() -> PackedByteArray:
 	var out := PackedByteArray("GBBC".to_ascii_buffer())
 	var model: String = AppSettings.get_option("gb", "gb_model")
-	var model_byte: int = {"dmg": 1, "cgb": 2}.get(model, 0)
+	var model_byte: int = {"dmg": 1, "cgb": 2, "sgb": 3}.get(model, 0)
 	_gb_entry(out, "MODL", PackedByteArray([model_byte]))
 	_gb_entry(out, "SKIP", PackedByteArray([1 if AppSettings.get_option("gb", "skip_bios") else 0]))
 	var dmg_path: String = AppSettings.get_option("gb", "bios_dmg")
@@ -100,7 +100,10 @@ static func gb_boot_blob() -> PackedByteArray:
 	var cgb_path: String = AppSettings.get_option("gb", "bios")
 	if cgb_path == "":
 		cgb_path = AppSettings.BIOS_DEFAULTS["gb"]
-	for pair in [["DMG0", dmg_path], ["CGB0", cgb_path]]:
+	var sgb_path: String = AppSettings.get_option("gb", "bios_sgb")
+	if sgb_path == "":
+		sgb_path = AppSettings.GB_SGB_BIOS_DEFAULT
+	for pair in [["DMG0", dmg_path], ["CGB0", cgb_path], ["SGB0", sgb_path]]:
 		if FileAccess.file_exists(pair[1]):
 			_gb_entry(out, pair[0], load_bios(pair[1]))
 		else:
