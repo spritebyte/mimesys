@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use crate::common::timed::Timed;
 use crate::gameboy::gb_mbc::Mbc;
 use crate::gameboy::gb_cartridge::GbCartridge;
@@ -15,14 +16,23 @@ use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+#[derive(Serialize, Deserialize)]
 pub struct GameBoyBus {
     pub variant: GbVariant,
+    #[serde(with = "serde_bytes")]
     pub ram: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub hram: [u8;0x80],
+    #[serde(skip, default = "no_cheats")]
     pub cheats: Cheats,
+    /// the mapper's state is saved separately (it's a trait object)
+    #[serde(skip, default = "GbCartridge::placeholder")]
     pub cartridge: GbCartridge,
+    #[serde(with = "crate::common::serde_cell")]
     pub ppu: UnsafeCell<GbPPU>,
+    #[serde(with = "crate::common::serde_cell")]
     pub apu: UnsafeCell<GbAPU>,
+    #[serde(with = "crate::common::serde_cell")]
     pub timer: UnsafeCell<GbTimer>,
     pub ie: u8,
     pub iflags: u8,
@@ -41,10 +51,15 @@ pub struct GameBoyBus {
     pub hdma_dst: u16,
     pub hdma_active: bool,
     pub hdma_len: u16,
+    #[serde(skip)]
     pub boot_rom: Vec<u8>,
     pub boot_rom_mapped: bool,
     pub dma_stall_m_cycles: u64,
+    /// CGB features on (false on a DMG, and on a CGB running a DMG game)
+    pub cgb_mode: bool,
 }
+
+fn no_cheats() -> Cheats { Cheats::new(CheatSystem::GameBoy) }
 
 unsafe impl Send for GameBoyBus {}
 unsafe impl Sync for GameBoyBus {}
@@ -56,7 +71,7 @@ impl GameBoyBus {
             _=> 8192,
         };
 
-        let boot_mapped = run_boot_rom && !boot_rom_data.is_empty() && variant == GbVariant::Cgb;
+        let boot_mapped = run_boot_rom && !boot_rom_data.is_empty();
         Self {
             variant,
             cheats: Cheats::new(CheatSystem::GameBoy),
@@ -77,6 +92,7 @@ impl GameBoyBus {
             double_speed: false,
             open_bus: 0,
             dma_stall_m_cycles: 0,
+            cgb_mode: variant == GbVariant::Cgb,
             // CGB Fields
             svbk: 0x01, 
             key0: 0, key1: 0,
@@ -86,6 +102,12 @@ impl GameBoyBus {
             hdma_len: 0,
         }
     }
+    pub fn set_cgb_mode(&mut self, on: bool) {
+        self.cgb_mode = on && self.variant == GbVariant::Cgb;
+        if !self.cgb_mode { self.svbk = 1; }
+        self.ppu.get_mut().set_cgb_mode(self.cgb_mode);
+    }
+
     pub fn get_sram(&self) -> Option<&[u8]> { self.cartridge.get_sram() }
     pub fn load_sram(&mut self, data: &[u8]) { self.cartridge.load_sram(data); }
     pub fn is_sram_dirty(&self) -> bool { self.cartridge.is_sram_dirty() }
@@ -127,16 +149,16 @@ impl GameBoyBus {
 //                println!("Read from 0xFF4C returning {:02X}", self.key0);
                 self.key0
             },
-            0xFF4D => self.read_key1(),
+            0xFF4D if self.cgb_mode => self.read_key1(),
             0xFF50 => if self.boot_rom_mapped { 0x00 } else { 0x01 },
-            0xFF55 => {
+            0xFF55 if self.cgb_mode => {
                 if !self.hdma_active {
                     0xFF
                 } else {
                     (self.hdma_len.saturating_sub(1) as u8) & 0x7F
                 }
             },
-            0xFF70 => self.svbk | 0xF8,
+            0xFF70 if self.cgb_mode => self.svbk | 0xF8,
             _ => self.open_bus,
         }
     }
@@ -155,18 +177,21 @@ impl GameBoyBus {
                 unsafe { (*self.ppu.get()).write_register(addr, value) }
             },
             0xFF4C => {
-                 if self.boot_rom_mapped { 
+                 if self.boot_rom_mapped {
                     self.key0 = value;
-                    println!("Boot rom wrote {:02X} to $FF4C.", value);
                  }
             },
-            0xFF4D => self.write_key1(value),
+            0xFF4D if self.cgb_mode => self.write_key1(value),
             0xFF50 => {
-                if value != 0 {
+                if value != 0 && self.boot_rom_mapped {
                     self.boot_rom_mapped = false;
+                    // the CGB boot ROM left KEY0 = 04 for a DMG game: compatibility mode
+                    if self.variant == GbVariant::Cgb {
+                        self.set_cgb_mode(self.key0 & 0x04 == 0);
+                    }
                 }
-                println!("Boot rom wrote to 0xFF50: {:02X}", value);
             }
+            0xFF51..=0xFF55 | 0xFF70 if !self.cgb_mode => {}
             0xFF51 => self.hdma_src = (self.hdma_src & 0x00FF) | ((value as u16) << 8),
             0xFF52 => self.hdma_src = (self.hdma_src & 0xFF00) | ((value & 0xF0) as u16),
             0xFF53 => {
@@ -417,7 +442,11 @@ impl Timed for GameBoyBus {
             self.dma.next_tick_master += 4;
         }
 
-        self.serial.tick(target_master.saturating_sub(self.last_master));
+        let elapsed = target_master.saturating_sub(self.last_master);
+        self.serial.tick(elapsed);
+        if elapsed > 0 {
+            unsafe { (*self.cartridge.mbc.get()).clock(elapsed) };
+        }
         if self.serial.take_irq() {
             self.iflags |= 0x08;
         }

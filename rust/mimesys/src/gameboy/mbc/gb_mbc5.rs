@@ -1,8 +1,12 @@
 // Mbc 5
 use crate::gameboy::gb_mbc::Mbc;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct Mbc5 {
+    #[serde(skip)]
     prg_rom: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     cart_ram: Vec<u8>,   // MBC5 supports up to 128KB of RAM (16 banks)
     rom_bank_lo: u8,
     rom_bank_hi: u8,
@@ -37,6 +41,8 @@ impl Mbc5 {
 }
 
 impl Mbc for Mbc5 {
+    crate::mbc_state!();
+
     fn read(&self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x3FFF => {

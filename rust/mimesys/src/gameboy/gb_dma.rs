@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 //use crate::gameboy::gb_bus::{Bus,GameBoyBus};
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct DmaState {
     pub active: bool,
     pub source_base: u16,

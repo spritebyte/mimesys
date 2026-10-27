@@ -1,10 +1,10 @@
 pub mod m6502;
 pub mod z80;
-pub mod mcs48;
-pub mod i8088;
+pub mod mcs48;pub mod i8088;
 pub mod m6801;
 pub mod mb88;
 pub mod t11;
 pub mod m6809;
 pub mod hd6309;
+pub mod konami;
 pub mod arm;

@@ -8,6 +8,7 @@ pub mod digdug;
 pub mod atarisy2;
 pub mod gberet;
 pub mod ddragon;
+pub mod simpsons;
 pub mod state;
 pub mod hiscore;
 
@@ -83,6 +84,9 @@ pub fn load_arcade(driver: &str, set_name: &str, mut regions: HashMap<String, Ve
             let v = if driver == "ddragon2" { Variant::DoubleDragon2 } else { Variant::DoubleDragon };
             Ok(wrap(DdSystem::new(v, set_name, regions)?, hs, "Technos"))
         },
+        // settings and high scores live in the board's EEPROM (battery save)
+        "simpsons" | "simpsons2p" => Ok(Box::new(simpsons::simpsons_system::SimpsonsSystem::new(
+            set_name, regions, driver == "simpsons2p")?)),
         other => Err(format!("no arcade driver name '{other}'")),
     }
 }

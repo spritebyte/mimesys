@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use crate::common::timed::Timed;
 //use std::collections::VecDeque;
 
@@ -31,7 +32,7 @@ const READ_MASKS: [u8; 0x30] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
 struct Square {
     enabled: bool,
     dac_on: bool,
@@ -101,7 +102,7 @@ impl Square {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 struct Wave {
     enabled: bool,
     dac_on: bool,
@@ -167,7 +168,7 @@ impl Wave {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
 struct Noise {
     enabled: bool,
     dac_on: bool,
@@ -246,9 +247,11 @@ impl Noise {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct GbAPU {
     sample_rate: f64,
     sample_timer: f64,
+    #[serde(skip)]
     sample_buffer: Vec<f32>,
 
     ch1: Square,
@@ -274,6 +277,7 @@ pub struct GbAPU {
     fs_step: u8,
 
     // Raw register bytes for read-back ($FF10..$FF2F).
+    #[serde(with = "serde_bytes")]
     raw: [u8; 0x30],
 
     last_master: u64,

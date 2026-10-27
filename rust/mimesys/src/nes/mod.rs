@@ -37,6 +37,8 @@ pub mod mapper87;
 pub mod mapper95;
 #[path = "mappers/vrc24.rs"]
 pub mod vrc24;
+#[path = "mappers/vrc6.rs"]
+pub mod vrc6;
 pub mod nes_system;
 pub mod nes_bus;
 pub mod nes_apu;

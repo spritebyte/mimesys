@@ -16,6 +16,7 @@ pub struct GbCartridge {
 pub struct CartType {
     pub mbc_id: u8,
     pub has_battery: bool,
+    pub has_rtc: bool,
 }
 
 impl GbCartridge {
@@ -30,6 +31,12 @@ impl GbCartridge {
             supports_gbc: false,
             has_battery,
         }
+    }
+
+    /// Stand-in while a save state is decoded (the real cartridge is moved in after).
+    pub fn placeholder() -> Self {
+        Self::new(Vec::new(), Vec::new(), Box::new(crate::gameboy::gb_mbc0::Mbc0::new(Vec::new(), Vec::new())),
+                  String::new(), false)
     }
 
     pub fn mbc(&self) -> &dyn Mbc {

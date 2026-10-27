@@ -74,7 +74,7 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 			if bios.is_empty():
 				print("Warning: no ColecoVision BIOS; most games won't start.")
 		"gb", "gbc":
-			bios = load_bios(AppSettings.bios_path("gb", "user://BIOS/gbc_bios.bin"))
+			bios = gb_boot_blob()
 		"gba":
 			bios = load_bios(AppSettings.bios_path("gba", "user://BIOS/gba_bios.bin"))
 			if bios.is_empty():
@@ -83,6 +83,36 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 	if not sys.load_cartridge(system_id, data, name, bios):
 		return null
 	return sys
+
+
+## Game Boy start-up for the core: the model, whether to skip the boot animation, and both
+## boot ROMs (each optional; the core has open-source stand-ins). Format: "GBBC", then
+## entries of a 4-byte tag, a u32 little-endian length and the data.
+static func gb_boot_blob() -> PackedByteArray:
+	var out := PackedByteArray("GBBC".to_ascii_buffer())
+	var model: String = AppSettings.get_option("gb", "gb_model")
+	var model_byte: int = {"dmg": 1, "cgb": 2}.get(model, 0)
+	_gb_entry(out, "MODL", PackedByteArray([model_byte]))
+	_gb_entry(out, "SKIP", PackedByteArray([1 if AppSettings.get_option("gb", "skip_bios") else 0]))
+	var dmg_path: String = AppSettings.get_option("gb", "bios_dmg")
+	if dmg_path == "":
+		dmg_path = AppSettings.GB_DMG_BIOS_DEFAULT
+	var cgb_path: String = AppSettings.get_option("gb", "bios")
+	if cgb_path == "":
+		cgb_path = AppSettings.BIOS_DEFAULTS["gb"]
+	for pair in [["DMG0", dmg_path], ["CGB0", cgb_path]]:
+		if FileAccess.file_exists(pair[1]):
+			_gb_entry(out, pair[0], load_bios(pair[1]))
+		else:
+			print("Game Boy: no boot ROM at '%s', using the open-source one" % pair[1])
+	return out
+
+
+static func _gb_entry(out: PackedByteArray, tag: String, data: PackedByteArray) -> void:
+	out.append_array(tag.to_ascii_buffer())
+	var n := data.size()
+	out.append_array(PackedByteArray([n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF]))
+	out.append_array(data)
 
 
 ## The controls/options profile for a system id (Game Boy Color shares the Game Boy's).

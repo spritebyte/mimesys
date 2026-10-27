@@ -131,6 +131,19 @@ func _rebuild() -> void:
 		crop.add_child(spin)
 	_row("Crop edges", crop)
 
+	# Game Boy: which model, and the original Game Boy's boot ROM
+	if sys == "gb":
+		var model := OptionButton.new()
+		var models := [["auto", "Auto (Game Boy Color for colour games)"], ["dmg", "Game Boy"],
+			["cgb", "Game Boy Color (colours DMG games too)"]]
+		for i in models.size():
+			model.add_item(models[i][1])
+			if _opt("gb_model") == models[i][0]:
+				model.select(i)
+		model.item_selected.connect(func(i): _put("gb_model", models[i][0]))
+		_row("Model", model)
+		_row("Game Boy boot ROM", _path_field("bios_dmg", AppSettings.GB_DMG_BIOS_DEFAULT))
+
 	# BIOS (only for systems that use one)
 	if AppSettings.BIOS_DEFAULTS.has(sys):
 		var bios := HBoxContainer.new()
@@ -146,17 +159,45 @@ func _rebuild() -> void:
 		browse.text = "Browse…"
 		browse.pressed.connect(func(): _bios_dialog.popup_centered_ratio(0.6))
 		bios.add_child(browse)
-		_row("BIOS file", bios)
+		_row("Game Boy Color boot ROM" if sys == "gb" else "BIOS file", bios)
 		if sys in AppSettings.BIOS_OPTIONAL:
 			var skip := CheckBox.new()
-			skip.text = "Skip boot ROM (start the game directly)"
+			skip.text = "Skip the boot animation" if sys == "gb" else "Skip boot ROM (start the game directly)"
 			skip.button_pressed = _opt("skip_bios")
 			skip.toggled.connect(func(on): _put("skip_bios", on))
 			_row("", skip)
 		var note := Label.new()
 		note.text = "BIOS changes apply the next time a game loads."
+		if sys == "gb":
+			note.text = "Model and boot ROM changes apply the next time a game loads.\nNo boot ROM file? An open-source one (SameBoy) is used instead."
 		note.modulate = Color(1, 1, 1, 0.6)
 		_row("", note)
+
+
+## A path box with a Browse button that saves into option `key`.
+func _path_field(key: String, placeholder: String) -> Control:
+	var box := HBoxContainer.new()
+	var edit := LineEdit.new()
+	edit.text = _opt(key)
+	edit.placeholder_text = placeholder
+	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	edit.custom_minimum_size.x = 260
+	edit.text_submitted.connect(func(t): _put(key, t))
+	edit.focus_exited.connect(func(): _put(key, edit.text))
+	box.add_child(edit)
+	var browse := Button.new()
+	browse.text = "Browse…"
+	var dlg := FileDialog.new()
+	dlg.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	dlg.access = FileDialog.ACCESS_FILESYSTEM
+	dlg.title = "Choose boot ROM file"
+	dlg.file_selected.connect(func(p):
+		edit.text = p
+		_put(key, p))
+	box.add_child(dlg)
+	browse.pressed.connect(func(): dlg.popup_centered_ratio(0.6))
+	box.add_child(browse)
+	return box
 
 
 func _row(label: String, control: Control) -> void:

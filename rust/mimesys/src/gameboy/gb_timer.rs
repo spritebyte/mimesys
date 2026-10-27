@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
 use crate::common::timed::Timed;
 
+#[derive(Serialize, Deserialize)]
 pub struct GbTimer {
     last_master: u64,
     div: u64,

@@ -1,8 +1,12 @@
 // Mbc 1
 use crate::gameboy::gb_mbc::Mbc;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct Mbc1 {
+    #[serde(skip)]
     prg_rom: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     cart_ram: Vec<u8>,
     bank_reg_1: u8,    // lower 5 bits of ROM bank
     bank_reg_2: u8,    // upper 2 bits (used for ROM or RAM)
@@ -40,6 +44,8 @@ impl Mbc1 {
 }
 
 impl Mbc for Mbc1 {
+    crate::mbc_state!();
+
     fn read(&self, addr: u16) -> u8 {
         if addr <= 0x3FFF {
             if self.mode == 1 {

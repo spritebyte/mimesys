@@ -164,21 +164,20 @@ func init_menus():
 
 	# EMULATION
 	emu_menu.add_item("Reset", EmuMenuID.RESET)
-#	emu_menu.add_item("Pause", EmuMenuID.PAUSE)
-#	emu_menu.add_item("Resume", EmuMenuID.RESUME)
-#	emu_menu.set_item_disabled(emu_menu.get_item_index(EmuMenuID.RESUME), true)
-#	emu_menu.add_item("Step CPU", EmuMenuID.STEP_CPU)
+	emu_menu.add_item("Pause", EmuMenuID.PAUSE)
+	emu_menu.add_item("Resume", EmuMenuID.RESUME)
+	emu_menu.set_item_disabled(emu_menu.get_item_index(EmuMenuID.RESUME), true)
+	emu_menu.add_item("Step CPU", EmuMenuID.STEP_CPU)
 	emu_menu.add_separator()
 	emu_menu.add_item("Cheats...   (Ctrl+H)", EmuMenuID.CHEATS)
 
 	emu_menu.id_pressed.connect(_on_emu_menu)
 
 	# DEBUG
-	top_menu_bar.set_menu_hidden(4, true)
-#	debug_menu.add_item("CPU Registers", DebugMenuID.CPU_REGISTERS)
-#	debug_menu.add_item("Audio Registers", DebugMenuID.AUDIO_REGISTERS)
+	debug_menu.add_item("CPU Registers", DebugMenuID.CPU_REGISTERS)
+	debug_menu.add_item("Audio Registers", DebugMenuID.AUDIO_REGISTERS)
 
-#	debug_menu.id_pressed.connect(_on_debug_menu)
+	debug_menu.id_pressed.connect(_on_debug_menu)
 
 func _on_settings_menu(id):
 	match id:
@@ -701,7 +700,7 @@ func execute_link_load(system_id: String, path_a: String, path_b: String) -> voi
 		var gba_bios: PackedByteArray = RomLoader.load_bios(AppSettings.bios_path("gba", "user://BIOS/gba_bios.bin"))
 		ok = sys.load_gba_link(a["data"], a["name"], b["data"], b["name"], gba_bios)
 	else:
-		var bios: PackedByteArray = RomLoader.load_bios(AppSettings.bios_path("gb", "user://BIOS/gbc_bios.bin"))
+		var bios: PackedByteArray = RomLoader.gb_boot_blob()
 		ok = sys.load_gb_link(a["data"], a["name"], b["data"], b["name"], bios)
 	if not ok:
 		OS.alert("Couldn't start the link cable (see the Output panel)")

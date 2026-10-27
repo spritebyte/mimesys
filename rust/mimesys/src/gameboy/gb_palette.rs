@@ -34,7 +34,7 @@ pub const PALETTE_DMG_GREEN: DmgPaletteSet = DmgPaletteSet {
     obp1: [0x9BBC0F, 0x8BAC0F, 0x306230, 0x0F380F],
 };
 
-const PALETTE_POCKET_GRAY: DmgPaletteSet = DmgPaletteSet {
+pub const PALETTE_POCKET_GRAY: DmgPaletteSet = DmgPaletteSet {
     bg:   [0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000],
     obp0: [0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000],
     obp1: [0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000],

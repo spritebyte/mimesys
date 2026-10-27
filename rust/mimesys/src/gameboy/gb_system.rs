@@ -14,6 +14,16 @@ use std::sync::Arc;
 //use std::path::Path;
 use std::io::Cursor;
 
+const STATE_MAGIC: &[u8; 4] = b"GBST";
+const STATE_VERSION: u32 = 1;
+
+fn state_config() -> impl bincode::config::Config {
+    bincode::config::standard().with_fixed_int_encoding()
+}
+
+#[derive(serde::Deserialize)]
+struct GbState { cpu: GameBoyCpu, bus: GameBoyBus, mbc: Vec<u8>, frame: u64 }
+
 pub struct GbSystem {
     pub cpu: GameBoyCpu,
     pub bus: GameBoyBus,
@@ -28,75 +38,199 @@ pub struct GbSystem {
     pub current_ui_theme: PaletteTheme,
     pub frame_cache: Vec<u8>,
     pub cable: Option<Box<dyn LinkCable>>,
-    pub last_poll: u64,    
+    pub last_poll: u64,
+    /// how this machine was started (reset starts it the same way)
+    pub boot: BootConfig,
 }
+
+/// Which Game Boy to emulate.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Model {
+    /// Game Boy Color for colour cartridges, original Game Boy otherwise
+    Auto,
+    Dmg,
+    /// DMG games run in the CGB's compatibility mode, coloured by its boot ROM
+    Cgb,
+}
+
+/// Boot ROMs and start-up choices from the frontend.
+///
+/// The frontend sends one blob: "GBBC" then entries of tag (4 bytes), length (u32 LE) and
+/// data. Tags: "MODL" (1 byte: 0 auto, 1 DMG, 2 CGB), "SKIP" (1 byte: 1 = run the boot ROM
+/// instantly, no logo animation), "DMG0" (256-byte DMG boot ROM), "CGB0" (2304-byte CGB
+/// boot ROM). A bare file (older frontends) counts as the DMG or CGB boot ROM by its size.
+/// Missing boot ROMs are replaced by SameBoy's open-source ones (bootroms/, MIT licence).
+#[derive(Clone, Default)]
+pub struct BootConfig {
+    pub dmg: Option<Vec<u8>>,
+    pub cgb: Option<Vec<u8>>,
+    pub model: Option<Model>,
+    pub skip: bool,
+}
+
+static OPEN_DMG_BOOT: &[u8] = include_bytes!("bootroms/dmg_boot.bin");
+static OPEN_CGB_BOOT: &[u8] = include_bytes!("bootroms/cgb_boot.bin");
+const DMG_BOOT_SIZE: usize = 0x100;
+const CGB_BOOT_SIZE: usize = 0x900;
+
+impl BootConfig {
+    pub fn parse(blob: &[u8]) -> Self {
+        let mut c = BootConfig::default();
+        if blob.len() >= 4 && &blob[..4] == b"GBBC" {
+            let mut i = 4;
+            while i + 8 <= blob.len() {
+                let tag = &blob[i..i + 4];
+                let len = u32::from_le_bytes([blob[i + 4], blob[i + 5], blob[i + 6], blob[i + 7]]) as usize;
+                let Some(data) = blob.get(i + 8..i + 8 + len) else { break };
+                match tag {
+                    b"MODL" => c.model = data.first().map(|&m| match m { 1 => Model::Dmg, 2 => Model::Cgb, _ => Model::Auto }),
+                    b"SKIP" => c.skip = data.first().is_some_and(|&v| v != 0),
+                    b"DMG0" => c.add_rom(data),
+                    b"CGB0" => c.add_rom(data),
+                    _ => {}
+                }
+                i += 8 + len;
+            }
+        } else if !blob.is_empty() {
+            c.add_rom(blob);
+        }
+        c
+    }
+
+    fn add_rom(&mut self, d: &[u8]) {
+        match d.len() {
+            DMG_BOOT_SIZE => self.dmg = Some(d.to_vec()),
+            CGB_BOOT_SIZE => self.cgb = Some(d.to_vec()),
+            0 => {}
+            n => println!("Game Boy boot ROM of {n} bytes ignored (DMG: 256, CGB: 2304)"),
+        }
+    }
+
+    fn rom_for(&self, hw: GbVariant) -> (Vec<u8>, bool) {
+        match hw {
+            GbVariant::Cgb => match &self.cgb { Some(r) => (r.clone(), true), None => (OPEN_CGB_BOOT.to_vec(), false) },
+            _ => match &self.dmg { Some(r) => (r.clone(), true), None => (OPEN_DMG_BOOT.to_vec(), false) },
+        }
+    }
+}
+
+/// Header byte 143: 80 = colour game that also runs on a DMG, C0 = colour only.
+fn cart_wants_cgb(rom: &[u8]) -> bool { rom.get(0x143).is_some_and(|b| b & 0x80 != 0) }
+
+/// Longest a boot ROM may take before we give up and start the cartridge directly
+/// (a cartridge without a valid logo locks the boot ROM up, as on hardware).
+const BOOT_TIMEOUT_FRAMES: usize = 600;
 
 impl GbSystem {
     pub fn from_rom(rom_bytes: &[u8], base_name: &str, bios: &[u8]) -> Result<Self, String> {
-        // Validate header and get sizes
+        Self::build(rom_bytes, base_name, BootConfig::parse(bios))
+    }
+
+    /// `model`: "auto", "dmg" or "cgb" overrides the blob's choice ("" keeps it).
+    pub fn from_rom_model(rom_bytes: &[u8], base_name: &str, bios: &[u8], model: &str) -> Result<Self, String> {
+        let mut cfg = BootConfig::parse(bios);
+        match model {
+            "dmg" => cfg.model = Some(Model::Dmg),
+            "cgb" => cfg.model = Some(Model::Cgb),
+            "auto" => cfg.model = Some(Model::Auto),
+            _ => {}
+        }
+        Self::build(rom_bytes, base_name, cfg)
+    }
+
+    pub fn build(rom: &[u8], base_name: &str, cfg: BootConfig) -> Result<Self, String> {
+        if rom.len() < 0x150 { return Err("ROM too small for a Game Boy cartridge".into()); }
+        let hw = match cfg.model.unwrap_or(Model::Auto) {
+            Model::Auto => if cart_wants_cgb(rom) { GbVariant::Cgb } else { GbVariant::Dmg },
+            Model::Dmg => GbVariant::Dmg,
+            Model::Cgb => GbVariant::Cgb,
+        };
+        let (boot, real) = cfg.rom_for(hw);
+        println!("Game Boy: {:?} hardware, {} boot ROM{}", hw, if real { "your" } else { "open-source (SameBoy)" },
+                 if cfg.skip { ", skipping the animation" } else { "" });
+        let mut sys = Self::new_machine(rom, base_name, hw, Some(&boot))?;
+        sys.boot = cfg;
+        if sys.boot.skip && !sys.finish_boot_rom() {
+            println!("Boot ROM didn't finish (no valid logo?): starting the cartridge directly");
+            let cfg = std::mem::take(&mut sys.boot);
+            sys = Self::new_machine(rom, base_name, hw, None)?;
+            sys.boot = cfg;
+        }
+        Ok(sys)
+    }
+
+    /// Starts the cartridge directly, without any boot ROM (tests).
+    pub fn build_direct(rom: &[u8], base_name: &str, cfg: BootConfig) -> Result<Self, String> {
+        let hw = match cfg.model.unwrap_or(Model::Auto) {
+            Model::Auto => if cart_wants_cgb(rom) { GbVariant::Cgb } else { GbVariant::Dmg },
+            Model::Dmg => GbVariant::Dmg,
+            Model::Cgb => GbVariant::Cgb,
+        };
+        let mut sys = Self::new_machine(rom, base_name, hw, None)?;
+        sys.boot = cfg;
+        Ok(sys)
+    }
+
+    /// Runs the boot ROM until it hands over to the cartridge. False if it never does.
+    fn finish_boot_rom(&mut self) -> bool {
+        let limit = self.bus.master + 70224 * BOOT_TIMEOUT_FRAMES as u64;
+        while self.bus.boot_rom_mapped && self.bus.master < limit {
+            self.tick();
+        }
+        let _ = self.drain_audio();
+        self.refresh_frame_cache();
+        !self.bus.boot_rom_mapped
+    }
+
+    /// A machine at power-on with `boot` mapped, or (None) in the state the boot ROM
+    /// leaves behind, starting at the cartridge's entry point.
+    fn new_machine(rom_bytes: &[u8], base_name: &str, variant: GbVariant, boot: Option<&[u8]>) -> Result<Self, String> {
         let bytes = rom_bytes;
-        let mut run_boot_rom = true;
+        let run_boot_rom = boot.is_some();
         let buffer_size = 160 * 144 * 4;
         let cart_type_code = bytes[0x147];
-        println!("Cart type code={:02X}", cart_type_code);
-        let prg_rom_size = (1 << bytes[0x148]) * 1024 * 32;
         let cart_ram_size = Self::calculate_ram_size(bytes[0x149]) as usize;
         let cart_type = Self::determine_mbc(cart_type_code);
-        let prg_start = 0;
-        let prg_end = prg_start + prg_rom_size;
-
         let prg_rom = bytes.to_vec();
         let cart_ram = if cart_ram_size > 0 { vec![0; cart_ram_size] } else { vec![] };
-        let cgb_mode = (bytes[0x143] & 0x80) != 0;
-        let expected_size = if cgb_mode { 2304 } else { 256 };
-        if bios.len() != expected_size {
-            println!("Boot ROM is {} bytes, expected {}", bios.len(), expected_size);
-        }
-
-        let variant = if cgb_mode { //|| (run_boot_rom && bios.len() == 2304) {
-            println!("Loading CGB variant");
-            GbVariant::Cgb
-        } else {
-            println!("Loading DMG variant");
-            run_boot_rom = false;
-            GbVariant::Dmg
-        };
         let header_title = std::str::from_utf8(&bytes[0x0134..0x0143]).unwrap_or("");
         let selected_palette = PaletteTheme::to_palette_set(PaletteTheme::Auto, header_title);
-        // initialize the mapper
-        let mbc = gb_mbc::make_mbc(cart_type.mbc_id, prg_rom.clone(), cart_ram.clone());
-        //{
-        //    Some(m) => m,
-        //    None => { println!("Cart type not supported yet: {}", cart_type.mbc_id); None }
-        //};
-
-        // --- instantiate the atomic sync flag early ---
-        // let frame_ready = Arc::new(AtomicBool::new(false));
-
-        // initialize cartridge and bus
-        let cartridge = GbCartridge::new(prg_rom, cart_ram, mbc?, base_name.to_string(), cart_type.has_battery);
-        println!("Cartridge created: {0} for {1}", cartridge.base_filename, header_title);
-        let bus = GameBoyBus::new(variant, cartridge, selected_palette, run_boot_rom, bios);
-        println!("prg_rom size: {prg_rom_size} ");
-        println!("cart ram size: {cart_ram_size} ");
-
-        Ok( {
-            Self {
-                bus,
-                cpu: GameBoyCpu::new(run_boot_rom, variant),
-                save_filename: base_name.to_string(),
-                slice_complete: false, cgb_mode: cgb_mode,
-                // todo: should use paths saved in settings
-                save_battery_path: "user://GD_EMU/GB/Save".to_string(),
-                save_state_path: "user://GD_EMU/GB/State".to_string(),
-                is_running: Arc::new(AtomicBool::new(false)),
-                current_frame: 0,
-                current_ui_theme: PaletteTheme::Auto,
-                frame_cache: vec![0; buffer_size],
-                cable: None, last_poll: 0,
-            }
+        let mbc = gb_mbc::make_mbc(cart_type.mbc_id, prg_rom.clone(), cart_ram, cart_type.has_rtc)?;
+        let cartridge = GbCartridge::new(prg_rom, Vec::new(), mbc, base_name.to_string(), cart_type.has_battery);
+        let mut bus = GameBoyBus::new(variant, cartridge, selected_palette, run_boot_rom, boot.unwrap_or(&[]));
+        if run_boot_rom {
+            bus.ppu.get_mut().power_on_registers();
+        } else if variant == GbVariant::Cgb && !cart_wants_cgb(bytes) {
+            // what the CGB boot ROM would leave for a DMG game: compatibility mode, with
+            // the user's DMG colours as its palettes
+            bus.set_cgb_mode(false);
+            let to555 = |c: u32| -> u16 {
+                let (r, g, b) = ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+                ((r >> 3) | (g >> 3) << 5 | (b >> 3) << 10) as u16
+            };
+            let p = selected_palette;
+            bus.ppu.get_mut().set_compat_palettes(p.bg.map(to555), p.obp0.map(to555), p.obp1.map(to555));
+            bus.ppu.get_mut().write_register(0xFF6C, 1);
+        }
+        let cgb_mode = bus.cgb_mode;
+        Ok(Self {
+            bus,
+            cpu: GameBoyCpu::new(run_boot_rom, variant),
+            save_filename: base_name.to_string(),
+            slice_complete: false, cgb_mode,
+            save_battery_path: "user://GD_EMU/GB/Save".to_string(),
+            save_state_path: "user://GD_EMU/GB/State".to_string(),
+            is_running: Arc::new(AtomicBool::new(false)),
+            current_frame: 0,
+            current_ui_theme: PaletteTheme::Auto,
+            frame_cache: vec![0; buffer_size],
+            cable: None, last_poll: 0,
+            boot: BootConfig::default(),
         })
     }
+
+    /// Hardware this game is running on.
+    pub fn hardware(&self) -> GbVariant { self.bus.variant }
 
     fn calculate_ram_size(header_byte: u8) -> u32 {
         match header_byte {
@@ -110,22 +244,25 @@ impl GbSystem {
         }
     }
 
+    /// Cartridge header byte 147.
     fn determine_mbc(cart_type_code: u8) -> CartType {
+        let t = |mbc_id, has_battery, has_rtc| CartType { mbc_id, has_battery, has_rtc };
         match cart_type_code {
-            0 => CartType { mbc_id: 0, has_battery: false },
-            1|2|7|8 => CartType { mbc_id: 1, has_battery: false },
-            3 => CartType { mbc_id: 1, has_battery: true },
-            5 => CartType { mbc_id: 2, has_battery: false },
-            6 => CartType { mbc_id: 2, has_battery: true },
-            9 => CartType { mbc_id: 0, has_battery: true },
-            0x0F|0x11|0x12 => CartType { mbc_id: 3, has_battery: false },
-            0x10|0x13 => CartType { mbc_id: 3, has_battery: true },
-            0x19|0x1A|0x1C|0x1D => CartType { mbc_id: 5, has_battery: false },
-            0x1B|0x1E|0x1F => CartType { mbc_id: 5, has_battery: true },
+            0x00 | 0x08 => t(0, false, false),
+            0x09 => t(0, true, false),
+            0x01 | 0x02 => t(1, false, false),
+            0x03 => t(1, true, false),
+            0x05 => t(2, false, false),
+            0x06 => t(2, true, false),
+            0x0F | 0x10 => t(3, true, true),
+            0x11 | 0x12 => t(3, false, false),
+            0x13 => t(3, true, false),
+            0x19 | 0x1A | 0x1C | 0x1D => t(5, false, false),
+            0x1B | 0x1E => t(5, true, false),
             _ => {
-                println!("unknown carttype {:02X}, using default of no MBC", cart_type_code);
-                CartType { mbc_id: 0, has_battery: false }
-            },
+                println!("Cartridge type {:02X} isn't supported yet: running it without a mapper", cart_type_code);
+                t(0, false, false)
+            }
         }
     }
 
@@ -206,7 +343,6 @@ impl System for GbSystem {
 */
     fn power_on(&mut self) {
         self.is_running.store(true, Ordering::SeqCst);
-        println!("CPU A at boot={:02X}", self.cpu.a);
     }
 
     fn power_off(&mut self) {
@@ -253,9 +389,21 @@ impl System for GbSystem {
         &self.frame_cache
     }
 
+    /// Power cycle: the same game, model and boot ROM; battery RAM, cheats and the link
+    /// cable carry over.
     fn reset(&mut self) {
-        self.power_off();
-        self.power_on();
+        let rom = self.bus.cartridge.prg_rom.clone();
+        let Ok(mut fresh) = Self::build(&rom, &self.save_filename, self.boot.clone()) else { return };
+        if let Some(sram) = self.bus.get_sram() {
+            let sram = sram.to_vec();
+            fresh.bus.load_sram(&sram);
+        }
+        std::mem::swap(&mut fresh.bus.cheats, &mut self.bus.cheats);
+        fresh.cable = self.cable.take();
+        fresh.save_battery_path = std::mem::take(&mut self.save_battery_path);
+        fresh.save_state_path = std::mem::take(&mut self.save_state_path);
+        fresh.is_running = self.is_running.clone();
+        *self = fresh;
     }
 
     fn display_info(&self) -> DisplayInfo {
@@ -272,12 +420,43 @@ impl System for GbSystem {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        Vec::new()
+        #[derive(serde::Serialize)]
+        struct Ref<'a> { cpu: &'a GameBoyCpu, bus: &'a GameBoyBus, mbc: Vec<u8>, frame: u64 }
+        let mut out = STATE_MAGIC.to_vec();
+        out.extend_from_slice(&STATE_VERSION.to_le_bytes());
+        let r = Ref { cpu: &self.cpu, bus: &self.bus, mbc: self.bus.cartridge.mbc().save_state(),
+                      frame: self.current_frame };
+        match bincode::serde::encode_to_vec(&r, state_config()) {
+            Ok(b) => { out.extend(b); out }
+            Err(e) => { println!("GB save state failed: {e:?}"); Vec::new() }
+        }
     }
 
     fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
-        let _ = data;
-        Err("GB save states not done yet".into())
+        if data.len() < 8 || data[..4] != STATE_MAGIC[..] {
+            return Err("not a Game Boy save state".into());
+        }
+        let v = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        if v != STATE_VERSION {
+            return Err(format!("save state version {v}, this build uses {STATE_VERSION}"));
+        }
+        let (s, _): (GbState, usize) = bincode::serde::decode_from_slice(&data[8..], state_config())
+            .map_err(|e| format!("couldn't decode save state: {e:?}"))?;
+        let mut bus = s.bus;
+        if bus.variant != self.bus.variant {
+            return Err(format!("save state is for {:?} hardware, this game is running on {:?}",
+                               bus.variant, self.bus.variant));
+        }
+        // the parts that aren't machine state come from this session
+        std::mem::swap(&mut bus.cartridge, &mut self.bus.cartridge);
+        bus.cartridge.mbc_mut().load_state(&s.mbc)?;
+        bus.boot_rom = std::mem::take(&mut self.bus.boot_rom);
+        std::mem::swap(&mut bus.cheats, &mut self.bus.cheats);
+        bus.ppu.get_mut().active_palette = self.bus.ppu.get_mut().active_palette;
+        self.bus = bus;
+        self.cpu = s.cpu;
+        self.current_frame = s.frame;
+        Ok(())
     }
 
     fn cheats_mut(&mut self) -> Option<&mut crate::common::cheats::Cheats> { Some(&mut self.bus.cheats) }

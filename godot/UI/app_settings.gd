@@ -53,7 +53,11 @@ const OPTION_DEFAULTS := {
 	"bios": "",              # "" = the default path below
 	"skip_bios": false,      # boot without the BIOS / boot ROM (where the system allows it)
 	"zapper": false,         # NES: Zapper light gun in port 2, aimed with the mouse
+	"gb_model": "auto",      # Game Boy: "auto" (colour games on a GBC), "dmg", "cgb"
+	"bios_dmg": "",          # Game Boy: original Game Boy boot ROM ("" = default path)
 }
+## Game Boy boot ROMs: "bios" (above) is the Game Boy Color one, this is the original's.
+const GB_DMG_BIOS_DEFAULT := "user://BIOS/dmg_boot.bin"
 ## Systems that load a BIOS, and where it's looked for by default.
 const BIOS_DEFAULTS := {
 	"coleco": "user://BIOS/colecovision.rom",
@@ -103,8 +107,10 @@ func _init() -> void:
 			["c2_a", "P2 Button 1 [A]"], ["c2_b", "P2 Button 2 [B]"]]},
 		"arcade": {"name": "Arcade", "actions": dpad + [
 			["c1_a", "Button 1 [A]"], ["c1_b", "Button 2 [B]"], ["c1_x", "Button 3 [X]"],
-			["c1_start", "P1 Start"], ["c2_start", "P2 Start"], ["coin", "Coin"]] + dpad2 + [
-			["c2_a", "P2 Button 1 [A]"], ["c2_b", "P2 Button 2 [B]"], ["c2_x", "P2 Button 3 [X]"]]},
+			["c1_start", "P1 Start"], ["c2_start", "P2 Start"], ["coin", "Coin"],
+			["c1_l1", "Service / Test [L]"], ["c1_r1", "Switch Player [R]"]] + dpad2 + [
+			["c2_a", "P2 Button 1 [A]"], ["c2_b", "P2 Button 2 [B]"], ["c2_x", "P2 Button 3 [X]"],
+			["c2_select", "P2 Coin [P2 Select]"]]},
 	}
 
 

@@ -29,3 +29,7 @@ pub mod gb_mbc3;
 pub mod gb_mbc5;
 //pub mod gb_cpu_test;
 //pub mod gb_control_tests;
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod suite_tests;

@@ -1,8 +1,12 @@
 // Mbc 2
 use crate::gameboy::gb_mbc::Mbc;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct Mbc2 {
+    #[serde(skip)]
     prg_rom: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     cart_ram: Vec<u8>, // MBC2 has exactly 512 bytes of internal RAM
     rom_bank: usize,
     ram_enabled: bool,
@@ -27,6 +31,8 @@ impl Mbc2 {
 }
 
 impl Mbc for Mbc2 {
+    crate::mbc_state!();
+
     fn read(&self, addr: u16) -> u8 {
         if addr <= 0x3FFF {
             return self.prg_rom[addr as usize];

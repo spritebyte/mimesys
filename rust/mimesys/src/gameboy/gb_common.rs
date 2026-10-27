@@ -1,4 +1,5 @@
-#[derive(Clone, Copy, PartialEq)]
+use serde::{Deserialize, Serialize};
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum GbVariant {
     Dmg,
     Mgb,
@@ -8,6 +9,7 @@ pub enum GbVariant {
     Agb,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct GbCpuConfig {
     pub variant: GbVariant,
     pub initial_a: u8,

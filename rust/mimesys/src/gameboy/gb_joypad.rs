@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+#[derive(Serialize, Deserialize)]
 pub struct Joypad {
     p1_select: u8, // Bits 4 & 5 written by CPU
     

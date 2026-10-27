@@ -1,8 +1,12 @@
 // Mbc 0 - Standard flat cartridge, no Mbc
 use crate::gameboy::gb_mbc::Mbc;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct Mbc0 {
+    #[serde(skip)]
     prg_rom: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     cart_ram: Vec<u8>,
     sram_dirty: bool,
 }
@@ -18,6 +22,8 @@ impl Mbc0 {
 }
 
 impl Mbc for Mbc0 {
+    crate::mbc_state!();
+
     fn read(&self, addr: u16) -> u8 {
         if addr < 0x8000 {
             return self.prg_rom[addr as usize];

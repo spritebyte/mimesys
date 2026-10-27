@@ -131,6 +131,11 @@ pub fn make_mapper(
             println!("Mapper{} (Konami VRC2/VRC4, submapper {}) created", mapper_id, submapper_id);
             Ok(Box::new(super::vrc24::Vrc24::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
         }
+        24 | 26 => {
+            let is_mapper_26 = mapper_id == 26;
+            println!("Mapper{} (Konami VRC6, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::vrc6::MapperVRC6::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, is_mapper_26)))
+        }        
         68 => {
             println!("Mapper68 (Sunsoft-4) created");
             Ok(Box::new(super::mapper68::Mapper68::new(prg_rom, chr_rom, initial_mirroring)))

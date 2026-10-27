@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use crate::common::timed::Timed;
 use crate::gameboy::gb_common::GbVariant;
 use crate::gameboy::gb_palette::{DmgPaletteSet,PaletteTheme};
@@ -5,8 +6,12 @@ use crate::gameboy::gb_palette::{DmgPaletteSet,PaletteTheme};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[derive(Serialize, Deserialize)]
 pub struct GbPPU {
     hardware: GbVariant,
+    /// CGB features on (a CGB running a colour game, or its boot ROM). A CGB running a
+    /// DMG game ("compatibility mode") has this off but still colours through its palette
+    /// RAM: BGP picks from BG palette 0, OBP0 / OBP1 from object palettes 0 / 1.
     cgb_mode: bool,
     last_master: u64,
     ticks: u64,
@@ -29,18 +34,25 @@ pub struct GbPPU {
     lyc: u8,
     pub ly: u8,
     pub vram: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub oam: [u8; 160],
+    #[serde(with = "serde_bytes")]
     scanline_bg_indices: [u8; 160],
+    #[serde(skip, default = "no_priority")]
     scanline_bg_priority: [bool;160],
     // --- Video Buffers ---
     // Double buffering prevents the UI thread from reading half-rendered frames!
+    #[serde(skip, default = "blank_frame")]
     back_buffer: Vec<u8>,       // The frame currently being drawn (Width * Height * 4 bytes RGBA)
+    #[serde(skip, default = "blank_shared_frame")]
     pub front_buffer: Arc<Mutex<Vec<u8>>>, // The last fully completed frame, safe for sharing across threads
     
     // Frame published
 //    frame_published: Arc<AtomicBool>,
     slice_complete: bool,
     pub frame: u64,
+    /// the user's DMG colour theme: not part of the machine state
+    #[serde(skip, default = "default_palette")]
     pub active_palette: DmgPaletteSet,
     mode3_len: u16,
     line_sprite_count: u8,
@@ -54,9 +66,16 @@ pub struct GbPPU {
     opri: u8,             // $FF6C bit 0: 0= OAM-index priority (CGB), 1=X-coord priority (DMG)
     bgpi: u8,
     obpi: u8,
+    #[serde(with = "serde_bytes")]
     bgpd: [u8;64],
+    #[serde(with = "serde_bytes")]
     obpd: [u8;64],
 }
+
+fn no_priority() -> [bool; 160] { [false; 160] }
+fn blank_frame() -> Vec<u8> { vec![0; 160 * 144 * 4] }
+fn blank_shared_frame() -> Arc<Mutex<Vec<u8>>> { Arc::new(Mutex::new(blank_frame())) }
+fn default_palette() -> DmgPaletteSet { crate::gameboy::gb_palette::PALETTE_DMG_GREEN }
 
 impl GbPPU {
     pub fn new(variant: GbVariant, active_palette: DmgPaletteSet) -> Self {
@@ -111,9 +130,15 @@ impl GbPPU {
         }
  
         // ---- LCD just turned on: restart at line 0, dot 0 ----
+        let mut elapsed = elapsed;
         if !self.lcd_was_on {
             self.lcd_was_on = true;
             self.dot = 0;
+            // the LCDC write lands mid M-cycle: start counting at the cycle's end, so the
+            // PPU has the same phase against the CPU as at power-on (with this, mooneye's
+            // intr_2_mode0/mode3_timing pass after a boot ROM turned the LCD on, as they do
+            // when starting directly)
+            elapsed = elapsed.saturating_sub(2);
             self.ly = 0;
             self.window_line_counter = 0;
             self.prev_stat_line = false;
@@ -310,6 +335,37 @@ impl GbPPU {
     }
     */
 
+    fn cgb_hw(&self) -> bool { self.hardware == GbVariant::Cgb }
+
+    /// CGB hardware switching between CGB mode and DMG compatibility mode (KEY0, set when
+    /// the boot ROM finishes).
+    pub fn set_cgb_mode(&mut self, on: bool) {
+        self.cgb_mode = on && self.cgb_hw();
+        if !self.cgb_mode { self.vbk = 0; }
+    }
+
+    pub fn cgb_mode(&self) -> bool { self.cgb_mode }
+
+    /// Compatibility-mode colours (RGB555) when no boot ROM ran to choose them.
+    pub fn set_compat_palettes(&mut self, bg: [u16; 4], obj0: [u16; 4], obj1: [u16; 4]) {
+        for i in 0..4 {
+            self.bgpd[i * 2] = bg[i] as u8;
+            self.bgpd[i * 2 + 1] = (bg[i] >> 8) as u8;
+            self.obpd[i * 2] = obj0[i] as u8;
+            self.obpd[i * 2 + 1] = (obj0[i] >> 8) as u8;
+            self.obpd[8 + i * 2] = obj1[i] as u8;
+            self.obpd[8 + i * 2 + 1] = (obj1[i] >> 8) as u8;
+        }
+    }
+
+    /// Power-on register values, for starting with a boot ROM (which sets them itself).
+    pub fn power_on_registers(&mut self) {
+        self.lcdc = 0;
+        self.stat = 0x80;
+        self.bgp = 0;
+        self.lcd_was_on = false;
+    }
+
     pub fn take_irqs(&mut self) -> u8 {
         std::mem::replace(&mut self.pending_irqs, 0)
     }
@@ -426,10 +482,13 @@ impl GbPPU {
 
             if !self.cgb_mode && !is_win_pixel && !bg_enabled {
                 let base_idx:usize = (self.ly as usize * 160 + x as usize) * 4;
-                self.back_buffer[base_idx] = 0xFF;
-                self.back_buffer[base_idx+1] = 0xFF;
-                self.back_buffer[base_idx+2] = 0xFF;
+                let (r, g, b) = if self.cgb_hw() { self._get_cgb_color(&self.bgpd, 0, 0) } else { (0xFF, 0xFF, 0xFF) };
+                self.back_buffer[base_idx] = r;
+                self.back_buffer[base_idx+1] = g;
+                self.back_buffer[base_idx+2] = b;
                 self.back_buffer[base_idx+3] = 0xFF;
+                self.scanline_bg_indices[x as usize] = 0;
+                self.scanline_bg_priority[x as usize] = false;
                 continue;
             }
 
@@ -472,6 +531,9 @@ impl GbPPU {
             self.scanline_bg_priority[x as usize] = bg_priority;
             let (r,g,b) = if self.cgb_mode {
                 self._get_cgb_color(&self.bgpd, cgb_palette, color_idx)
+            } else if self.cgb_hw() {
+                let shade = (self.bgp >> (color_idx * 2)) & 3;
+                self._get_cgb_color(&self.bgpd, 0, shade)
             } else {
                 let color: u32 = self._apply_palette(color_idx, self.bgp, &self.active_palette.bg);
                 (
@@ -651,6 +713,10 @@ impl GbPPU {
 
                     let (r, g, b) = if self.cgb_mode {
                         self._get_cgb_color(&self.obpd, cgb_palette, color_idx)
+                    } else if self.cgb_hw() {
+                        let obp1 = attributes & 0x10 != 0;
+                        let reg = if obp1 { self.obp1 } else { self.obp0 };
+                        self._get_cgb_color(&self.obpd, obp1 as u8, (reg >> (color_idx * 2)) & 3)
                     } else {
                         let palette_reg = if attributes & 0x10 != 0 { self.obp1 } else { self.obp0 };
                         let palette_colors = if attributes & 0x10 != 0 { &self.active_palette.obp1 } else { &self.active_palette.obp0 };
@@ -703,7 +769,7 @@ impl GbPPU {
             }
         }
 
-        let use_x_priority = self.hardware == GbVariant::Dmg || (self.opri & 1) != 0;
+        let use_x_priority = !self.cgb_mode || (self.opri & 1) != 0;
 
         // Sort by X coordinate (ascending), then by OAM index (ascending) for priority
         // Closures capture 'oam' by reference (&)
@@ -736,7 +802,7 @@ impl GbPPU {
             0xFF4A => { self.wy },
             0xFF4B => { self.wx },
             0xFF4F => {
-                if self.hardware == GbVariant::Cgb { self.vbk | 0xFE }
+                if self.cgb_mode { self.vbk | 0xFE }
                 else { 0xFF }
             },
             0xFF68 => if self.cgb_mode { self.bgpi | 0x40 } else { 0xFF },
@@ -755,7 +821,6 @@ impl GbPPU {
                 let lcd_enabled: bool = (p_value & 0x80) != 0;
                 self.lcdc = p_value;
                 if !lcd_was_enabled && lcd_enabled {
-                    println!("lcd enabled");
                     self.ly = 0;                    // Force scanline 0
                     self.window_line_counter = 0;   // Reset internal window line counter
                     // immediately set mode 2 so STAT ($FF41) reports 0x02
@@ -766,7 +831,6 @@ impl GbPPU {
                     self.dot = 2;
                 }
                 if  !lcd_enabled && lcd_was_enabled {
-                    println!("lcd disabled");
                     self.dot = 0;
                     self.ly = 0;
                     self.current_mode = 0;
@@ -789,8 +853,9 @@ impl GbPPU {
             0xFF4A => { self.wy = p_value; },
             0xFF4B => { self.wx = p_value; },
             0xFF4D => { },
-            0xFF4F => { self.vbk = p_value & 0x01; },
-            0xFF68 => { 
+            0xFF4F => { if self.cgb_mode { self.vbk = p_value & 0x01; } },
+            0xFF68..=0xFF6B if !self.cgb_mode => {}   // locked outside CGB mode
+            0xFF68 => {
                 self.bgpi = p_value;
 //                println!("BGP write LY={} val={:02X}", self.ly, p_value);
             },

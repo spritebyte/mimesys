@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use crate::gameboy::gb_common::{GbVariant, GbCpuConfig};
 
 const FLAG_Z:u8 = 0x80;
@@ -5,19 +6,19 @@ const FLAG_N:u8 = 0x40;
 const FLAG_H:u8 = 0x20;
 const FLAG_C:u8 = 0x10;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Reg { B, C, D, E, H, L, MemHL, A }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Reg16 { BC, DE, HL, SP }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Reg16Stk { BC, DE, HL, AF }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Reg16Mem { BC, DE, HLI, HLD }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Condition { NZ, Z, NC, C }
 
 
@@ -60,10 +61,10 @@ impl Reg16Stk {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum AluOp { Add, Adc, Sub, Sbc, And, Xor, Or, Cp }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CbOp { Rlc, Rrc, Rl, Rr, Sla, Sra, Swap, Srl, Bit, Res, Set }
 
 impl AluOp {
@@ -76,7 +77,7 @@ impl AluOp {
     }
  }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 enum Instruction {
     Nop,
     DI,
@@ -136,7 +137,7 @@ enum Instruction {
     Unknown(u8),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CbInstruction { pub op: CbOp, pub bit: u8, pub target: Reg }
 
 impl Default for Instruction {
@@ -145,6 +146,7 @@ impl Default for Instruction {
 
 enum Operand { Reg(Reg), MemHL }
 
+#[derive(Serialize, Deserialize)]
 pub struct GameBoyCpu {
     pub a: u8, pub f: u8,
     pub b: u8, pub c: u8,
