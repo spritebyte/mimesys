@@ -15,6 +15,15 @@ pub const P2_X: u32   = 1 << 19;
 /// Shoulder buttons (GBA L / R).
 pub const L: u32      = 1 << 20;
 pub const R: u32      = 1 << 21;
+/// Buttons 4 and 5 (Defender's Hyperspace and Reverse).
+pub const Y: u32      = 1 << 22;
+pub const Z: u32      = 1 << 23;
+/// Right stick, for twin-stick games (Robotron, Splat). Bits 12-15 sit above the keypad
+/// nibble.
+pub const RS_UP: u32    = 1 << 12;
+pub const RS_DOWN: u32  = 1 << 13;
+pub const RS_LEFT: u32  = 1 << 14;
+pub const RS_RIGHT: u32 = 1 << 15;
 /// Player 2 occupies bits 24-31 in the same order as player 1 (UP..START).
 pub const P2_SHIFT: u32 = 24;
 

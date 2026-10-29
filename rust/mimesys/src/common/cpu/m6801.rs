@@ -10,6 +10,10 @@
 // Interrupt vectors: FFFE reset, FFFC NMI, FFFA SWI, FFF8 IRQ1, FFF6 ICI, FFF4 OCI,
 // FFF2 TOI, FFF0 SCI.
 //
+// `Model::M6800` (also the 6802 / 6808, which only add an on-board clock and RAM): the
+// plain 6800 instruction set and cycle table (MAME cycles_6800), no on-chip I/O or RAM,
+// the 6801 additions decode as MAME's illegal opcodes, and CPX leaves C alone.
+//
 // `Model::Hd63701y0` (Hitachi HD63701Y0, MAME hd63701y0): the HD6301 instruction set
 // (AIM/OIM/EIM/TIM, XGDX, SLP, illegal opcodes TRAP to FFEE) with MAME's cycles_63701,
 // I/O at 0x00-0x27 (plus port 6 at 0x16/0x17, reported as port 5 to the bus) and
@@ -26,7 +30,7 @@ pub trait M6801Bus {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
-pub enum Model { M6803, Hd63701y0 }
+pub enum Model { M6803, Hd63701y0, M6800 }
 
 const C: u8 = 0x01;
 const V: u8 = 0x02;
@@ -60,6 +64,26 @@ const CYCLES_6803: [u8; 256] = [
     /*D*/  3, 3, 3, 5, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4,
     /*E*/  4, 4, 4, 6, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5,
     /*F*/  4, 4, 4, 6, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5,
+];
+
+const CYCLES_6800: [u8; 256] = [
+    /*       0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F */
+    /*0*/ XX, 2,XX,XX,XX,XX, 2, 2, 4, 4, 2, 2, 2, 2, 2, 2,
+    /*1*/  2, 2,XX,XX,XX,XX, 2, 2,XX, 2,XX, 2,XX,XX,XX,XX,
+    /*2*/  4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    /*3*/  4, 4, 4, 4, 4, 4, 4, 4,XX, 5,XX,10,XX,XX, 9,12,
+    /*4*/  2,XX,XX, 2, 2,XX, 2, 2, 2, 2, 2,XX, 2, 2,XX, 2,
+    /*5*/  2,XX,XX, 2, 2,XX, 2, 2, 2, 2, 2,XX, 2, 2,XX, 2,
+    /*6*/  7,XX,XX, 7, 7,XX, 7, 7, 7, 7, 7,XX, 7, 7, 4, 7,
+    /*7*/  6,XX,XX, 6, 6,XX, 6, 6, 6, 6, 6,XX, 6, 6, 3, 6,
+    /*8*/  2, 2, 2,XX, 2, 2, 2, 3, 2, 2, 2, 2, 3, 8, 3, 4,
+    /*9*/  3, 3, 3,XX, 3, 3, 3, 4, 3, 3, 3, 3, 4, 6, 4, 5,
+    /*A*/  5, 5, 5,XX, 5, 5, 5, 6, 5, 5, 5, 5, 6, 8, 6, 7,
+    /*B*/  4, 4, 4,XX, 4, 4, 4, 5, 4, 4, 4, 4, 5, 9, 5, 6,
+    /*C*/  2, 2, 2,XX, 2, 2, 2, 3, 2, 2, 2, 2,XX,XX, 3, 4,
+    /*D*/  3, 3, 3,XX, 3, 3, 3, 4, 3, 3, 3, 3,XX,XX, 4, 5,
+    /*E*/  5, 5, 5,XX, 5, 5, 5, 6, 5, 5, 5, 5,XX,XX, 6, 7,
+    /*F*/  4, 4, 4,XX, 4, 4, 4, 5, 4, 4, 4, 4,XX,XX, 5, 6,
 ];
 
 const CYCLES_63701: [u8; 256] = [
@@ -162,6 +186,7 @@ impl M6801 {
 
     // ---- memory, with the on-chip registers and RAM ----
     fn rm(&mut self, bus: &mut dyn M6801Bus, a: u16) -> u8 {
+        if self.model == Model::M6800 { return bus.read(a); }
         if self.model == Model::Hd63701y0 {
             return match a {
                 0x0000..=0x0027 => self.io_read(bus, a as u8),
@@ -176,6 +201,7 @@ impl M6801 {
         }
     }
     fn wm(&mut self, bus: &mut dyn M6801Bus, a: u16, v: u8) {
+        if self.model == Model::M6800 { bus.write(a, v); return; }
         if self.model == Model::Hd63701y0 {
             match a {
                 0x0000..=0x0027 => self.io_write(bus, a as u8, v),
@@ -510,15 +536,44 @@ impl M6801 {
                 if self.model == Model::Hd63701y0 {
                     if !self.exec_6301(bus, op) { self.exec(bus, op); }
                     cycles = CYCLES_63701[op as usize] as u32 + self.extra_cycles;
+                } else if self.model == Model::M6800 {
+                    if !self.exec_6800(bus, op) { self.exec(bus, op); }
+                    cycles = CYCLES_6800[op as usize] as u32;
                 } else {
                     self.exec(bus, op);
                     cycles = CYCLES_6803[op as usize] as u32;
                 }
             }
         }
-        self.tick_timer(bus, cycles);
+        if self.model != Model::M6800 { self.tick_timer(bus, cycles); }
         self.total_cycles += cycles as u64;
         cycles
+    }
+
+    /// 6800 opcodes that differ from the 6803 (MAME m6800_insn): the 6801 additions are
+    /// illegal (skipping their operand bytes), and CPX sets N/V from the high bytes and
+    /// leaves C alone. Returns false for everything else.
+    fn exec_6800(&mut self, bus: &mut dyn M6801Bus, op: u8) -> bool {
+        match op {
+            0x04 | 0x05 | 0x38 | 0x3A | 0x3C | 0x3D => {}
+            0x83 | 0x93 | 0xA3 | 0xC3 | 0xD3 | 0xE3 | 0xDC | 0xDD | 0xEC | 0xED => {
+                self.pc = self.pc.wrapping_add(1);
+            }
+            0xB3 | 0xF3 | 0xCC | 0xCD | 0xFC | 0xFD => self.pc = self.pc.wrapping_add(2),
+            0x8C | 0x9C | 0xAC | 0xBC => {
+                let mode = (op >> 4) & 3;
+                let b = if mode == 0 { self.imm16(bus) } else { let ea = self.ea(bus, mode); self.rm16(bus, ea) };
+                let d = self.x;
+                let rh = ((d >> 8) as u16).wrapping_sub(b >> 8);
+                self.cc &= 0xF1;
+                if rh & 0x80 != 0 { self.cc |= N; }
+                let (dh, bh) = (d >> 8, b >> 8);
+                self.cc |= ((((dh ^ bh ^ rh ^ (rh >> 1)) & 0x80) >> 6) as u8) & V;
+                if d.wrapping_sub(b) == 0 { self.cc |= Z; }
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// HD6301 opcodes that differ from the 6803 (MAME hd63701_insn). Returns false
@@ -936,5 +991,24 @@ mod tests {
         // the stacked PC points back at the illegal opcode
         let s = cpu.s as usize;
         assert_eq!(((cpu.ram[s + 6 - 0x40] as u16) << 8) | cpu.ram[s + 7 - 0x40] as u16, pc);
+    }
+
+    #[test]
+    fn m6800_mode() {
+        // LDX #$1234; SEC; CPX #$1234 -> Z, C untouched; MUL (illegal on the 6800: no-op);
+        // LDD #... (illegal 3-byte: skipped); STAA $10 goes to the bus (no on-chip RAM)
+        let code = [0xCE, 0x12, 0x34, 0x0D, 0x8C, 0x12, 0x34, 0x3D, 0xCC, 0x86, 0x77, 0x86, 0x5A, 0x97, 0x10];
+        let mut bus = Mem { m: vec![0; 0x10000], p1: 0, p2: 0 };
+        bus.m[0x4000..0x4000 + code.len()].copy_from_slice(&code);
+        bus.m[0xFFFE] = 0x40;
+        let mut cpu = M6801::with_model(Model::M6800);
+        cpu.reset(&mut bus);
+        let mut cycles = vec![];
+        for _ in 0..3 { cycles.push(cpu.step(&mut bus)); }
+        assert_eq!(cpu.cc & (Z | C), Z | C, "CPX: Z set, C kept");
+        for _ in 0..4 { cycles.push(cpu.step(&mut bus)); }
+        assert_eq!(cpu.a, 0x5A, "LDD skipped as 3 bytes, then LDAA #5A");
+        assert_eq!(bus.m[0x10], 0x5A);
+        assert_eq!(cycles, vec![3, 2, 3, 4, 4, 2, 4], "6800 cycle table");
     }
 }

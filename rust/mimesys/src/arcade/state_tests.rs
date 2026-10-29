@@ -102,3 +102,51 @@ fn dkongjr_gfx_bank_selects_upper_tiles() {
     let dk = make(Variant::DonkeyKong);
     assert_ne!(jr, dk, "DK Jr shows tile 256 (bank 1), DK ignores the bank write");
 }
+
+fn dkong3_regions(rom: Vec<u8>, gfx1: Vec<u8>, gfx2: Vec<u8>, proms: Vec<u8>) -> std::collections::HashMap<String, Vec<u8>> {
+    // sound: the RP2A03s just loop (reset vector 8000: JMP 8000)
+    let mut snd = vec![0u8; 0x10000];
+    snd[0x8000..0x8003].copy_from_slice(&[0x4C, 0x00, 0x80]);
+    snd[0x9FFA..0xA000].copy_from_slice(&[0x00, 0x80, 0x00, 0x80, 0x00, 0x80]);
+    regions(&[("maincpu", rom), ("gfx1", gfx1), ("gfx2", gfx2), ("proms", proms),
+              ("rp2a03a", snd.clone()), ("rp2a03b", snd)])
+}
+
+#[test]
+fn dkong3_round_trip() {
+    use crate::arcade::donkey_kong::dk3_system::Dk3System;
+    let r = dkong3_regions(video_loop(0x7400, 0x6000), noise(0x2000, 31), noise(0x4000, 32), noise(0x500, 33));
+    let mut sys = Dk3System::new("dkong3".into(), r).unwrap();
+    check_round_trip(&mut sys, 5, 20);
+}
+
+#[test]
+fn dkong3_dma_copies_sprites_and_bit6_picks_upper_bank() {
+    use crate::arcade::donkey_kong::dk3_system::Dk3System;
+    use crate::common::system::System;
+    let mut rom = vec![0u8; 0x10000];
+    let code: &[u8] = &[
+        0x3E, 0x80, 0x32, 0x00, 0x69,   // sprite y = 80
+        0x3E, 0x00, 0x32, 0x01, 0x69,   // code 0
+        0x3E, 0x40, 0x32, 0x02, 0x69,   // bit 6: +128, colour 0
+        0x3E, 0x88, 0x32, 0x03, 0x69,   // x
+        0x21, 0x00, 0x01,               // ld hl,0100
+        0x06, 13, 0x0E, 0x00,           // ld b,13 ; ld c,0
+        0xED, 0xB3,                     // otir: program the DMA (port 0)
+        0x3E, 0x01, 0x32, 0x85, 0x7E,   // RDY: copy 6900-6A7F to 7000
+        0x18, 0xFE,
+    ];
+    rom[..code.len()].copy_from_slice(code);
+    rom[0x100..0x10D].copy_from_slice(&[0x7D, 0x00, 0x69, 0x7F, 0x01, 0x14, 0x10, 0xAD, 0x00, 0x70, 0x8A, 0xCF, 0x87]);
+    let mut gfx2 = vec![0u8; 0x4000];
+    gfx2[0x800..0x810].fill(0xFF);              // sprite 128, left half, plane 0
+    gfx2[0x1800..0x1810].fill(0xFF);            // right half
+    let mut proms = vec![0u8; 0x500];
+    proms[1] = 0xFF;                            // pen 1: red + green on
+    let mut sys = Dk3System::new("dkong3".into(), dkong3_regions(rom, vec![0u8; 0x2000], gfx2, proms)).unwrap();
+    for _ in 0..2 { sys.run_frame(0); }
+    assert_eq!(sys.bus.video.sprite_ram[0..4], [0x80, 0x00, 0x40, 0x88], "DMA copied the sprite");
+    let fb = sys.framebuffer();
+    let px = |x: usize, y: usize| fb[(y * 256 + x) * 4..(y * 256 + x) * 4 + 3].to_vec();
+    assert_ne!(px(0x84, 125 - 16), px(0x10, 125 - 16), "sprite 128 drawn");
+}

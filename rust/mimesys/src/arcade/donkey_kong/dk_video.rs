@@ -23,13 +23,25 @@ pub struct DKVideo {
 
 impl DKVideo {
     pub fn new(gfx1: &[u8], gfx2: &[u8], proms: &[u8]) -> Result<Self, String> {
+        if proms.len() < 0x300 { return Err("proms region too small".into()); }
+        Self::build(gfx1, gfx2, build_palette(proms), proms[0x200..0x300].to_vec())
+    }
+
+    /// Donkey Kong 3 (TKG04): 4-bit resistor-network palette, colour codes at 0x400.
+    pub fn new_dk3(gfx1: &[u8], gfx2: &[u8], proms: &[u8]) -> Result<Self, String> {
+        if proms.len() < 0x500 { return Err("proms region too small".into()); }
+        Self::build(gfx1, gfx2, build_palette_dk3(proms), proms[0x400..0x500].to_vec())
+    }
+
+    fn build(gfx1: &[u8], gfx2: &[u8], palette: [[u8; 4]; 256], color_codes: Vec<u8>) -> Result<Self, String> {
         if gfx1.len() < 0x1000 { return Err("gfx1 region too small".into()); }
         if gfx2.len() < 0x2000 { return Err("gfx2 region too small".into()); }
-        if proms.len() < 0x300 { return Err("proms region too small".into()); }
 
         // gfx1 holds two bitplanes, one per half (MAME charlayout: RGN_FRAC(1,2)):
-        // DK 0x1000 = 256 tiles, DK Jr 0x2000 = 512 tiles
+        // DK 0x1000 = 256 tiles, DK Jr / DK3 0x2000 = 512 tiles.
+        // gfx2 is in quarters (RGN_FRAC(1,4)): DK 0x2000 = 128 sprites, DK3 0x4000 = 256.
         let tile_count = gfx1.len() / 16;
+        let sprite_count = gfx2.len() / 4 / 16;
         Ok(Self {
             video_ram: vec![0; 0x400],
             sprite_ram: vec![0; 0x400],
@@ -38,9 +50,9 @@ impl DKVideo {
             palette_bank: 0,
             gfx_bank: 0,
             tiles: (0..tile_count).map(|t| decode_tile(gfx1, t)).collect(),
-            sprites: (0..128).map(|s| decode_sprite(gfx2, s)).collect(),
-            palette: build_palette(proms),
-            color_codes: proms[0x200..0x300].to_vec(),
+            sprites: (0..sprite_count).map(|s| decode_sprite(gfx2, s)).collect(),
+            palette,
+            color_codes,
             framebuffer: vec![0; SCREEN_W * SCREEN_H * 4],
         })
     }
@@ -71,7 +83,8 @@ impl DKVideo {
             let v = (s[0] as i32 + add_y + 1 + vf) & 0xFF;
             if v & 0xF0 == 0xF0 {
                 let row = (v & 0x0F) as usize;
-                let code = (s[1] & 0x7F) as usize;
+                // s[2] bit 6 is the sprite code's top bit (only DK3 has sprites up there)
+                let code = ((s[1] & 0x7F) as usize + ((s[2] & 0x40) as usize) * 2) % self.sprites.len();
                 let flipy = s[1] & 0x80 != 0;
                 let group = (s[2] & 0x0F) as usize + bank;
                 let mut flipx = s[2] & 0x80 != 0;
@@ -115,14 +128,17 @@ fn decode_tile(gfx1: &[u8], tile: usize) -> [u8; 64] {
     px
 }
 
+/// 16x16, 2 bitplanes (second half / first half of gfx2); the left and right 8-pixel
+/// halves of each sprite are a quarter of the region apart.
 fn decode_sprite(gfx2: &[u8], code: usize) -> [u8; 256] {
+    let (quarter, half) = (gfx2.len() / 4, gfx2.len() / 2);
     let mut px = [0u8; 256];
     for y in 0..16 {
         for x in 0..16 {
-            let off = if x < 8 { 0 } else { 0x800 } + code * 16 + y;
+            let off = if x < 8 { 0 } else { quarter } + code * 16 + y;
             let bit = 7 - (x & 7);
             let lo = (gfx2[off] >> bit) & 1;
-            let hi = (gfx2[0x1000 + off] >> bit) & 1;
+            let hi = (gfx2[half + off] >> bit) & 1;
             px[y * 16 + x] = (hi << 1) | lo;
         }
     }
@@ -150,6 +166,52 @@ fn build_palette(proms: &[u8]) -> [[u8; 4]; 256] {
     }
     normalize_range(&mut pal);
     pal
+}
+
+/// DK3: R = 1D high nibble, G = 1D low nibble, B = 1C low nibble, each through a
+/// 2200/1000/470/220 ohm network with a 470 ohm pull-up into a darlington, then the
+/// inverting Sanyo EZV20 input (MAME dkong3_net_info / compute_res_net).
+fn build_palette_dk3(proms: &[u8]) -> [[u8; 4]; 256] {
+    let mut pal = [[0, 0, 0, 255]; 256];
+    for (i, c) in pal.iter_mut().enumerate() {
+        let r = proms[i] >> 4;
+        let g = proms[i] & 0x0F;
+        let b = proms[0x200 + i] & 0x0F;
+        *c = [res_net_dk3(r), res_net_dk3(g), res_net_dk3(b), 255];
+    }
+    normalize_range(&mut pal);
+    pal
+}
+
+fn res_net_dk3(inputs: u8) -> u8 {
+    const R: [f64; 4] = [2200.0, 1000.0, 470.0, 220.0];
+    const VOL: f64 = 0.05;          // TTL low
+    const VOH: f64 = 4.0;           // TTL high
+    const TTL_H_RES: f64 = 50.0;
+    const R_BIAS: f64 = 470.0;
+    const VBIAS: f64 = 5.0;
+    const VCC: f64 = 5.0;
+    const MINOUT: f64 = 0.7;        // darlington
+    let (mut r_total, mut v) = (0.0, 0.0);
+    for (i, r) in R.iter().enumerate() {
+        if inputs >> i & 1 == 0 { r_total += 1.0 / r; v += VOL / r; }
+    }
+    r_total += 1.0 / R_BIAS;
+    v += VBIAS / R_BIAS;
+    // high outputs stop driving when the low ones already pull above VOH
+    let open_col = v / r_total > VOH;
+    for (i, r) in R.iter().enumerate() {
+        if inputs >> i & 1 != 0 && !open_col {
+            r_total += 1.0 / (r + TTL_H_RES);
+            v += VOH / (r + TTL_H_RES);
+        }
+    }
+    let mut v = (v / r_total).max(MINOUT);
+    // Sanyo EZV20: inverted, 0.7 V dropped on each side
+    v = VCC - v;
+    v = (v - 0.7).max(0.0).min(VCC - 1.4);
+    v = v / (VCC - 1.4) * VCC;
+    (v * 255.0 / VCC + 0.4) as u8
 }
 
 fn normalize_range(pal: &mut [[u8; 4]; 256]) {

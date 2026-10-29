@@ -31,6 +31,7 @@ var emu_mutex: Mutex
 var exit_thread: bool = false
 var is_paused: bool = false
 var thread_heartbeat: int = 0
+var sram_timer: Timer
 
 #const CPU_CLOCK: float = 4000000.0
 var audio_gen: AudioStreamGenerator
@@ -75,7 +76,7 @@ func _ready() -> void:
 	get_tree().set_auto_accept_quit(false)
 	# battery saves / arcade high scores: write changes every 30 s, not only on exit,
 	# so a crash doesn't lose them (only touches the disk when something changed)
-	var sram_timer := Timer.new()
+	sram_timer = Timer.new()
 	sram_timer.wait_time = 30.0
 	sram_timer.autostart = true
 	sram_timer.timeout.connect(func():
@@ -548,6 +549,9 @@ const INPUT_BITS := {
 	"c1_up": 0, "c1_down": 1, "c1_left": 2, "c1_right": 3,
 	"c1_b": 4, "c1_a": 5, "c1_select": 6, "c1_start": 7,
 	"coin": 16, "c2_start": 17, "c1_x": 18, "c2_x": 19, "c1_l1": 20, "c1_r1": 21,
+	"c1_y": 22, "c1_z": 23,
+	# right stick (twin-stick arcade games): bits 12-15, above the keypad nibble
+	"c1_rs_up": 12, "c1_rs_down": 13, "c1_rs_left": 14, "c1_rs_right": 15,
 	# player 2: bits 24-31, same order as player 1 (c2_start also sets bit 31, below)
 	"c2_up": 24, "c2_down": 25, "c2_left": 26, "c2_right": 27,
 	"c2_b": 28, "c2_a": 29, "c2_select": 30,
@@ -636,6 +640,7 @@ func _on_rom_selection_dialog_confirmed() -> void:
 
 ## Load a game: read it, work out its system (asking if the detector isn't sure), start it.
 func execute_load(path: String, internal_zip_file: String = "") -> void:
+	_stop_current()
 	print("Call load_rom: %s" % path)
 	var rom: Dictionary = RomLoader.read_rom(path, internal_zip_file)
 	if rom.is_empty():
@@ -643,7 +648,6 @@ func execute_load(path: String, internal_zip_file: String = "") -> void:
 		return
 
 	if rom["kind"] == "arcade":
-		_stop_current()
 		var arcade = RomLoader.load_arcade(path)
 		if not arcade:
 			OS.alert("Could not load arcade set: %s" % path.get_file())
@@ -761,9 +765,12 @@ func _poll_trace_now() -> void:
 	_poll_trace()
 
 func _stop_current() -> void:
+	if sram_timer:
+		sram_timer.stop()
 	_stop_trace()
 	if emu_system:
 		emu_system.power_off()
+		emu_system = null
 	if cpu_thread.is_alive():
 		stop_emulation()
 
@@ -772,6 +779,8 @@ func _start_system(new_system, system_id: String, title: String) -> void:
 	current_system_id = system_id
 	AppSettings.apply_input_profile(current_system_id)
 	emu_system.power_on()
+	if sram_timer:
+		sram_timer.start()
 	cheats_dialog.game_loaded(emu_system, emu_mutex, current_system_id, title)   # NEW (cheats)
 	if cheats_dialog.active_count() > 0:
 		_toast("%d cheat(s) on" % cheats_dialog.active_count())

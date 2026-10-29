@@ -94,38 +94,25 @@ pub fn make_mapper(
             println!("Mapper10 (MMC4) created");
             Ok(Box::new(super::mapper9::Mapper9::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, true)))
         }
-        34 => {
-            println!("Mapper34 (NINA-001/NINA-002/BNROM) created");
-            Ok(Box::new(super::mapper34::Mapper34::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
-        }
-        64 => {
-            println!("Mapper64 (Rambo-1) created");
-            Ok(Box::new(super::mapper64::Mapper64::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
-        }
-        66 => {
-            println!("Mapper66 (GNROM) created");
-            Ok(Box::new(super::mapper66::Mapper66::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring)))
-        }
-        69 => {
-            println!("Mapper69 (Sunsoft FME-7/5A/5B) created");
-            Ok(Box::new(super::mapper69::Mapper69::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
-        }
-        71 => {
-            println!("Mapper71 (Camerica) created");
-            Ok(Box::new(super::mapper71::Mapper71::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
-        }
-        118 => {
-            // TODO: using same mapper code as MMC3, will need to detect variant and handle differences accordingly
-            println!("Mapper118 (TLSROM/TKSROM) created");
-            Ok(Box::new(super::mapper4::Mapper4::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, 118, submapper_id)))
-        }
-        206 => {
-            println!("Mapper206 (DxROM) created");
-            Ok(Box::new(super::mapper206::Mapper206::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen)))
-        }
         11 => {
             println!("Mapper11 (Color Dreams) created");
             Ok(Box::new(super::mapper11::Mapper11::new(prg_rom, chr_rom, initial_mirroring)))
+        }
+        13 => {
+            println!("Mapper{} (Mapper 13, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper13::Mapper13::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        16 => {
+            println!("Mapper{} (Mapper 16, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper16::Mapper16::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }        
+        18 => {
+            println!("Mapper{} (Mapper 18, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper18::Mapper18::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        19 => {
+            println!("Mapper{} (Mapper 19, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper19::Mapper19::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
         }
         21 | 22 | 23 | 25 => {
             println!("Mapper{} (Konami VRC2/VRC4, submapper {}) created", mapper_id, submapper_id);
@@ -135,11 +122,75 @@ pub fn make_mapper(
             let is_mapper_26 = mapper_id == 26;
             println!("Mapper{} (Konami VRC6, submapper {}) created", mapper_id, submapper_id);
             Ok(Box::new(super::vrc6::MapperVRC6::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, is_mapper_26)))
+        }
+        32 => {
+            println!("Mapper{} (Mapper 32, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper32::Mapper32::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        33 => {
+            println!("Mapper{} (Mapper 33, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper33::Mapper33::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        34 => {
+            println!("Mapper34 (NINA-001/NINA-002/BNROM) created");
+            Ok(Box::new(super::mapper34::Mapper34::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
+        }
+        47 => {
+            println!("Mapper{} (Mapper 47, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper47::Mapper47::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        48 => {
+            println!("Mapper{} (Mapper 48, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper48::Mapper48::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
         }        
+        64 => {
+            println!("Mapper64 (Rambo-1) created");
+            Ok(Box::new(super::mapper64::Mapper64::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
+        }
+        65 => {
+            println!("Mapper{} (Mapper 65, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper65::Mapper65::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        66 => {
+            println!("Mapper66 (GNROM) created");
+            Ok(Box::new(super::mapper66::Mapper66::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring)))
+        }
         68 => {
             println!("Mapper68 (Sunsoft-4) created");
             Ok(Box::new(super::mapper68::Mapper68::new(prg_rom, chr_rom, initial_mirroring)))
         }
+        69 => {
+            println!("Mapper69 (Sunsoft FME-7/5A/5B) created");
+            Ok(Box::new(super::mapper69::Mapper69::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
+        }
+        71 => {
+            println!("Mapper71 (Camerica) created");
+            Ok(Box::new(super::mapper71::Mapper71::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, submapper_id)))
+        }
+        72 => {
+            println!("Mapper{} (Mapper 72, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper72::Mapper72::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        73 => {
+            println!("Mapper{} (Konami VRC3, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper73::Mapper73::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        75 => {
+            println!("Mapper{} (Konami VRC1, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper75::Mapper75::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        76 => {
+            println!("Mapper{} (Mapper 76, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper76::Mapper76::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        77 => {
+            println!("Mapper{} (Irem/Napolean Senki, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper77::Mapper77::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        85 => {
+            println!("Mapper{} (Mapper 85, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper85::Mapper85::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }        
         87 => {
             println!("Mapper87 (Jaleco/Konami CHR latch) created");
             Ok(Box::new(super::mapper87::Mapper87::new(prg_rom, chr_rom, initial_mirroring)))
@@ -147,6 +198,23 @@ pub fn make_mapper(
         95 => {
             println!("Mapper95 (Namcot 3425) created");
             Ok(Box::new(super::mapper95::Mapper95::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring)))
+        }
+        105 => {
+            println!("Mapper{} (EVENT-ROM, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper105::Mapper105::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        118 => {
+            // TODO: using same mapper code as MMC3, will need to detect variant and handle differences accordingly
+            println!("Mapper118 (TLSROM/TKSROM) created");
+            Ok(Box::new(super::mapper4::Mapper4::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen, 118, submapper_id)))
+        }
+        119 => {
+            println!("Mapper{} (TQROM, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper119::Mapper119::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        206 => {
+            println!("Mapper206 (DxROM) created");
+            Ok(Box::new(super::mapper206::Mapper206::new(prg_banks, chr_banks, prg_rom, chr_rom, initial_mirroring, four_screen)))
         }
         // Add future mappers here. The system file never has to change!
         _ => Err(format!("Mapper {} not implemented yet", mapper_id)),

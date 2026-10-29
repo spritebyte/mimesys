@@ -50,6 +50,14 @@ Gameboy/Gameboy Color has option to skip
 Gameboy Advance will use replacement BIOS if the official BIOS doesn't exist. License in the rusr/mimesys/src/gba directory.
 Q-bert (optional, but sc01a.bin required for speech sounds)
 
+
+NES Mapper Support:
+0,1,2,3,4,5,7,9,10,11,13,16,18,19,
+21,22,23,24,25,26,32,33,34,
+47,48,64,65,66,68,69,71,72,73,75,76
+87,95,118,206
+Total: 39
+
 Planned TODO:
 Atari 5200 (will require BIOS), more arcade
 Possibly SNES and Genesis.

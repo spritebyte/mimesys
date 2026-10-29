@@ -7,6 +7,7 @@ use crate::nes::mappers::Mirroring;
 pub struct HeaderFix {
     pub name: &'static str,
     pub mirroring: Option<Mirroring>,
+    pub mapper: Option<u16>,
     pub submapper: Option<u8>,
 }
 
@@ -14,7 +15,11 @@ pub struct HeaderFix {
 const FIXES: &[(u32, HeaderFix)] = &[
     // header says horizontal; the game scrolls into $2400 expecting vertical (character
     // select stripes, freeze at race start)
-    (0x9235B57B, HeaderFix { name: "Micro Machines (USA) (Unl)", mirroring: Some(Mirroring::Vertical), submapper: None }),
+    (0x9235B57B, HeaderFix { name: "Micro Machines (USA) (Unl)", mirroring: Some(Mirroring::Vertical), mapper: None, submapper: None }),
+    (0xA7B0536C, HeaderFix { name: "Don Doko Don 2", mirroring: None, mapper: Some(48), submapper: None }),
+    (0xAEBD6549, HeaderFix { name: "Bakushou!! Jinsei Gekijou 3", mirroring: None, mapper: Some(48), submapper: None }),
+    (0x40C0AD47, HeaderFix { name: "Flintstones, The - The Rescue of Dino & Hoppy (Japan)", mirroring: None, mapper: Some(48), submapper: None }),
+    (0x1500E835, HeaderFix { name: "Jetsons, The - Cogswell's Caper (Japan)", mirroring: None, mapper: Some(48), submapper: None }),
 ];
 
 pub fn entries() -> usize { FIXES.len() }

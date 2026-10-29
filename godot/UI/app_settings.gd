@@ -15,6 +15,7 @@ const PATH := "user://settings.cfg"
 const ALL_ACTIONS := [
 	"c1_up", "c1_down", "c1_left", "c1_right", "c1_b", "c1_a", "c1_select", "c1_start",
 	"coin", "c2_start", "c1_x", "c2_x", "c1_l1", "c1_r1",
+	"c1_y", "c1_z", "c1_rs_up", "c1_rs_down", "c1_rs_left", "c1_rs_right",
 	"c2_up", "c2_down", "c2_left", "c2_right", "c2_b", "c2_a", "c2_select",
 	"c1_0", "c1_1", "c1_2", "c1_3", "c1_4", "c1_5", "c1_6", "c1_7", "c1_8", "c1_9",
 	"c1_star", "c1_hash",
@@ -109,6 +110,9 @@ func _init() -> void:
 			["c2_a", "P2 Button 1 [A]"], ["c2_b", "P2 Button 2 [B]"]]},
 		"arcade": {"name": "Arcade", "actions": dpad + [
 			["c1_a", "Button 1 [A]"], ["c1_b", "Button 2 [B]"], ["c1_x", "Button 3 [X]"],
+			["c1_y", "Button 4 [Y]"], ["c1_z", "Button 5 [Z]"],
+			["c1_rs_up", "Right Stick Up"], ["c1_rs_down", "Right Stick Down"],
+			["c1_rs_left", "Right Stick Left"], ["c1_rs_right", "Right Stick Right"],
 			["c1_start", "P1 Start"], ["c2_start", "P2 Start"], ["coin", "Coin"],
 			["c1_l1", "Service / Test [L]"], ["c1_r1", "Switch Player [R]"]] + dpad2 + [
 			["c2_a", "P2 Button 1 [A]"], ["c2_b", "P2 Button 2 [B]"], ["c2_x", "P2 Button 3 [X]"],

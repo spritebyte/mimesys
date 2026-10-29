@@ -52,7 +52,7 @@ impl NesSystem {
         let mapper_low = bytes[CONTROL_BYTE_1_IDX as usize] >> 4;
         let mapper_mid = bytes[CONTROL_BYTE_2_IDX as usize] & 0xF0;
         let mapper_high = ((mapper_byte & 0x0F) as u16) << 8;
-        let mapper_id: u16;
+        let mut mapper_id: u16;
         // slice ROM bytes
         let has_trainer:bool = (bytes[CONTROL_BYTE_1_IDX as usize] & 0b100) != 0;
         let ines2: bool = (bytes[CONTROL_BYTE_2_IDX as usize] & 0b1100) == 0x08;
@@ -82,7 +82,8 @@ impl NesSystem {
             if mirroring_bit { "vertical" } else { "horizontal" });
         if let Some(fix) = crate::nes::rom_db::lookup(crc) {
             println!("NES ROM: header fix for {}", fix.name);
-            if let Some(m) = fix.mirroring { initial_mirroring = m; }
+            if let Some(mir) = fix.mirroring { initial_mirroring = mir; }
+            if let Some(m) = fix.mapper { mapper_id = m; }
             if let Some(sm) = fix.submapper { submapper = sm; }
         } else {
             println!("NES ROM: no header fix ({} entries in rom_db)", crate::nes::rom_db::entries());
@@ -121,8 +122,8 @@ impl NesSystem {
                 save_filename: base_name.to_string(),
                 frame_ready,
                 is_running: Arc::new(AtomicBool::new(false)),
-                save_battery_path: "user://GD_EMU/NES/Save".to_string(),
-                save_state_path: "user://GD_EMU/NES/State".to_string(),
+                save_battery_path: "user://NES/Save".to_string(),
+                save_state_path: "user://NES/State".to_string(),
                 pending_load_request: None,
                 pending_save_request: None,
                 rewind_buffer,

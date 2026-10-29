@@ -9,6 +9,8 @@ pub mod atarisy2;
 pub mod gberet;
 pub mod ddragon;
 pub mod simpsons;
+pub mod williams;
+pub mod jedi;
 pub mod state;
 pub mod hiscore;
 
@@ -38,6 +40,13 @@ pub fn load_arcade(driver: &str, set_name: &str, mut regions: HashMap<String, Ve
             let v = if driver == "dkongjr" { Variant::DonkeyKongJr } else { Variant::DonkeyKong };
             Ok(wrap(DKSystem::new(v, set_name.to_string(), regions)?, hs, "DK"))
         },
+        "dkong3" => Ok(wrap(donkey_kong::dk3_system::Dk3System::new(set_name.to_string(), regions)?, hs, "DK")),
+        "defender" | "stargate" | "robotron" | "joust" | "bubbles" | "splat" | "sinistar" => {
+            use williams::williams_system::{Game, WilliamsSystem};
+            let game = Game::from_driver(driver).unwrap();
+            Ok(Box::new(WilliamsSystem::new(game, set_name, regions)?))
+        }
+        "jedi" => Ok(Box::new(jedi::jedi_system::JediSystem::new(set_name, regions)?)),
         "pacman" => Ok(wrap(pacman::pacman_system::PacmanSystem::new(
             pacman::pacman_system::Variant::Pacman, set_name, regions)?, hs, "Pacman")),
         "mspacman" => Ok(wrap(pacman::pacman_system::PacmanSystem::new(

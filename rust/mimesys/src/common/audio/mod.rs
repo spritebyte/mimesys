@@ -4,4 +4,4 @@ pub mod msm5205;
 pub mod pokey;
 pub mod ym2151;
 pub mod tms5220;
-pub mod okim6295;
+pub mod okim6295;pub mod hc55516;
