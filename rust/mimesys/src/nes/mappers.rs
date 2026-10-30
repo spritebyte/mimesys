@@ -187,6 +187,10 @@ pub fn make_mapper(
             println!("Mapper{} (Irem/Napolean Senki, submapper {}) created", mapper_id, submapper_id);
             Ok(Box::new(super::mapper77::Mapper77::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
         }
+        78 => {
+            println!("Mapper{} (Irem 74HC161/32, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper78::Mapper78::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
         85 => {
             println!("Mapper{} (Mapper 85, submapper {}) created", mapper_id, submapper_id);
             Ok(Box::new(super::mapper85::Mapper85::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
@@ -211,6 +215,14 @@ pub fn make_mapper(
         119 => {
             println!("Mapper{} (TQROM, submapper {}) created", mapper_id, submapper_id);
             Ok(Box::new(super::mapper119::Mapper119::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        159 => {
+            println!("Mapper{} (Bandai FCG, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper159::Mapper159::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
+        184 => {
+            println!("Mapper{} (Sunsoft-1, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper184::Mapper184::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
         }
         206 => {
             println!("Mapper206 (DxROM) created");

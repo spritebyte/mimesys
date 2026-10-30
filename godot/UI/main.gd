@@ -619,6 +619,8 @@ func _to_binary_string(byte: int) -> String:
 #	file_dialog.popup_centered_ratio(0.4)
 
 func stop_emulation():
+	if sram_timer:
+		sram_timer.stop()
 	emu_mutex.lock()
 	exit_thread = true
 	emu_mutex.unlock()

@@ -25,12 +25,12 @@ pub mod mapper16;
 pub mod mapper18;
 #[path = "mappers/mapper19.rs"]
 pub mod mapper19;
-#[path = "mappers/mapper34.rs"]
-pub mod mapper34;
 #[path = "mappers/mapper32.rs"]
 pub mod mapper32;
 #[path = "mappers/mapper33.rs"]
 pub mod mapper33;
+#[path = "mappers/mapper34.rs"]
+pub mod mapper34;
 #[path = "mappers/mapper47.rs"]
 pub mod mapper47;
 #[path = "mappers/mapper48.rs"]
@@ -57,6 +57,8 @@ pub mod mapper75;
 pub mod mapper76;
 #[path = "mappers/mapper77.rs"]
 pub mod mapper77;
+#[path = "mappers/mapper78.rs"]
+pub mod mapper78;
 #[path = "mappers/mapper85.rs"]
 pub mod mapper85;
 #[path = "mappers/mapper87.rs"]
@@ -67,6 +69,10 @@ pub mod mapper95;
 pub mod mapper105;
 #[path = "mappers/mapper119.rs"]
 pub mod mapper119;
+#[path = "mappers/mapper159.rs"]
+pub mod mapper159;
+#[path = "mappers/mapper184.rs"]
+pub mod mapper184;
 #[path = "mappers/mapper206.rs"]
 pub mod mapper206;
 #[path = "mappers/vrc24.rs"]
