@@ -197,7 +197,7 @@ impl System for A2600System {
         self.bus.riot.swcha_in = swcha;
         self.bus.tia.fire[0] = on(pad::A) || on(pad::B);
         self.bus.tia.fire[1] = on2(pad::A) || on2(pad::B);
-        let mut swchb = 0x0Bu8;
+        let mut swchb = 0xCBu8;
         if on(pad::START) { swchb &= !0x01; }
         if on(pad::SELECT) { swchb &= !0x02; }
         self.bus.riot.swchb_in = swchb;

@@ -61,6 +61,7 @@ impl Cart {
     pub fn rom_len(&self) -> usize { self.rom.len() }
 
     /// Bank-switch hotspots react to any access, read or write.
+    /*
     fn touch(&mut self, a: u16) {
         match self.scheme {
             Scheme::F8 if (0xFF8..=0xFF9).contains(&a) => self.bank = (a - 0xFF8) as usize,
@@ -75,6 +76,49 @@ impl Cart {
             _ => {}
         }
     }
+    */
+fn touch(&mut self, a: u16) {
+    match self.scheme {
+        Scheme::E7 if (0xFE0..=0xFE7).contains(&a) => {
+            let old = self.slices[0];
+            let new = (a - 0xFE0) as usize;
+
+            self.slices[0] = new;
+
+            println!(
+                "E7 ROM bank switch: {:X} -> {} (previous {})",
+                a, new, old
+            );
+        }
+
+        Scheme::E7 if (0xFE8..=0xFEB).contains(&a) => {
+            let old = self.bank;
+            self.bank = (a - 0xFE8) as usize;
+
+            println!(
+                "E7 RAM bank switch: {:X} -> {} (previous {})",
+                a, self.bank, old
+            );
+        }
+
+        _ => {
+            // Keep your existing handling for other schemes.
+            match self.scheme {
+                Scheme::F8 if (0xFF8..=0xFF9).contains(&a) =>
+                    self.bank = (a - 0xFF8) as usize,
+                Scheme::F6 if (0xFF6..=0xFF9).contains(&a) =>
+                    self.bank = (a - 0xFF6) as usize,
+                Scheme::F4 if (0xFF4..=0xFFB).contains(&a) =>
+                    self.bank = (a - 0xFF4) as usize,
+                Scheme::E0 if (0xFE0..=0xFF7).contains(&a) => {
+                    let slot = ((a - 0xFE0) / 8) as usize;
+                    self.slices[slot] = (a & 7) as usize;
+                }
+                _ => {}
+            }
+        }
+    }
+}
 
     /// `a` = address within the cartridge (0x000-0xFFF).
     pub fn read(&mut self, a: u16) -> u8 {
@@ -117,16 +161,48 @@ impl Cart {
     fn e7_read(&self, a: u16) -> u8 {
         let slices = self.rom.len() / 2048;
         let last = (slices - 1) * 2048;
+
         match a {
-            // RAM write ports: reading them returns junk on real carts
-            0x000..=0x3FF if self.slices[0] == 7 => 0xFF,
-            0x400..=0x7FF if self.slices[0] == 7 => self.sc_ram[(a - 0x400) as usize],
-            0x000..=0x7FF => self.rom[(self.slices[0] % slices) * 2048 + a as usize],
-            0x800..=0x8FF => 0xFF,
-            0x900..=0x9FF => self.sc_ram[1024 + self.bank * 256 + (a - 0x900) as usize],
-            _ => self.rom[last + (a - 0x800) as usize],
+            // 1K RAM write port.
+            // Reads return the underlying RAM contents.
+            0x000..=0x3FF if self.slices[0] == 7 => {
+                self.sc_ram[a as usize]
+            }
+
+            // 1K RAM read port.
+            0x400..=0x7FF if self.slices[0] == 7 => {
+                self.sc_ram[(a - 0x400) as usize]
+            }
+
+            // Switchable 2K ROM bank.
+            0x000..=0x7FF => {
+                let bank = self.slices[0] % slices;
+                self.rom[bank * 2048 + a as usize]
+            }
+
+            // 256-byte RAM write port.
+            0x800..=0x8FF => {
+                self.sc_ram[
+                    1024 + self.bank * 256 + (a - 0x800) as usize
+                ]
+            }
+
+            // 256-byte RAM read port.
+            0x900..=0x9FF => {
+                self.sc_ram[
+                    1024 + self.bank * 256 + (a - 0x900) as usize
+                ]
+            }
+
+            // Fixed ROM region.
+            0xA00..=0xFFF => {
+                self.rom[last + (a - 0x800) as usize]
+            }
+
+            _ => 0,
         }
     }
+
 
     /// Writes to TIA space (0x00-0x3F): Tigervision's bank register.
     pub fn tia_write(&mut self, a: u16, v: u8) {

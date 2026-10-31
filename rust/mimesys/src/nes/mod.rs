@@ -41,10 +41,14 @@ pub mod mapper64;
 pub mod mapper65;
 #[path = "mappers/mapper66.rs"]
 pub mod mapper66;
+#[path = "mappers/mapper67.rs"]
+pub mod mapper67;
 #[path = "mappers/mapper68.rs"]
 pub mod mapper68;
 #[path = "mappers/mapper69.rs"]
 pub mod mapper69;
+#[path = "mappers/mapper70.rs"]
+pub mod mapper70;
 #[path = "mappers/mapper71.rs"]
 pub mod mapper71;
 #[path = "mappers/mapper72.rs"]
@@ -63,6 +67,8 @@ pub mod mapper78;
 pub mod mapper85;
 #[path = "mappers/mapper87.rs"]
 pub mod mapper87;
+#[path = "mappers/mapper88.rs"]
+pub mod mapper88;
 #[path = "mappers/mapper95.rs"]
 pub mod mapper95;
 #[path = "mappers/mapper105.rs"]

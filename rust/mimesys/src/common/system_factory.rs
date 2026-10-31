@@ -76,7 +76,7 @@ fn load_cartridge(system: CartSystem, rom: &[u8], filename: &str, bios: Option<V
         }
         CartSystem::Nes => {
             let core = NesSystem::from_rom(rom, filename, bios_or_empty)
-                .map_err(|e| format!("GB from_rom failed: {e}"))?;
+                .map_err(|e| format!("NES from_rom failed: {e}"))?;
             Ok(Box::new(core)) 
         }
         CartSystem::Sms | CartSystem::GameGear => {

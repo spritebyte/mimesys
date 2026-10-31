@@ -35,7 +35,7 @@ impl Riot {
             ram: vec![0; 128],
             timer: 0, interval: 1024, set_interval: 1024, prescale: 0, underflow: false,
             swcha_in: 0xFF,
-            swchb_in: 0x0B,     // color, both difficulties B, RESET/SELECT up
+            swchb_in: 0xCB,     // color, both difficulties B, RESET/SELECT up
             swacnt: 0, swbcnt: 0, swcha_out: 0, swchb_out: 0,
         }
     }
