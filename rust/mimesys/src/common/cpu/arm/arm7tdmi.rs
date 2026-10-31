@@ -8,6 +8,11 @@
 //! or not, and `idle()` marks internal cycles, so the bus adds its own wait states
 //! and counts cycles.
 //!
+//! With `v5` set it is an ARM946E-S (ARMv5TE, the Nintendo DS's main CPU): BLX, CLZ,
+//! the saturating Q instructions, the 16-bit signed multiplies, LDRD / STRD, PLD, BKPT,
+//! loads into r15 that switch to Thumb on bit 0, multiplies that leave C alone, and
+//! coprocessor 15 (handed to the bus). Checked against Unicorn's ARM946 model.
+//!
 //! Behaviour follows NanoBoyAdvance closely (r15 keeps address bit 1 after jumps,
 //! loads pass unaligned addresses to the bus, the Booth-multiplier carry flag, the
 //! empty register list quirks...). Checked against the SingleStepTests ARM7TDMI
@@ -23,6 +28,7 @@ pub const FLAG_N: u32 = 1 << 31;
 pub const FLAG_Z: u32 = 1 << 30;
 pub const FLAG_C: u32 = 1 << 29;
 pub const FLAG_V: u32 = 1 << 28;
+pub const FLAG_Q: u32 = 1 << 27; // sticky saturation (ARMv5)
 pub const FLAG_I: u32 = 1 << 7; // IRQ disable
 pub const FLAG_F: u32 = 1 << 6; // FIQ disable
 pub const FLAG_T: u32 = 1 << 5; // Thumb state
@@ -53,6 +59,11 @@ pub trait ArmBus {
     fn write32(&mut self, addr: u32, val: u32, access: u8);
     /// One internal (no bus) cycle.
     fn idle(&mut self) {}
+    /// Coprocessor 15 (ARMv5): `reg` = opcode1 << 12 | CRn << 8 | CRm << 4 | opcode2.
+    fn cp15_read(&mut self, _reg: u32) -> u32 { 0 }
+    fn cp15_write(&mut self, _reg: u32, _val: u32) {}
+    /// Where the exception vectors are: 0, or 0xFFFF0000 with CP15's high-vectors bit.
+    fn exception_base(&self) -> u32 { 0 }
 }
 
 /// Register bank for a mode, in storage order: 0 FIQ, 1 SVC, 2 ABT, 3 IRQ, 4 UND.
@@ -92,6 +103,9 @@ pub struct Arm7tdmi {
     /// The I flag as it was when the current instruction started (IRQs see the
     /// old value for one instruction after it changes)
     irq_latch: bool,
+    /// ARMv5TE (ARM946E-S) instead of ARMv4T
+    #[serde(default)]
+    pub v5: bool,
 }
 
 impl Default for Arm7tdmi { fn default() -> Self { Self::new() } }
@@ -113,8 +127,12 @@ impl Arm7tdmi {
             next_fetch: ACCESS_CODE,
             irq_line: false,
             irq_latch: true,
+            v5: false,
         }
     }
+
+    /// An ARM946E-S (ARMv5TE).
+    pub fn new_v5() -> Self { Self { v5: true, ..Self::new() } }
 
     /// Reset: SVC mode, IRQ/FIQ off, ARM state, execution from 0.
     pub fn reset(&mut self, bus: &mut dyn ArmBus) {
@@ -216,7 +234,18 @@ impl Arm7tdmi {
         self.set_mode(mode);
         self.cpsr = (self.cpsr & !FLAG_T) | FLAG_I;
         self.r[14] = lr;
-        self.jump_to(bus, vector);
+        let base = bus.exception_base();
+        self.jump_to(bus, base.wrapping_add(vector));
+    }
+
+    /// Jump to `v`; on ARMv5 (loads into r15) bit 0 picks Thumb.
+    fn jump_interwork(&mut self, bus: &mut dyn ArmBus, v: u32) {
+        if self.v5 {
+            if v & 1 != 0 { self.cpsr |= FLAG_T; self.jump_to(bus, v & !1); }
+            else { self.cpsr &= !FLAG_T; self.jump_to(bus, v & !3); }
+        } else {
+            self.jump_to(bus, v);
+        }
     }
 
     /// Runs one instruction, entering the IRQ handler first if an IRQ is pending.
@@ -238,7 +267,9 @@ impl Arm7tdmi {
             self.thumb_op(bus, op as u16);
         } else {
             self.pipe[1] = bus.read32(self.r[15], acc);
-            if self.cond(op >> 28) { self.arm_op(bus, op) } else { self.advance(ACCESS_SEQ) }
+            if self.cond(op >> 28) { self.arm_op(bus, op) }
+            else if op >> 28 == 0xF && self.v5 { self.arm_unconditional(bus, op) }
+            else { self.advance(ACCESS_SEQ) }
         }
     }
 
@@ -362,7 +393,9 @@ impl Arm7tdmi {
     fn arm_op(&mut self, bus: &mut dyn ArmBus, op: u32) {
         match (op >> 26) & 3 {
             0 => {
-                if bit(op, 25) {
+                if self.v5 && !bit(op, 25) && self.arm_v5_misc(bus, op) {
+                    // handled
+                } else if bit(op, 25) {
                     self.arm_data_or_psr(bus, op);
                 } else if op & 0x0FF0_00F0 == 0x0120_0010 {
                     self.arm_bx(bus, op);
@@ -378,7 +411,120 @@ impl Arm7tdmi {
             }
             1 => if op & 0x0200_0010 == 0x0200_0010 { self.undefined(bus) } else { self.arm_single(bus, op) },
             2 => if bit(op, 25) { self.arm_branch(bus, op) } else { self.arm_block(bus, op) },
-            _ => if op & 0x0300_0000 == 0x0300_0000 { self.swi(bus) } else { self.undefined(bus) },
+            _ => if op & 0x0300_0000 == 0x0300_0000 { self.swi(bus) }
+                 else if self.v5 && op & 0x0F00_0F10 == 0x0E00_0F10 { self.arm_cp15(bus, op) }
+                 else { self.undefined(bus) },
+        }
+    }
+
+    // ---- ARMv5 ----
+
+    /// Condition 1111: BLX with an immediate, PLD (a hint: nothing to do).
+    fn arm_unconditional(&mut self, bus: &mut dyn ArmBus, op: u32) {
+        if op & 0x0E00_0000 == 0x0A00_0000 {
+            let off = (((op & 0x00FF_FFFF) << 8) as i32 >> 6) as u32 | ((op >> 23) & 2);
+            self.r[14] = self.r[15].wrapping_sub(4);
+            let target = self.r[15].wrapping_add(off);
+            self.cpsr |= FLAG_T;
+            self.jump_to(bus, target);
+        } else {
+            self.advance(ACCESS_SEQ);
+        }
+    }
+
+    /// The ARMv5 additions in the data-processing space. Returns false if `op` isn't one.
+    fn arm_v5_misc(&mut self, bus: &mut dyn ArmBus, op: u32) -> bool {
+        let rm = (op & 0xF) as usize;
+        let rd = ((op >> 12) & 0xF) as usize;
+        let rn = ((op >> 16) & 0xF) as usize;
+        if op & 0x0FFF_FFF0 == 0x012F_FF30 {
+            // BLX Rm
+            let v = self.r[rm];
+            self.r[14] = self.r[15].wrapping_sub(4);
+            if v & 1 != 0 { self.cpsr |= FLAG_T; self.jump_to(bus, v & !1) } else { self.jump_to(bus, v & !3) }
+        } else if op & 0x0FFF_0FF0 == 0x016F_0F10 {
+            // CLZ
+            self.r[rd] = self.r[rm].leading_zeros();
+            self.advance(ACCESS_SEQ);
+        } else if op & 0x0F90_0FF0 == 0x0100_0050 {
+            // QADD / QSUB / QDADD / QDSUB
+            let a = self.r[rm] as i32;
+            let mut b = self.r[rn] as i32;
+            let mut sat = false;
+            if bit(op, 22) {
+                let (d, o) = b.overflowing_mul(2);
+                b = if o { sat = true; if b < 0 { i32::MIN } else { i32::MAX } } else { d };
+            }
+            let r = if bit(op, 21) { a.checked_sub(b) } else { a.checked_add(b) };
+            let r = r.unwrap_or_else(|| {
+                sat = true;
+                if bit(op, 21) { if a < 0 { i32::MIN } else { i32::MAX } } else if b < 0 { i32::MIN } else { i32::MAX }
+            });
+            if sat { self.cpsr |= FLAG_Q; }
+            self.r[rd] = r as u32;
+            self.advance(ACCESS_SEQ);
+            if rd == 15 { self.reload(bus); }
+        } else if op & 0x0F90_0090 == 0x0100_0080 {
+            self.arm_mul_halfword(bus, op);
+        } else if op & 0x0FF0_00F0 == 0x0120_0070 {
+            // BKPT: prefetch abort
+            let lr = self.r[15].wrapping_sub(4);
+            self.exception(bus, 0x0C, MODE_ABT, lr);
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// SMLAxy / SMLAWy / SMULWy / SMLALxy / SMULxy: 16-bit halves, signed.
+    fn arm_mul_halfword(&mut self, bus: &mut dyn ArmBus, op: u32) {
+        let rd = ((op >> 16) & 0xF) as usize;
+        let rn = ((op >> 12) & 0xF) as usize;
+        let rs = self.r[((op >> 8) & 0xF) as usize];
+        let rm = self.r[(op & 0xF) as usize];
+        let half = |v: u32, top: bool| -> i32 { if top { (v >> 16) as i16 as i32 } else { v as i16 as i32 } };
+        let x = half(rm, bit(op, 5));
+        let y = half(rs, bit(op, 6));
+        self.advance(ACCESS_SEQ);
+        match (op >> 21) & 3 {
+            0 => {
+                let (r, o) = (x * y).overflowing_add(self.r[rn] as i32);
+                if o { self.cpsr |= FLAG_Q; }
+                self.r[rd] = r as u32;
+            }
+            1 => {
+                let p = ((rm as i32 as i64 * y as i64) >> 16) as i32;
+                if bit(op, 5) {
+                    self.r[rd] = p as u32;
+                } else {
+                    let (r, o) = p.overflowing_add(self.r[rn] as i32);
+                    if o { self.cpsr |= FLAG_Q; }
+                    self.r[rd] = r as u32;
+                }
+            }
+            2 => {
+                let acc = ((self.r[rd] as u64) << 32 | self.r[rn] as u64) as i64;
+                let r = acc.wrapping_add((x * y) as i64) as u64;
+                self.r[rn] = r as u32;
+                self.r[rd] = (r >> 32) as u32;
+                bus.idle();
+            }
+            _ => self.r[rd] = (x * y) as u32,
+        }
+        if rd == 15 || rn == 15 { self.reload(bus); }
+    }
+
+    /// MCR / MRC to coprocessor 15 (anything else is undefined).
+    fn arm_cp15(&mut self, bus: &mut dyn ArmBus, op: u32) {
+        let rd = ((op >> 12) & 0xF) as usize;
+        let reg = ((op >> 21) & 7) << 12 | ((op >> 16) & 0xF) << 8 | (op & 0xF) << 4 | ((op >> 5) & 7);
+        self.advance(ACCESS_SEQ);
+        if bit(op, 20) {
+            let v = bus.cp15_read(reg);
+            if rd == 15 { self.cpsr = (self.cpsr & 0x0FFF_FFFF) | (v & 0xF000_0000) } else { self.r[rd] = v }
+        } else {
+            let v = if rd == 15 { self.r[15].wrapping_add(4) } else { self.r[rd] };
+            bus.cp15_write(reg, v);
         }
     }
 
@@ -529,8 +675,10 @@ impl Arm7tdmi {
         }
         if bit(op, 20) {
             self.set_nz(r);
-            let c = if full { mul_carry_simple(rhs) } else { mul_carry_lo(lhs, rhs, acc) };
-            self.set_c(c as u32);
+            if !self.v5 {
+                let c = if full { mul_carry_simple(rhs) } else { mul_carry_lo(lhs, rhs, acc) };
+                self.set_c(c as u32);
+            }
         }
         self.r[rd] = r;
         if rd == 15 { self.reload(bus); }
@@ -561,8 +709,10 @@ impl Arm7tdmi {
             self.cpsr = (self.cpsr & !(FLAG_N | FLAG_Z))
                 | ((r >> 32) as u32 & FLAG_N)
                 | if r == 0 { FLAG_Z } else { 0 };
-            let c = if full { mul_carry_hi(lhs, rhs, acc_hi, signed) } else { mul_carry_lo(lhs, rhs, acc_lo) };
-            self.set_c(c as u32);
+            if !self.v5 {
+                let c = if full { mul_carry_hi(lhs, rhs, acc_hi, signed) } else { mul_carry_lo(lhs, rhs, acc_lo) };
+                self.set_c(c as u32);
+            }
         }
         self.r[lo] = r as u32;
         self.r[hi] = (r >> 32) as u32;
@@ -630,6 +780,15 @@ impl Arm7tdmi {
                     if wb { self.r[rn] = self.r[rn].wrapping_add(off); }
                     bus.idle();
                     self.r[rd] = v;
+                } else if self.v5 {
+                    // LDRD
+                    let r = rd & !1;
+                    let lo = bus.read32(addr, ACCESS_NSEQ);
+                    let hi = bus.read32(addr.wrapping_add(4), ACCESS_SEQ);
+                    if wb { self.r[rn] = self.r[rn].wrapping_add(off); }
+                    self.r[r] = lo;
+                    self.r[r + 1] = hi;
+                    if r + 1 == 15 { self.reload(bus); return; }
                 } else {
                     bus.idle();
                     if wb { self.r[rn] = self.r[rn].wrapping_add(off); }
@@ -642,12 +801,20 @@ impl Arm7tdmi {
                     if wb { self.r[rn] = self.r[rn].wrapping_add(off); }
                     bus.idle();
                     self.r[rd] = v;
+                } else if self.v5 {
+                    // STRD
+                    let r = rd & !1;
+                    bus.write32(addr, self.r[r], ACCESS_NSEQ);
+                    let hi = if r + 1 == 15 { self.r[15].wrapping_add(4) } else { self.r[r + 1] };
+                    bus.write32(addr.wrapping_add(4), hi, ACCESS_SEQ);
+                    if wb { self.r[rn] = self.r[rn].wrapping_add(off); }
                 } else {
                     bus.idle();
                     if wb { self.r[rn] = self.r[rn].wrapping_add(off); }
                 }
             }
         }
+        if load && rd == 15 && self.v5 { let v = self.r[15]; self.jump_interwork(bus, v); return; }
         if (load && rd == 15) || (wb && rn == 15) { self.reload(bus); }
     }
 
@@ -677,7 +844,8 @@ impl Arm7tdmi {
             if wb { self.r[rn] = self.r[rn].wrapping_add(off); }
             bus.idle();
             self.r[rd] = v;
-            if rd == 15 || (wb && rn == 15) { self.reload(bus); }
+            if rd == 15 && self.v5 { self.jump_interwork(bus, v); }
+            else if rd == 15 || (wb && rn == 15) { self.reload(bus); }
         } else {
             if byte { bus.write8(addr, self.r[rd] as u8, ACCESS_NSEQ) } else { bus.write32(addr, self.r[rd], ACCESS_NSEQ) }
             if wb { self.r[rn] = self.r[rn].wrapping_add(off); }
@@ -739,8 +907,13 @@ impl Arm7tdmi {
         if load {
             bus.idle();
             if transfer_pc {
-                if user { self.restore_cpsr(); }
-                self.reload(bus);
+                if user {
+                    self.restore_cpsr();
+                    self.reload(bus);
+                } else {
+                    let v = self.r[15];
+                    self.jump_interwork(bus, v);
+                }
                 reloaded = true;
             }
         }
@@ -857,6 +1030,10 @@ impl Arm7tdmi {
                     self.advance16(ACCESS_SEQ);
                 } else if op & 0xF600 == 0xB400 {
                     self.thumb_push_pop(bus, op);
+                } else if self.v5 && op & 0xFF00 == 0xBE00 {
+                    // BKPT
+                    let lr = self.r[15];
+                    self.exception(bus, 0x0C, MODE_ABT, lr);
                 } else {
                     self.thumb_undefined();
                 }
@@ -883,7 +1060,18 @@ impl Arm7tdmi {
                 let t = self.r[15].wrapping_add(imm);
                 self.jump_to(bus, t);
             }
-            0x1D => self.thumb_undefined(),   // BLX suffix: ARMv5 only
+            0x1D => {
+                if self.v5 && op & 1 == 0 {
+                    // BLX suffix: to ARM, at LR + offset (word aligned)
+                    let next = self.r[15].wrapping_sub(2);
+                    let t = self.r[14].wrapping_add((op & 0x7FF) * 2) & !3;
+                    self.r[14] = next | 1;
+                    self.cpsr &= !FLAG_T;
+                    self.jump_to(bus, t);
+                } else {
+                    self.thumb_undefined();
+                }
+            }
             0x1E => {
                 // BL prefix: LR = PC + (offset << 12)
                 let mut imm = (op & 0x7FF) << 12;
@@ -935,8 +1123,10 @@ impl Arm7tdmi {
                 let r = b.wrapping_mul(a);
                 self.r[rd] = r;
                 self.set_nz(r);
-                let c = if full { mul_carry_simple(a) } else { mul_carry_lo(b, a, 0) };
-                self.set_c(c as u32);
+                if !self.v5 {
+                    let c = if full { mul_carry_simple(a) } else { mul_carry_lo(b, a, 0) };
+                    self.set_c(c as u32);
+                }
             }
             0xE => { self.r[rd] = a & !b; self.set_nz(a & !b); }
             _ => { self.r[rd] = !b; self.set_nz(!b); }
@@ -951,6 +1141,10 @@ impl Arm7tdmi {
         if rs == 15 { v &= !1; }
         match (op >> 8) & 3 {
             3 => {
+                if self.v5 && bit(op, 7) {
+                    // BLX Rm
+                    self.r[14] = self.r[15].wrapping_sub(2) | 1;
+                }
                 if v & 1 != 0 {
                     self.jump_to(bus, v & !1);
                 } else {
@@ -999,10 +1193,15 @@ impl Arm7tdmi {
                 }
             }
             if rbit {
-                self.r[15] = bus.read32(addr, acc) & !1;
+                let v = bus.read32(addr, acc);
                 self.r[13] = addr.wrapping_add(4);
                 bus.idle();
-                self.reload(bus);
+                if self.v5 {
+                    self.jump_interwork(bus, v);
+                } else {
+                    self.r[15] = v & !1;
+                    self.reload(bus);
+                }
                 return;
             }
             bus.idle();
