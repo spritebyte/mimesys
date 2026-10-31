@@ -15,4 +15,5 @@ mod atari2600;
 mod atari7800;
 mod pce;
 mod gba;
+mod genesis;
 

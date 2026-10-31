@@ -14,7 +14,8 @@
 //
 // Returns every plausible system, best first. The frontend loads the best one straight away
 // when it's clear (score >= 80, or 30+ ahead of the next) and asks otherwise.
-// System ids are the ones the system factory takes: nes gb gbc sms gg coleco pce a2600 a7800.
+// System ids are the ones the system factory takes: nes gb gbc gba sms gg md coleco pce a2600 a7800.
+//      Genesis "SEGA" at 0x100 (or an interleaved .smd dump)
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Guess {
@@ -25,7 +26,7 @@ pub struct Guess {
 
 const GB_LOGO: [u8; 16] = [0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D];
 
-pub const SYSTEMS: [&str; 10] = ["nes", "gb", "gbc", "gba", "sms", "gg", "coleco", "pce", "a2600", "a7800"];
+pub const SYSTEMS: [&str; 11] = ["nes", "gb", "gbc", "gba", "sms", "gg", "md", "coleco", "pce", "a2600", "a7800"];
 
 fn count(data: &[u8], pattern: &[u8]) -> usize {
     data.windows(pattern.len()).filter(|w| *w == pattern).count()
@@ -77,6 +78,12 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
                                 why: format!("Sega header (region {region})") }];
         }
     }
+    // Genesis: "SEGA" at 0x100 (also inside an interleaved .smd dump)
+    if data.len() >= 0x200 && (data[0x100..0x104] == *b"SEGA" || data[0x101..0x105] == *b"SEGA")
+        || crate::genesis::md_cart::is_smd(data)
+    {
+        return vec![Guess { system: "md", score: 100, why: "Sega Genesis header".into() }];
+    }
     if data.len() >= 0x2000 && matches!((data[0], data[1]), (0xAA, 0x55) | (0x55, 0xAA)) {
         s.add("coleco", 95, "ColecoVision cart header");
     }
@@ -123,7 +130,8 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
     let by_ext: &[&'static str] = match ext.as_str() {
         "nes" => &["nes"], "gb" => &["gb"], "gbc" | "cgb" => &["gbc"], "sms" => &["sms"],
         "gg" => &["gg"], "col" | "cv" => &["coleco"], "pce" => &["pce"], "a26" => &["a2600"],
-        "a78" => &["a7800"], "gba" | "agb" => &["gba"], _ => &[],
+        "a78" => &["a7800"], "gba" | "agb" => &["gba"],
+        "md" | "gen" | "smd" => &["md"], _ => &[],
     };
     for &sys in by_ext {
         s.add(sys, 30, &format!(".{ext} file"));
@@ -131,7 +139,8 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
     let folders = path.to_ascii_lowercase().replace('\\', "/");
     let mut parts: Vec<&str> = folders.split('/').collect();
     parts.pop();                                          // the file name itself
-    const FOLDER_HINTS: [(&str, &str); 14] = [
+    const FOLDER_HINTS: [(&str, &str); 17] = [
+        ("genesis", "md"), ("mega drive", "md"), ("megadrive", "md"),
         ("2600", "a2600"), ("vcs", "a2600"), ("7800", "a7800"), ("nes", "nes"), ("famicom", "nes"),
         ("gameboy color", "gbc"), ("gbc", "gbc"), ("gameboy", "gb"), ("game boy", "gb"),
         ("master system", "sms"), ("game gear", "gg"), ("coleco", "coleco"),

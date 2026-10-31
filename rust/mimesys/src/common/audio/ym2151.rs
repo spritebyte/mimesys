@@ -8,23 +8,23 @@
 
 use serde::{Deserialize, Serialize};
 
-const EG_ATTACK: usize = 1;
-const EG_DECAY: usize = 2;
-const EG_SUSTAIN: usize = 3;
-const EG_RELEASE: usize = 4;
-const EG_QUIET: u16 = 0x380;
-const PHASE_STEP_DYNAMIC: u32 = 1;
+pub(crate) const EG_ATTACK: usize = 1;
+pub(crate) const EG_DECAY: usize = 2;
+pub(crate) const EG_SUSTAIN: usize = 3;
+pub(crate) const EG_RELEASE: usize = 4;
+pub(crate) const EG_QUIET: u16 = 0x380;
+pub(crate) const PHASE_STEP_DYNAMIC: u32 = 1;
 
-const KEYON_NORMAL: u32 = 0;
-const KEYON_CSM: u32 = 2;
+pub(crate) const KEYON_NORMAL: u32 = 0;
+pub(crate) const KEYON_CSM: u32 = 2;
 
 pub const STATUS_TIMERA: u8 = 0x01;
 pub const STATUS_TIMERB: u8 = 0x02;
 pub const STATUS_BUSY: u8 = 0x80;
 
-#[inline] fn bf(v: u32, start: u32, len: u32) -> u32 { (v >> start) & ((1 << len) - 1) }
+#[inline] pub(crate) fn bf(v: u32, start: u32, len: u32) -> u32 { (v >> start) & ((1 << len) - 1) }
 
-static SIN_TABLE: [u16; 256] = [
+pub(crate) static SIN_TABLE: [u16; 256] = [
     0x859,0x6c3,0x607,0x58b,0x52e,0x4e4,0x4a6,0x471,0x443,0x41a,0x3f5,0x3d3,0x3b5,0x398,0x37e,0x365,
     0x34e,0x339,0x324,0x311,0x2ff,0x2ed,0x2dc,0x2cd,0x2bd,0x2af,0x2a0,0x293,0x286,0x279,0x26d,0x261,
     0x256,0x24b,0x240,0x236,0x22c,0x222,0x218,0x20f,0x206,0x1fd,0x1f5,0x1ec,0x1e4,0x1dc,0x1d4,0x1cd,
@@ -43,7 +43,7 @@ static SIN_TABLE: [u16; 256] = [
     0x002,0x001,0x001,0x001,0x001,0x001,0x001,0x001,0x000,0x000,0x000,0x000,0x000,0x000,0x000,0x000,
 ];
 
-static POWER_RAW: [u16; 256] = [
+pub(crate) static POWER_RAW: [u16; 256] = [
     0x3fa,0x3f5,0x3ef,0x3ea,0x3e4,0x3df,0x3da,0x3d4,0x3cf,0x3c9,0x3c4,0x3bf,0x3b9,0x3b4,0x3ae,0x3a9,
     0x3a4,0x39f,0x399,0x394,0x38f,0x38a,0x384,0x37f,0x37a,0x375,0x370,0x36a,0x365,0x360,0x35b,0x356,
     0x351,0x34c,0x347,0x342,0x33d,0x338,0x333,0x32e,0x329,0x324,0x31f,0x31a,0x315,0x310,0x30b,0x306,
@@ -62,7 +62,7 @@ static POWER_RAW: [u16; 256] = [
     0x02a,0x028,0x025,0x022,0x01f,0x01c,0x019,0x016,0x014,0x011,0x00e,0x00b,0x008,0x006,0x003,0x000,
 ];
 
-static INCREMENT_TABLE: [u32; 64] = [
+pub(crate) static INCREMENT_TABLE: [u32; 64] = [
     0x00000000, 0x00000000, 0x10101010, 0x10101010,
     0x10101010, 0x10101010, 0x11101110, 0x11101110,
     0x10101010, 0x10111010, 0x11101110, 0x11111110,
@@ -81,7 +81,7 @@ static INCREMENT_TABLE: [u32; 64] = [
     0x88888888, 0x88888888, 0x88888888, 0x88888888,
 ];
 
-static DETUNE: [[u8; 4]; 32] = [
+pub(crate) static DETUNE: [[u8; 4]; 32] = [
     [0,0,1,2],[0,0,1,2],[0,0,1,2],[0,0,1,2],[0,1,2,2],[0,1,2,3],[0,1,2,3],[0,1,2,3],
     [0,1,2,4],[0,1,3,4],[0,1,3,4],[0,1,3,5],[0,2,4,5],[0,2,4,6],[0,2,4,6],[0,2,5,7],
     [0,2,5,8],[0,3,6,8],[0,3,6,9],[0,3,7,10],[0,4,8,11],[0,4,8,12],[0,4,9,13],[0,5,10,14],
@@ -143,30 +143,30 @@ static PHASE_STEP: [u32; 768] = [
 const fn alg(o2: u16, o3: u16, o4: u16, a: u16, b: u16, c: u16) -> u16 {
     o2 | (o3 << 1) | (o4 << 4) | (a << 7) | (b << 8) | (c << 9)
 }
-static ALGORITHM_OPS: [u16; 8] = [
+pub(crate) static ALGORITHM_OPS: [u16; 8] = [
     alg(1,2,3, 0,0,0), alg(0,5,3, 0,0,0), alg(0,2,6, 0,0,0), alg(1,0,7, 0,0,0),
     alg(1,0,3, 0,1,0), alg(1,1,1, 0,1,1), alg(1,0,0, 0,1,1), alg(0,0,0, 1,1,1),
 ];
 
-fn abs_sin_attenuation(input: u32) -> u32 {
+pub(crate) fn abs_sin_attenuation(input: u32) -> u32 {
     let i = if bf(input, 8, 1) != 0 { !input } else { input };
     SIN_TABLE[(i & 0xFF) as usize] as u32
 }
 
 #[inline]
-fn attenuation_to_volume(input: u32) -> u32 {
+pub(crate) fn attenuation_to_volume(input: u32) -> u32 {
     let v = ((POWER_RAW[(input & 0xFF) as usize] as u32) | 0x400) << 2;
     v >> (input >> 8)
 }
 
-fn attenuation_increment(rate: u32, index: u32) -> u32 { bf(INCREMENT_TABLE[rate as usize], 4 * index, 4) }
+pub(crate) fn attenuation_increment(rate: u32, index: u32) -> u32 { bf(INCREMENT_TABLE[rate as usize], 4 * index, 4) }
 
-fn detune_adjustment(detune: u32, keycode: u32) -> i32 {
+pub(crate) fn detune_adjustment(detune: u32, keycode: u32) -> i32 {
     let r = DETUNE[keycode as usize][(detune & 3) as usize] as i32;
     if bf(detune, 2, 1) != 0 { -r } else { r }
 }
 
-fn effective_rate(raw: u32, ksr: u32) -> u8 { if raw == 0 { 0 } else { (raw + ksr).min(63) as u8 } }
+pub(crate) fn effective_rate(raw: u32, ksr: u32) -> u8 { if raw == 0 { 0 } else { (raw + ksr).min(63) as u8 } }
 
 fn opm_key_code_to_phase_step(block_freq: u32, delta: i32) -> u32 {
     let mut block = bf(block_freq, 10, 3);

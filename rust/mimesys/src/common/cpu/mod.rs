@@ -8,3 +8,4 @@ pub mod m6809;
 pub mod hd6309;
 pub mod konami;
 pub mod arm;
+pub mod m68000;

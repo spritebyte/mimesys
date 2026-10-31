@@ -20,6 +20,10 @@ const FIXES: &[(u32, HeaderFix)] = &[
     (0xAEBD6549, HeaderFix { name: "Bakushou!! Jinsei Gekijou 3", mirroring: None, mapper: Some(48), submapper: None }),
     (0x40C0AD47, HeaderFix { name: "Flintstones, The - The Rescue of Dino & Hoppy (Japan)", mirroring: None, mapper: Some(48), submapper: None }),
     (0x1500E835, HeaderFix { name: "Jetsons, The - Cogswell's Caper (Japan)", mirroring: None, mapper: Some(48), submapper: None }),
+    (0x0F141525, HeaderFix { name: "Arkanoid 2 (Japan)", mirroring: None, mapper: Some(152), submapper: None }),
+    (0xBDA8F8E4, HeaderFix { name: "Gegege no Kitarou 2 (Japan)", mirroring: None, mapper: Some(152), submapper: None }),
+    (0xB1A94B82, HeaderFix { name: "Pocket Zaurus - Juu Ouken no Nazo (Japan)", mirroring: None, mapper: Some(152), submapper: None }),
+    (0x026C5FCA, HeaderFix { name: "Saint Seiya - Ougon Densetsu (Japan)", mirroring: None, mapper: Some(152), submapper: None }),
 ];
 
 pub fn entries() -> usize { FIXES.len() }

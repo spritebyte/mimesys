@@ -14,7 +14,8 @@ extends AcceptDialog
 signal game_chosen(path: String, inner: String)
 
 const CACHE_PATH := "user://library.json"
-const SKIP_EXT := ["txt", "md", "nfo", "htm", "html", "jpg", "png", "pdf"]
+## Not ROMs. (".md" is a Genesis ROM, so only README files with it are skipped.)
+const SKIP_EXT := ["txt", "nfo", "htm", "html", "jpg", "png", "pdf"]
 
 var _games: Array = []      # {"title", "system", "path", "inner"}
 var _filter := OptionButton.new()
@@ -171,7 +172,7 @@ func _scan_zip(path: String, arcade_db: Dictionary) -> void:
 		return
 	var files: Array = []
 	for f in zip.get_files():
-		if f.ends_with("/") or f.begins_with("__MACOSX") or f.get_extension().to_lower() in SKIP_EXT:
+		if f.ends_with("/") or f.begins_with("__MACOSX") or f.get_extension().to_lower() in SKIP_EXT or f.get_file().to_lower().begins_with("readme"):
 			continue
 		files.append(f)
 	if files.is_empty():

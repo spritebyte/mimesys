@@ -3,7 +3,8 @@ class_name RomLoader
 const ARCADE_DB_PATH := "user://arcade_games.json"
 const BIOS_DIR := "user://BIOS"
 const HISCORE_DAT_PATH := "user://hiscore.dat"
-const SKIP_EXT := ["txt", "md", "nfo", "htm", "html", "jpg", "png", "pdf"]
+## Not ROMs. (".md" is a Genesis ROM, so only README files with it are skipped.)
+const SKIP_EXT := ["txt", "nfo", "htm", "html", "jpg", "png", "pdf"]
 
 # Loading a game is three steps (main.gd's execute_load does them in order):
 #   1. read_rom(path, inner)       the bytes (from a file, or a zip), or "this is an arcade set"
@@ -33,7 +34,7 @@ static func read_rom(path: String, file_inside_zip: String = "") -> Dictionary:
 	if inner == "":
 		var roms: Array = []
 		for f in zip.get_files():
-			if f.ends_with("/") or f.begins_with("__MACOSX") or f.get_extension().to_lower() in SKIP_EXT:
+			if f.ends_with("/") or f.begins_with("__MACOSX") or f.get_extension().to_lower() in SKIP_EXT or f.get_file().to_lower().begins_with("readme"):
 				continue
 			roms.append(f)
 		if roms.size() > 1:
@@ -65,7 +66,7 @@ static func guess_system(data: PackedByteArray, path: String) -> Dictionary:
 	return {"clear": lines.size() > 0 and lines[0] == "clear", "guesses": guesses}
 
 
-## Build the system. `system_id`: nes gb gbc gba sms gg coleco pce a2600 a7800
+## Build the system. `system_id`: nes gb gbc gba sms gg md coleco pce a2600 a7800
 static func create_system(system_id: String, data: PackedByteArray, name: String) -> Variant:
 	var bios := PackedByteArray()
 	match system_id:

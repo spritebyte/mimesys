@@ -231,6 +231,10 @@ pub fn make_mapper(
             println!("Mapper{} (Bandai FCG, submapper {}) created", mapper_id, submapper_id);
             Ok(Box::new(super::mapper159::Mapper159::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
         }
+        152 => {
+            println!("Mapper{} (Bandai 74161/7432, submapper {}) created", mapper_id, submapper_id);
+            Ok(Box::new(super::mapper152::Mapper152::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))
+        }
         184 => {
             println!("Mapper{} (Sunsoft-1, submapper {}) created", mapper_id, submapper_id);
             Ok(Box::new(super::mapper184::Mapper184::new(mapper_id, submapper_id, prg_rom, chr_rom, initial_mirroring)))

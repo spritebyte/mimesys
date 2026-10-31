@@ -1,6 +1,6 @@
 class_name CheatsDialog
 extends AcceptDialog
-## Emulation > Cheats. One list per game, saved to user://GD_EMU/Cheats/<system>/<game>.json
+## Emulation > Cheats. One list per game, saved to user://Cheats/<system>/<game>.json
 ## and switched on automatically next time the game loads.
 ## Every change is sent to the core right away; a code the core can't read gets a red ✗
 ## with the reason in its tooltip.

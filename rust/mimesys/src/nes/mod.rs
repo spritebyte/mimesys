@@ -75,6 +75,8 @@ pub mod mapper95;
 pub mod mapper105;
 #[path = "mappers/mapper119.rs"]
 pub mod mapper119;
+#[path = "mappers/mapper152.rs"]
+pub mod mapper152;
 #[path = "mappers/mapper159.rs"]
 pub mod mapper159;
 #[path = "mappers/mapper184.rs"]

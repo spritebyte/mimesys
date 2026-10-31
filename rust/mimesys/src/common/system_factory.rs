@@ -9,7 +9,7 @@ use crate::pce::pce_system::PceSystem;
 use std::collections::HashMap;
  
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CartSystem { GameBoy, GameBoyColor, Gba, Coleco, Nes, Sms, GameGear, Atari2600, Pce, A7800, }
+pub enum CartSystem { GameBoy, GameBoyColor, Gba, Coleco, Nes, Sms, GameGear, Atari2600, Pce, A7800, Genesis, }
 
 impl CartSystem {
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -24,6 +24,7 @@ impl CartSystem {
             "a2600"  => Ok(Self::Atari2600),
             "pce"    => Ok(Self::Pce),
             "a7800"  => Ok(Self::A7800),
+            "md"     => Ok(Self::Genesis),
             other    => Err(format!("Unknown system id '{other}'")),
         }
     }
@@ -76,13 +77,18 @@ fn load_cartridge(system: CartSystem, rom: &[u8], filename: &str, bios: Option<V
         }
         CartSystem::Nes => {
             let core = NesSystem::from_rom(rom, filename, bios_or_empty)
-                .map_err(|e| format!("NES from_rom failed: {e}"))?;
+                .map_err(|e| format!("GB from_rom failed: {e}"))?;
             Ok(Box::new(core)) 
         }
         CartSystem::Sms | CartSystem::GameGear => {
             let gg = system == CartSystem::GameGear;
             let core = SmsSystem::from_rom(rom, filename, bios_or_empty, gg)
                 .map_err(|e| format!("SMS/GG from_rom failed: {e}"))?;
+            Ok(Box::new(core))
+        }
+        CartSystem::Genesis => {
+            let core = crate::genesis::md_system::GenesisSystem::from_rom(rom, filename, bios_or_empty)
+                .map_err(|e| format!("Genesis from_rom failed: {e}"))?;
             Ok(Box::new(core))
         }
         CartSystem::Pce => {
