@@ -315,7 +315,7 @@ impl DdSystem {
             sub_was_reset: false,
             current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://GD_EMU/Arcade/Technos/State".to_string(),
+            save_path: "user://Arcade/Technos/State".to_string(),
         };
         sys.reset();
         Ok(sys)

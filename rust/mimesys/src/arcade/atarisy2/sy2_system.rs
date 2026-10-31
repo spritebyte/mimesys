@@ -320,8 +320,8 @@ impl Sy2System {
             test_switch: false, prev_start2: false,
             current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://GD_EMU/Arcade/AtariSys2/Save".to_string(),
-            state_path: "user://GD_EMU/Arcade/AtariSys2/State".to_string(),
+            save_path: "user://Arcade/AtariSys2/Save".to_string(),
+            state_path: "user://Arcade/AtariSys2/State".to_string(),
         };
         sys.board.set_sound_reset(true);
         Ok(sys)

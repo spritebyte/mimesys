@@ -17,31 +17,70 @@ use crate::common::audio::sn76489::Sn76489;
 use crate::common::audio::ym2612::Ym2612;
 use crate::common::cpu::m68000::M68kBus;
 use crate::common::cpu::z80::Bus as Z80Bus;
+use crate::genesis::md_eeprom::Eeprom;
 use crate::genesis::md_vdp::Vdp;
 
-/// One 3-button pad. Buttons as bits: 0 up, 1 down, 2 left, 3 right, 4 A, 5 B, 6 C, 7 start.
+/// A 3- or 6-button pad. Buttons as bits: up, down, left, right, A, B, C, start, then
+/// X, Y, Z, mode.
+///
+/// The 6-button pad answers the usual TH high / TH low reads, but counts TH pulses: on
+/// the 3rd TH low it reports up and down both pressed (its ID), on the 4th TH high it
+/// shows X, Y, Z and mode, on the 4th TH low all ones. 1.5 ms without a TH change resets
+/// the count, so a game that reads it like a 3-button pad (once a frame) sees one.
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]
-pub struct Pad { pub buttons: u8 }
+pub struct Pad {
+    pub buttons: u16,
+    pub six_button: bool,
+    /// TH highs seen in this sequence
+    highs: u8,
+    th: bool,
+    /// line count at the last TH change
+    last_edge: u32,
+}
 
-pub const PAD_UP: u8 = 0x01;
-pub const PAD_DOWN: u8 = 0x02;
-pub const PAD_LEFT: u8 = 0x04;
-pub const PAD_RIGHT: u8 = 0x08;
-pub const PAD_A: u8 = 0x10;
-pub const PAD_B: u8 = 0x20;
-pub const PAD_C: u8 = 0x40;
-pub const PAD_START: u8 = 0x80;
+pub const PAD_UP: u16 = 0x01;
+pub const PAD_DOWN: u16 = 0x02;
+pub const PAD_LEFT: u16 = 0x04;
+pub const PAD_RIGHT: u16 = 0x08;
+pub const PAD_A: u16 = 0x10;
+pub const PAD_B: u16 = 0x20;
+pub const PAD_C: u16 = 0x40;
+pub const PAD_START: u16 = 0x80;
+pub const PAD_X: u16 = 0x100;
+pub const PAD_Y: u16 = 0x200;
+pub const PAD_Z: u16 = 0x400;
+pub const PAD_MODE: u16 = 0x800;
+/// lines in 1.5 ms
+const PAD_TIMEOUT_LINES: u32 = 24;
 
 impl Pad {
+    /// TH idles high: that's the first high of a sequence.
+    pub fn new() -> Self { Self { th: true, highs: 1, ..Self::default() } }
+
+    fn timed_out(&self, now: u32) -> bool { now.wrapping_sub(self.last_edge) > PAD_TIMEOUT_LINES }
+
+    fn set_th(&mut self, th: bool, now: u32) {
+        if th == self.th { return; }
+        // after a timeout the sequence starts over; a TH high that's ending counts as the first
+        if self.timed_out(now) { self.highs = self.th as u8; }
+        if th { self.highs = self.highs.saturating_add(1); }
+        self.th = th;
+        self.last_edge = now;
+    }
+
     /// The 7 input pins, given the level of TH (select).
-    fn pins(&self, th: bool) -> u8 {
+    fn pins(&self, th: bool, now: u32) -> u8 {
         let b = self.buttons;
-        let off = |m: u8, bit: u8| if b & m != 0 { 0 } else { bit };
-        if th {
-            0x40 | off(PAD_C, 0x20) | off(PAD_B, 0x10) | off(PAD_RIGHT, 0x08) | off(PAD_LEFT, 0x04)
-                | off(PAD_DOWN, 0x02) | off(PAD_UP, 0x01)
-        } else {
-            off(PAD_START, 0x20) | off(PAD_A, 0x10) | off(PAD_DOWN, 0x02) | off(PAD_UP, 0x01)
+        let off = |m: u16, bit: u8| if b & m != 0 { 0 } else { bit };
+        let step = if !self.six_button || self.timed_out(now) { 1 } else { self.highs };
+        match (th, step) {
+            (true, 4) => 0x40 | off(PAD_C, 0x20) | off(PAD_B, 0x10) | off(PAD_MODE, 0x08) | off(PAD_X, 0x04)
+                | off(PAD_Y, 0x02) | off(PAD_Z, 0x01),
+            (true, _) => 0x40 | off(PAD_C, 0x20) | off(PAD_B, 0x10) | off(PAD_RIGHT, 0x08) | off(PAD_LEFT, 0x04)
+                | off(PAD_DOWN, 0x02) | off(PAD_UP, 0x01),
+            (false, 3) => off(PAD_START, 0x20) | off(PAD_A, 0x10),
+            (false, 4) => off(PAD_START, 0x20) | off(PAD_A, 0x10) | 0x0F,
+            (false, _) => off(PAD_START, 0x20) | off(PAD_A, 0x10) | off(PAD_DOWN, 0x02) | off(PAD_UP, 0x01),
         }
     }
 }
@@ -53,13 +92,19 @@ pub struct Io {
     pub ctrl: [u8; 3],
     #[serde(skip)]
     pub pads: [Pad; 2],
+    /// lines since power on (the 6-button pad's timeout)
+    #[serde(skip)]
+    pub now: u32,
 }
 
 impl Io {
+    fn th(&self, p: usize) -> bool {
+        if self.ctrl[p] & 0x40 != 0 { self.data[p] & 0x40 != 0 } else { true }
+    }
+
     fn read_port(&self, p: usize) -> u8 {
         let (d, c) = (self.data[p], self.ctrl[p]);
-        let th = if c & 0x40 != 0 { d & 0x40 != 0 } else { true };
-        let pins = if p < 2 { self.pads[p].pins(th) } else { 0x7F };
+        let pins = if p < 2 { self.pads[p].pins(self.th(p), self.now) } else { 0x7F };
         (d & 0x80) | (d & c & 0x7F) | (pins & !c & 0x7F)
     }
 
@@ -73,10 +118,14 @@ impl Io {
     }
 
     fn write(&mut self, a: u32, v: u8) {
-        match (a & 0x1F) >> 1 {
-            1..=3 => self.data[((a & 0x1F) >> 1) as usize - 1] = v,
-            4..=6 => self.ctrl[((a & 0x1F) >> 1) as usize - 4] = v,
-            _ => {}
+        let p = match (a & 0x1F) >> 1 {
+            r @ 1..=3 => { self.data[r as usize - 1] = v; r as usize - 1 }
+            r @ 4..=6 => { self.ctrl[r as usize - 4] = v; r as usize - 4 }
+            _ => return,
+        };
+        if p < 2 {
+            let (th, now) = (self.th(p), self.now);
+            self.pads[p].set_th(th, now);
         }
     }
 }
@@ -100,6 +149,8 @@ pub struct MdBus {
     pub sram_range: Option<(u32, u32)>,
     pub sram_on: bool,
     pub sram_dirty: bool,
+    /// serial EEPROM saves (instead of backup RAM)
+    pub eeprom: Option<Eeprom>,
     /// 512 KB banks for 080000-3FFFFF (carts over 4 MB)
     pub banks: [u8; 8],
     pub big_cart: bool,
@@ -109,14 +160,16 @@ pub struct MdBus {
 
 impl MdBus {
     pub fn new(rom: Vec<u8>, sram_range: Option<(u32, u32)>, version: u8, psg: Sn76489) -> Self {
+        let eeprom = Eeprom::detect(&rom);
+        let sram_range = if eeprom.is_some() { None } else { sram_range };
         let sram_len = sram_range.map(|(s, e)| ((e | 1) - (s & !1) + 1) as usize).unwrap_or(0);
         let big_cart = rom.len() > 0x400000;
         let sram_on = sram_range.map(|(s, _)| rom.len() as u32 <= s).unwrap_or(false);
         Self {
             rom, ram: vec![0; 0x10000], vdp: Vdp::new(),
-            io: Io { version, data: [0x7F; 3], ctrl: [0; 3], pads: [Pad::default(); 2] },
+            io: Io { version, data: [0x7F; 3], ctrl: [0; 3], pads: [Pad::new(); 2], now: 0 },
             psg, ym: Ym2612::new(), zram: vec![0; 0x2000], zbank: 0, zbusreq: false, zreset: true, zreset_released: false,
-            sram: vec![0xFF; sram_len], sram_range, sram_on, sram_dirty: false,
+            sram: vec![0xFF; sram_len], sram_range, sram_on, sram_dirty: false, eeprom,
             banks: [0, 1, 2, 3, 4, 5, 6, 7], big_cart, stall: 0,
         }
     }
@@ -134,7 +187,10 @@ impl MdBus {
         } else {
             a as usize
         };
-        self.rom.get(a).copied().unwrap_or(0xFF)
+        if a < self.rom.len() { return self.rom[a]; }
+        // the cart doesn't decode the upper address lines: the ROM repeats
+        let mirror = a & (self.rom.len().next_power_of_two() - 1);
+        self.rom.get(mirror).copied().unwrap_or(0xFF)
     }
 
     // ---- Z80 space as the 68000 sees it (byte wide)
@@ -233,6 +289,7 @@ impl MdBus {
 impl M68kBus for MdBus {
     fn read_byte(&mut self, a: u32) -> u8 {
         if let Some(i) = self.sram_index(a) { return self.sram[i]; }
+        if let Some(e) = &self.eeprom { if e.reads(a) { return e.read_byte(a); } }
         match a {
             0x000000..=0x3FFFFF => self.rom_byte(a),
             0xA00000..=0xA0FFFF => if self.zbusreq { self.z80_space_read(a as u16) } else { 0xFF },
@@ -248,6 +305,7 @@ impl M68kBus for MdBus {
     }
 
     fn read_word(&mut self, a: u32) -> u16 {
+        if let Some(e) = &self.eeprom { if e.reads(a) { return e.read_word(); } }
         if self.sram_index(a).is_some() {
             return (self.read_byte(a) as u16) << 8 | self.read_byte(a + 1) as u16;
         }
@@ -266,6 +324,7 @@ impl M68kBus for MdBus {
     }
 
     fn write_byte(&mut self, a: u32, v: u8) {
+        if let Some(e) = &mut self.eeprom { if e.writes(a) { e.write_byte(a, v); return; } }
         if let Some(i) = self.sram_index(a) {
             if self.sram[i] != v { self.sram[i] = v; self.sram_dirty = true; }
             return;
@@ -285,6 +344,7 @@ impl M68kBus for MdBus {
     }
 
     fn write_word(&mut self, a: u32, v: u16) {
+        if let Some(e) = &mut self.eeprom { if e.writes(a) { e.write_word(v); return; } }
         match a {
             0xA00000..=0xA0FFFF => self.write_byte(a, (v >> 8) as u8),
             0xA10000..=0xA1001F => self.io.write(a + 1, v as u8),

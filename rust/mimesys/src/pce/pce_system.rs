@@ -75,8 +75,8 @@ impl PceSystem {
             line_buf: [0; MAX_WIDTH],
             last_mode: (0, 0, 0),
             save_filename: filename.to_string(),
-            save_battery_path: "user://GD_EMU/PCE/Save".to_string(),
-            save_state_path: "user://GD_EMU/PCE/State".to_string(),
+            save_battery_path: "user://PCE/Save".to_string(),
+            save_state_path: "user://PCE/State".to_string(),
         };
         sys.reset();
         Ok(sys)

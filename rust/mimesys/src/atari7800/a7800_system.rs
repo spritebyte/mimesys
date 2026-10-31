@@ -72,8 +72,8 @@ impl A7800System {
             current_frame: 0,
             framebuffer: vec![0; OUT_W * OUT_H * 4],
             save_filename: filename.to_string(),
-            save_battery_path: "user://GD_EMU/A7800/Save".to_string(),
-            save_state_path: "user://GD_EMU/A7800/State".to_string(),
+            save_battery_path: "user://A7800/Save".to_string(),
+            save_state_path: "user://A7800/State".to_string(),
         };
         sys.cpu.power_on(&mut sys.bus);
         sys.bus.clocks = 0;

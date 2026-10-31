@@ -139,7 +139,7 @@ impl GberetSystem {
         Ok(Self {
             cpu: Z80Cpu::new(), bus, line_cycles: 0, nmi_seen: false, current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://GD_EMU/Arcade/Konami/State".to_string(),
+            save_path: "user://Arcade/Konami/State".to_string(),
         })
     }
 

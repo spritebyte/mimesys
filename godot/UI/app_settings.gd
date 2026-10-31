@@ -58,6 +58,8 @@ const OPTION_DEFAULTS := {
 	"gb_model": "auto",      # Game Boy: "auto" (colour games on a GBC), "dmg", "cgb", "sgb"
 	"bios_dmg": "",          # Game Boy: original Game Boy boot ROM ("" = default path)
 	"bios_sgb": "",          # Game Boy: Super Game Boy boot ROM ("" = default path)
+	"md_region": "auto",     # Genesis: "auto" (from the cartridge), "usa", "japan", "europe" (50 Hz)
+	"md_pad": "6",           # Genesis: "6" six-button pad, "3" three-button pad
 }
 ## Game Boy boot ROMs: "bios" (above) is the Game Boy Color one, this is the original's.
 const GB_DMG_BIOS_DEFAULT := "user://BIOS/dmg_boot.bin"
@@ -96,7 +98,8 @@ func _init() -> void:
 			["c1_b", "Button 1 [B]"], ["c1_a", "Button 2 [A]"], ["c1_start", "Pause [Start]"]] + dpad2 + [
 			["c2_b", "P2 Button 1 [B]"], ["c2_a", "P2 Button 2 [A]"]]},
 		"md": {"name": "Genesis / Mega Drive", "actions": dpad + [
-			["c1_x", "A [X]"], ["c1_b", "B [B]"], ["c1_a", "C [A]"], ["c1_start", "Start"]] + dpad2 + [
+			["c1_x", "A [X]"], ["c1_b", "B [B]"], ["c1_a", "C [A]"], ["c1_start", "Start"],
+			["c1_y", "X [Y]"], ["c1_l1", "Y [L]"], ["c1_r1", "Z [R]"], ["c1_select", "Mode [Select]"]] + dpad2 + [
 			["c2_select", "P2 A [P2 Select]"], ["c2_b", "P2 B [B]"], ["c2_a", "P2 C [A]"], ["c2_start", "P2 Start"]]},
 		"gg": {"name": "Game Gear", "actions": dpad + [
 			["c1_b", "Button 1 [B]"], ["c1_a", "Button 2 [A]"], ["c1_start", "Start"]]},

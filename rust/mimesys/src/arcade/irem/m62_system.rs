@@ -144,7 +144,7 @@ impl M62System {
             sound_cycle_debt: 0,
             current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://GD_EMU/Arcade/Irem/State".to_string(),
+            save_path: "user://Arcade/Irem/State".to_string(),
         })
     }
 }

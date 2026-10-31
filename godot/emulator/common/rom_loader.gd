@@ -76,6 +76,8 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 				print("Warning: no ColecoVision BIOS; most games won't start.")
 		"gb", "gbc":
 			bios = gb_boot_blob()
+		"md":
+			bios = md_options_blob()
 		"gba":
 			bios = load_bios(AppSettings.bios_path("gba", "user://BIOS/gba_bios.bin"))
 			if bios.is_empty():
@@ -117,6 +119,17 @@ static func _gb_entry(out: PackedByteArray, tag: String, data: PackedByteArray) 
 	var n := data.size()
 	out.append_array(PackedByteArray([n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF]))
 	out.append_array(data)
+
+
+## Genesis load options for the core: "MDOP", region (0 auto, 1 USA, 2 Japan, 3 Europe),
+## pad (0 = 6 buttons, 1 = 3 buttons).
+static func md_options_blob() -> PackedByteArray:
+	var region: int = {"usa": 1, "japan": 2, "europe": 3}.get(AppSettings.get_option("md", "md_region"), 0)
+	var pad: int = 1 if AppSettings.get_option("md", "md_pad") == "3" else 0
+	var out := PackedByteArray("MDOP".to_ascii_buffer())
+	out.append(region)
+	out.append(pad)
+	return out
 
 
 ## The controls/options profile for a system id (Game Boy Color shares the Game Boy's).

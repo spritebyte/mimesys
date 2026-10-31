@@ -4,14 +4,21 @@
 //! the VDP (md_vdp.rs), an SN76489 PSG inside the VDP and a YM2612 FM chip (ym2612.rs, one
 //! sample every 1008 master clocks = 53.3 kHz, stepped along with the Z80 so its DAC
 //! streams play at their real rate). NTSC: 262 lines of 3420 master clocks, 59.92 Hz.
+//! PAL (European carts, or forced): 313 lines, master clock 53.203424 MHz, 49.70 Hz.
 //!
 //! Interrupts: VDP level 6 at vblank, level 4 from the line counter (both autovectored);
-//! the Z80 gets /INT for one line at vblank.
+//! the Z80 gets /INT for about 64 us at vblank. The Z80 is kept in step with the 68000
+//! instruction by instruction (Sonic 2's music driver needs its vblank interrupt while
+//! the 68000's vblank handler is busy taking the Z80 bus).
 //!
-//! Controls (3-button pad):
+//! Controls (6-button pad; a 3-button pad as an option):
 //!   D-pad      D-pad
 //!   X [J]      A        B [K]  B        A [L]  C        Start  Start
-//!   player 2:  Select = A, B = B, A = C, P2 Start = Start
+//!   Y [U]      X        L [Q]  Y        R [E]  Z        Select Mode
+//!   player 2:  Select = A, B = B, A = C, P2 Start = Start (3 buttons)
+//!
+//! Load options travel in the "BIOS" bytes: b"MDOP", region (0 auto, 1 USA, 2 Japan,
+//! 3 Europe), pad (0 six buttons, 1 three buttons).
 
 use serde::{Deserialize, Serialize};
 use crate::common::audio::sn76489::{Sn76489, Sn76489Variant};
@@ -22,7 +29,7 @@ use crate::common::input as pad;
 use crate::common::system::{DisplayInfo, Rotation, System};
 use crate::genesis::md_bus::*;
 use crate::genesis::md_cart::{self, Region};
-use crate::genesis::md_vdp::{Vdp, LINES, SCREEN_H, SCREEN_W, VBLANK_LINE};
+use crate::genesis::md_vdp::{Vdp, BUFFER_H, SCREEN_W};
 
 const MCLK_PER_LINE: i64 = 3420;
 const M68K_DIV: i64 = 7;
@@ -30,8 +37,11 @@ const Z80_DIV: i64 = 15;
 /// master clocks into the line before the VDP draws it (the hblank part)
 const HBLANK_MCLK: i64 = 560;
 const SAMPLE_RATE: u32 = 44_100;
-const STATE_VERSION: u32 = 2;
-const MCLK: u64 = 53_693_175;
+const STATE_VERSION: u32 = 4;
+/// how long the Z80's vblank /INT stays asserted (about 64 us, as on the console)
+const Z80_INT_MCLK: i64 = 2565;
+const MCLK_NTSC: u64 = 53_693_175;
+const MCLK_PAL: u64 = 53_203_424;
 /// master clocks per YM2612 sample (144 of its clocks at MCLK / 7)
 const YM_MCLK: i64 = 1008;
 /// mix levels: FM is about +-32K with all 6 channels at full scale (one channel about
@@ -43,16 +53,20 @@ pub struct GenesisSystem {
     cpu: M68000,
     z80: Z80Cpu,
     pub bus: MdBus,
-    /// master clocks the 68000 / Z80 are behind
-    m68k_owed: i64,
-    z80_owed: i64,
-    z80_int: bool,
+    /// where the 68000 / Z80 are in the current line, in master clocks (may run a little
+    /// past the end of the line; the excess carries into the next)
+    t68: i64,
+    tz80: i64,
+    /// the Z80's /INT is asserted until tz80 reaches this
+    z80_int_end: i64,
     /// master clocks into the next YM2612 sample
     ym_mclk: i64,
     /// FM resampled to 44.1 kHz (interleaved stereo), waiting to be mixed with the PSG
     fm_out: Vec<f32>,
     fm_acc: (f32, f32, u32),
     fm_phase: u64,
+    /// master clock rate (NTSC or PAL)
+    mclk: u64,
     current_frame: u64,
     pub title: String,
     save_filename: String,
@@ -80,83 +94,95 @@ struct MdState {
     ym_mclk: i64,
     #[serde(with = "serde_bytes")]
     sram: Vec<u8>,
+    eeprom: Option<crate::genesis::md_eeprom::Eeprom>,
     sram_on: bool,
     banks: [u8; 8],
-    m68k_owed: i64,
-    z80_owed: i64,
-    z80_int: bool,
+    t68: i64,
+    tz80: i64,
+    z80_int_end: i64,
     frame: u64,
 }
 
 impl GenesisSystem {
-    pub fn from_rom(data: &[u8], filename: &str, _bios: &[u8]) -> Result<Self, String> {
+    pub fn from_rom(data: &[u8], filename: &str, options: &[u8]) -> Result<Self, String> {
         let mut rom = md_cart::normalize(data);
         if rom.len() < 0x200 { return Err(format!("ROM is only {} bytes", rom.len())); }
         if rom.len() % 2 == 1 { rom.push(0xFF); }
         let header = md_cart::parse_header(&rom);
-        let version = match header.region { Region::Usa => 0xA0, Region::Japan => 0x20, Region::Europe => 0xE0 };
-        let mut psg = Sn76489::new(Sn76489Variant::Sega, 3_579_545, SAMPLE_RATE);
+        let (force_region, three_button) = match options {
+            [b'M', b'D', b'O', b'P', r, p, ..] => (*r, *p == 1),
+            _ => (0, false),
+        };
+        let region = match force_region { 1 => Region::Usa, 2 => Region::Japan, 3 => Region::Europe, _ => header.region };
+        let pal = region == Region::Europe;
+        let version = match region { Region::Usa => 0xA0, Region::Japan => 0x20, Region::Europe => 0xE0 };
+        let mclk = if pal { MCLK_PAL } else { MCLK_NTSC };
+        let mut psg = Sn76489::new(Sn76489Variant::Sega, (mclk / Z80_DIV as u64) as u32, SAMPLE_RATE);
         psg.gain = PSG_GAIN;
-        println!("Genesis: \"{}\", {} KB, {:?}{}", header.title, rom.len() / 1024, header.region,
-                 header.sram.map(|(s, e)| format!(", backup RAM {s:06X}-{e:06X}")).unwrap_or_default());
+        let mut bus = MdBus::new(rom, header.sram, version, psg);
+        bus.vdp.pal = pal;
+        for p in bus.io.pads.iter_mut() { p.six_button = !three_button; }
+        println!("Genesis: \"{}\", {} KB, {:?}{}{}{}", header.title, bus.rom.len() / 1024, region,
+                 if pal { " (PAL, 50 Hz)" } else { "" },
+                 header.sram.filter(|_| bus.eeprom.is_none()).map(|(s, e)| format!(", backup RAM {s:06X}-{e:06X}")).unwrap_or_default(),
+                 bus.eeprom.as_ref().map(|e| format!(", serial EEPROM ({:?} board, {} bytes)", e.board, e.data.len())).unwrap_or_default());
         let mut sys = Self {
             cpu: M68000::new(),
             z80: Z80Cpu::new(),
-            bus: MdBus::new(rom, header.sram, version, psg),
-            m68k_owed: 0, z80_owed: 0, z80_int: false,
-            ym_mclk: 0, fm_out: Vec::new(), fm_acc: (0.0, 0.0, 0), fm_phase: 0, current_frame: 0,
+            bus,
+            t68: 0, tz80: 0, z80_int_end: 0,
+            ym_mclk: 0, fm_out: Vec::new(), fm_acc: (0.0, 0.0, 0), fm_phase: 0, mclk, current_frame: 0,
             title: header.title,
             save_filename: filename.to_string(),
-            save_battery_path: "user://GD_EMU/Genesis/Save".to_string(),
-            save_state_path: "user://GD_EMU/Genesis/State".to_string(),
+            save_battery_path: "user://Genesis/Save".to_string(),
+            save_state_path: "user://Genesis/State".to_string(),
         };
         sys.cpu.reset(&mut sys.bus);
         Ok(sys)
     }
 
-    /// Run the 68000 until it has caught up to `until` master clocks into the line.
-    fn run_68k(&mut self, budget: i64, line_start: i64) {
-        self.m68k_owed += budget;
-        while self.m68k_owed > 0 {
+    /// Run both CPUs to `target` master clocks into the line. The Z80 catches up after
+    /// every 68000 instruction, so bus requests, resets and the shared RAM see each
+    /// other's writes at (nearly) the right time.
+    fn run_until(&mut self, target: i64) {
+        while self.t68 < target {
             if self.bus.stall > 0 {
-                self.m68k_owed -= self.bus.stall as i64 * M68K_DIV;
+                // DMA holds the 68000; the Z80 keeps going
+                self.t68 += self.bus.stall as i64 * M68K_DIV;
                 self.bus.stall = 0;
-                continue;
+            } else if self.cpu.halted {
+                self.t68 = target;
+            } else {
+                self.bus.vdp.line_pos = (self.t68 as f32 / MCLK_PER_LINE as f32).clamp(0.0, 0.999);
+                self.cpu.ipl = self.bus.vdp.ipl();
+                self.t68 += self.cpu.step(&mut self.bus) as i64 * M68K_DIV;
             }
-            let pos = line_start + budget - self.m68k_owed;
-            self.bus.vdp.line_pos = (pos as f32 / MCLK_PER_LINE as f32).clamp(0.0, 0.999);
-            self.cpu.ipl = self.bus.vdp.ipl();
-            if self.cpu.halted { self.m68k_owed = 0; break; }
-            let c = self.cpu.step(&mut self.bus) as i64;
-            self.m68k_owed -= c * M68K_DIV;
+            self.z80_until(self.t68);
         }
     }
 
-    fn run_z80(&mut self) {
-        self.z80_owed += MCLK_PER_LINE;
-        let mut clocks = 0u32;
-        while self.z80_owed > 0 {
+    fn z80_until(&mut self, t: i64) {
+        while self.tz80 < t {
             if self.bus.zreset_released {
                 self.bus.zreset_released = false;
                 self.z80 = Z80Cpu::new();
             }
             let c = if self.bus.z80_running() {
                 let mut c = 0;
-                if self.z80_int { c = self.z80.irq(&mut Z80View(&mut self.bus), 0xFF); }
+                if self.tz80 < self.z80_int_end { c = self.z80.irq(&mut Z80View(&mut self.bus), 0xFF); }
                 if c == 0 { c = self.z80.step(&mut Z80View(&mut self.bus)); }
                 c
             } else {
                 4
             };
-            clocks += c;
-            self.z80_owed -= c as i64 * Z80_DIV;
+            self.tz80 += c as i64 * Z80_DIV;
+            self.bus.psg.run(c);
             self.ym_mclk += c as i64 * Z80_DIV;
             while self.ym_mclk >= YM_MCLK {
                 self.ym_mclk -= YM_MCLK;
                 self.ym_sample();
             }
         }
-        self.bus.psg.run(clocks);
     }
 
     /// One YM2612 sample, averaged down to 44.1 kHz.
@@ -167,8 +193,8 @@ impl GenesisSystem {
         a.1 += r as f32;
         a.2 += 1;
         self.fm_phase += SAMPLE_RATE as u64 * YM_MCLK as u64;
-        if self.fm_phase >= MCLK {
-            self.fm_phase -= MCLK;
+        if self.fm_phase >= self.mclk {
+            self.fm_phase -= self.mclk;
             let n = a.2 as f32;
             self.fm_out.push(a.0 / n * FM_LEVEL);
             self.fm_out.push(a.1 / n * FM_LEVEL);
@@ -180,20 +206,22 @@ impl GenesisSystem {
 impl System for GenesisSystem {
     fn run_frame(&mut self, input: u32) {
         self.set_input(input);
-        for line in 0..LINES {
+        for line in 0..self.bus.vdp.lines() {
             self.bus.vdp.begin_line(line);
-            if line == VBLANK_LINE { self.z80_int = true; }
-            if line == VBLANK_LINE + 1 { self.z80_int = false; }
-            self.run_68k(HBLANK_MCLK, 0);
+            self.bus.io.now = self.bus.io.now.wrapping_add(1);
+            if line == self.bus.vdp.vblank_line() { self.z80_int_end = Z80_INT_MCLK; }
+            self.run_until(HBLANK_MCLK);
             self.bus.vdp.render_line(line as usize);
-            self.run_68k(MCLK_PER_LINE - HBLANK_MCLK, HBLANK_MCLK);
-            self.run_z80();
+            self.run_until(MCLK_PER_LINE);
+            self.t68 -= MCLK_PER_LINE;
+            self.tz80 -= MCLK_PER_LINE;
+            self.z80_int_end = (self.z80_int_end - MCLK_PER_LINE).max(0);
         }
         self.current_frame += 1;
     }
 
     fn set_input(&mut self, m: u32) {
-        let pad_bits = |m: u32, a: u32, b: u32, c: u32, start: bool| -> u8 {
+        let pad_bits = |m: u32, a: u32, b: u32, c: u32, start: bool| -> u16 {
             let on = |bit: u32| m & bit != 0;
             let mut v = 0;
             if on(pad::UP) { v |= PAD_UP; }
@@ -206,7 +234,11 @@ impl System for GenesisSystem {
             if start { v |= PAD_START; }
             v
         };
-        self.bus.io.pads[0].buttons = pad_bits(m, pad::X, pad::B, pad::A, m & pad::START != 0);
+        let mut p1 = pad_bits(m, pad::X, pad::B, pad::A, m & pad::START != 0);
+        for (bit, b) in [(pad::Y, PAD_X), (pad::L, PAD_Y), (pad::R, PAD_Z), (pad::SELECT, PAD_MODE)] {
+            if m & bit != 0 { p1 |= b; }
+        }
+        self.bus.io.pads[0].buttons = p1;
         let p2 = pad::player2(m);
         self.bus.io.pads[1].buttons = pad_bits(p2, pad::SELECT, pad::B, pad::A, m & pad::START2 != 0);
     }
@@ -227,17 +259,28 @@ impl System for GenesisSystem {
     fn sample_rate(&self) -> u32 { SAMPLE_RATE }
     fn power_on(&mut self) {}
     fn power_off(&mut self) {}
-    fn has_battery(&self) -> bool { !self.bus.sram.is_empty() }
+    fn has_battery(&self) -> bool { !self.bus.sram.is_empty() || self.bus.eeprom.is_some() }
     fn save_filename(&self) -> &str { &self.save_filename }
     fn save_battery_path(&self) -> &str { &self.save_battery_path }
     fn save_state_path(&self) -> &str { &self.save_state_path }
-    fn is_sram_dirty(&self) -> bool { self.bus.sram_dirty }
-    fn clear_sram_dirty(&mut self) { self.bus.sram_dirty = false; }
+    fn is_sram_dirty(&self) -> bool { self.bus.sram_dirty || self.bus.eeprom.as_ref().is_some_and(|e| e.dirty) }
+    fn clear_sram_dirty(&mut self) {
+        self.bus.sram_dirty = false;
+        if let Some(e) = &mut self.bus.eeprom { e.dirty = false; }
+    }
     fn get_current_frame(&self) -> i64 { self.current_frame as i64 }
-    fn get_sram(&self) -> Option<&[u8]> { if self.bus.sram.is_empty() { None } else { Some(&self.bus.sram) } }
+    fn get_sram(&self) -> Option<&[u8]> {
+        if let Some(e) = &self.bus.eeprom { return Some(&e.data); }
+        if self.bus.sram.is_empty() { None } else { Some(&self.bus.sram) }
+    }
     fn load_sram(&mut self, data: &[u8]) {
-        let n = data.len().min(self.bus.sram.len());
-        self.bus.sram[..n].copy_from_slice(&data[..n]);
+        let dest = match &mut self.bus.eeprom { Some(e) => &mut e.data, None => &mut self.bus.sram };
+        let n = data.len().min(dest.len());
+        dest[..n].copy_from_slice(&data[..n]);
+    }
+
+    fn frame_time_usec(&self) -> i64 {
+        (self.bus.vdp.lines() as u64 * MCLK_PER_LINE as u64 * 1_000_000 / self.mclk) as i64
     }
 
     fn framebuffer(&self) -> &[u8] { &self.bus.vdp.framebuffer }
@@ -247,6 +290,7 @@ impl System for GenesisSystem {
         self.bus.zreset = true;
         self.bus.zbusreq = false;
         self.bus.ym.reset();
+        if let Some(e) = &mut self.bus.eeprom { e.rom_mapped = true; }
         self.z80 = Z80Cpu::new();
         self.cpu = M68000::new();
         self.cpu.reset(&mut self.bus);
@@ -255,11 +299,11 @@ impl System for GenesisSystem {
     fn display_info(&self) -> DisplayInfo {
         DisplayInfo {
             buffer_width: SCREEN_W as i32,
-            buffer_height: SCREEN_H as i32,
+            buffer_height: BUFFER_H as i32,
             visible_x: 0,
             visible_y: 0,
             visible_width: SCREEN_W as i32,
-            visible_height: SCREEN_H as i32,
+            visible_height: self.bus.vdp.frame_height() as i32,
             target_aspect_ratio: 4.0 / 3.0,
             rotation: Rotation::None,
         }
@@ -271,8 +315,8 @@ impl System for GenesisSystem {
             version: STATE_VERSION, rom_len: b.rom.len(),
             cpu: self.cpu.clone(), z80: self.z80.save_state(), vdp: b.vdp.clone(),
             ram: b.ram.clone(), zram: b.zram.clone(), zbank: b.zbank, zbusreq: b.zbusreq, zreset: b.zreset,
-            io: b.io.clone(), psg: b.psg.clone(), ym: b.ym.clone(), ym_mclk: self.ym_mclk, sram: b.sram.clone(), sram_on: b.sram_on, banks: b.banks,
-            m68k_owed: self.m68k_owed, z80_owed: self.z80_owed, z80_int: self.z80_int, frame: self.current_frame,
+            io: b.io.clone(), psg: b.psg.clone(), ym: b.ym.clone(), ym_mclk: self.ym_mclk, sram: b.sram.clone(), eeprom: b.eeprom.clone(), sram_on: b.sram_on, banks: b.banks,
+            t68: self.t68, tz80: self.tz80, z80_int_end: self.z80_int_end, frame: self.current_frame,
         };
         let config = bincode::config::standard().with_fixed_int_encoding();
         bincode::serde::encode_to_vec(&s, config).unwrap_or_default()
@@ -303,12 +347,13 @@ impl System for GenesisSystem {
         b.ym = s.ym;
         self.ym_mclk = s.ym_mclk;
         if s.sram.len() == b.sram.len() { b.sram = s.sram; }
+        if b.eeprom.is_some() && s.eeprom.is_some() { b.eeprom = s.eeprom; }
         b.sram_on = s.sram_on;
         b.banks = s.banks;
         b.stall = 0;
-        self.m68k_owed = s.m68k_owed;
-        self.z80_owed = s.z80_owed;
-        self.z80_int = s.z80_int;
+        self.t68 = s.t68;
+        self.tz80 = s.tz80;
+        self.z80_int_end = s.z80_int_end;
         self.current_frame = s.frame;
         Ok(())
     }

@@ -53,8 +53,8 @@ impl GbaSystem {
             skip_bios: false,
             current_frame: 0,
             filename: filename.to_string(),
-            save_battery_path: "user://GD_EMU/GBA/Save".to_string(),
-            save_state_path: "user://GD_EMU/GBA/State".to_string(),
+            save_battery_path: "user://GBA/Save".to_string(),
+            save_state_path: "user://GBA/State".to_string(),
             cable: None,
             last_poll: 0,
         };

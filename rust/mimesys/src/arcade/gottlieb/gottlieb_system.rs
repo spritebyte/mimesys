@@ -92,8 +92,8 @@ impl GottliebSystem {
             sound_cycle_debt: 0,
             current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://GD_EMU/Arcade/Gottlieb/Save".to_string(),
-            state_path: "user://GD_EMU/Arcade/Gottlieb/State".to_string(),
+            save_path: "user://Arcade/Gottlieb/Save".to_string(),
+            state_path: "user://Arcade/Gottlieb/State".to_string(),
         };
         sys.reset();
         Ok(sys)

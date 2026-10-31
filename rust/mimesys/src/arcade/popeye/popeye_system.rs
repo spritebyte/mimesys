@@ -56,7 +56,7 @@ impl PopeyeSystem {
             in_reset: false,
             current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://GD_EMU/Arcade/Popeye/State".to_string(),
+            save_path: "user://Arcade/Popeye/State".to_string(),
         })
     }
 

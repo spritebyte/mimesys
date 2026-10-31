@@ -78,8 +78,8 @@ impl ColecoSystem {
             nmi_prev: false,
             current_frame: 0,
             save_filename: filename.to_string(),
-            save_battery_path: "user://GD_EMU/Coleco/Save".to_string(),
-            save_state_path: "user://GD_EMU/Coleco/State".to_string(),
+            save_battery_path: "user://Coleco/Save".to_string(),
+            save_state_path: "user://Coleco/State".to_string(),
         };
         sys.reset();
         Ok(sys)

@@ -99,7 +99,7 @@ impl GalaxianSystem {
             sound_cycle_debt: 0,
             current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://GD_EMU/Arcade/Galaxian/State".to_string(),
+            save_path: "user://Arcade/Galaxian/State".to_string(),
         })
     }
 }

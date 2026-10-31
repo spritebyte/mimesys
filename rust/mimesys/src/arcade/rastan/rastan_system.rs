@@ -164,8 +164,8 @@ impl RastanSystem {
         Ok(Self {
             cpu, bus, main_phase: 0, owed: 0, current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://GD_EMU/Arcade/Taito/Save".to_string(),
-            state_path: "user://GD_EMU/Arcade/Taito/State".to_string(),
+            save_path: "user://Arcade/Taito/Save".to_string(),
+            state_path: "user://Arcade/Taito/State".to_string(),
         })
     }
 

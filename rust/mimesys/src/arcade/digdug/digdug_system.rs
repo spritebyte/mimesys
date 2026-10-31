@@ -218,8 +218,8 @@ impl DigDugSystem {
             bus, video, cycles: [0; 3], mcu_cycles: [0; 2], now: 0, subs_held: false, nmi_line: false,
             current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://GD_EMU/Arcade/DigDug/Save".to_string(),
-            state_path: "user://GD_EMU/Arcade/DigDug/State".to_string(),
+            save_path: "user://Arcade/DigDug/Save".to_string(),
+            state_path: "user://Arcade/DigDug/State".to_string(),
         };
         sys.apply_reset_line();
         Ok(sys)

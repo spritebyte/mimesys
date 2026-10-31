@@ -81,6 +81,12 @@ impl EmuSystem {
         }
     }
 
+    /// Microseconds per frame for the loaded game (0 = the frontend's default).
+    #[func]
+    fn frame_time_usec(&self) -> i64 {
+        self.system.as_ref().map(|s| s.frame_time_usec()).unwrap_or(0)
+    }
+
     #[func]
     fn display_info(&self) -> Gd<SystemDisplayInfo> {
         let Some(sys)= &self.system else {

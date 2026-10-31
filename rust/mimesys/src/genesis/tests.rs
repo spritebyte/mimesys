@@ -155,9 +155,12 @@ fn planes_window_sprites_and_priority() {
     name(&mut v, 0xC000, 64, 2, 0, 0x2000 | 2);
     name(&mut v, 0xC000, 64, 3, 0, 0x8000 | 0x2000 | 2);
     // sprite 0: 1x1 blue at screen (16, 0) .. covers cells 2 and 3 when 2 wide: make it 2x1
-    let sat = 0xA800;
+    let sat = 0xA800usize;
     let spr = [128u16, 0x0400, 0x4000 | 3, 128 + 16];
-    for (k, w) in spr.iter().enumerate() { v.vram[sat + 2 * k] = (w >> 8) as u8; v.vram[sat + 2 * k + 1] = *w as u8; }
+    // through the data port, so the VDP's sprite cache sees it
+    reg(&mut v, 15, 2);
+    set_addr(&mut v, 1, sat as u16);
+    for w in spr { v.data_write(w); }
     // sprite tiles are column-major: a 2x1 sprite uses tiles 3 and 4
     v.render_line(0);
     assert_eq!(px(&v, 0, 0), [255, 0, 0, 255], "plane B");
@@ -319,4 +322,208 @@ fn ym2612_plays_through_the_68000_window() {
     assert!(peak > 0.2, "FM is audible: peak {peak}");
     // the Z80 sees the same chip: its status port reads back (no timers running)
     assert_eq!(s.bus.read_byte(0xA04000), 0);
+}
+
+/// Sonic 2's case: the 68000's vblank handler takes the Z80 bus at once and holds it for
+/// a few lines, but the Z80 must still have taken its own vblank interrupt (which drives
+/// the music) in the moment before the bus request lands.
+#[test]
+fn z80_gets_its_vblank_interrupt_while_the_68000_takes_the_bus() {
+    let mut rom = test_rom();
+    w16(&mut rom, 0x300, &[
+        0x33FC, 0x0100, 0x00A1, 0x1100,      // MOVE.W #$100,$A11100   take the Z80 bus
+        0x303C, 0x012C,                      // MOVE.W #300,D0
+        0x51C8, 0xFFFE,                      // DBRA D0,*              (several lines)
+        0x33FC, 0x0000, 0x00A1, 0x1100,      // MOVE.W #0,$A11100      give it back
+        0x4E73,                              // RTE
+    ]);
+    let mut s = GenesisSystem::from_rom(&rom, "test", &[]).unwrap();
+    let z80: &[u8] = &[0xF3, 0xED, 0x56, 0x31, 0x00, 0x20, 0xFB, 0x18, 0xFE];   // DI; IM 1; LD SP,$2000; EI; JR $
+    s.bus.zram[..z80.len()].copy_from_slice(z80);
+    let isr: &[u8] = &[0x21, 0x00, 0x10, 0x34, 0xFB, 0xED, 0x4D];               // LD HL,$1000; INC (HL); EI; RETI
+    s.bus.zram[0x38..0x38 + isr.len()].copy_from_slice(isr);
+    for _ in 0..4 { s.run_frame(0); }
+    assert_eq!(s.bus.zram[0x1000], 4, "one Z80 interrupt a frame");
+}
+
+#[test]
+fn sprite_cache_keeps_y_size_and_link() {
+    let mut v = Vdp::new();
+    reg(&mut v, 1, 0x44);
+    reg(&mut v, 5, 0x54);                     // sprites at 0xA800
+    reg(&mut v, 12, 0x81);
+    reg(&mut v, 15, 2);
+    v.cram[17] = 0x000E;                      // palette 1 colour 1: red
+    solid_tile(&mut v, 1, 1);
+    set_addr(&mut v, 1, 0xA800);
+    for w in [128u16 + 10, 0x0000, 0x2000 | 1, 128 + 50] { v.data_write(w); }   // 1x1 at (50, 10)
+    v.render_line(10);
+    assert_eq!(px(&v, 50, 10), [255, 0, 0, 255]);
+    // a change that bypasses the ports (as if the cache had been loaded elsewhere) is
+    // invisible: the cached Y stays
+    v.vram[0xA801] = 128 + 20;
+    v.render_line(10);
+    assert_eq!(px(&v, 50, 10), [255, 0, 0, 255], "cached Y");
+    // the X word isn't cached: it moves
+    set_addr(&mut v, 1, 0xA806);
+    v.data_write(128 + 100);
+    v.render_line(10);
+    assert_eq!(px(&v, 100, 10), [255, 0, 0, 255]);
+}
+
+#[test]
+fn six_button_pad_protocol() {
+    let mut b = bus_with_rom();
+    b.io.pads[0].six_button = true;
+    b.io.pads[0].buttons = PAD_X | PAD_MODE | PAD_UP;
+    b.write_byte(0xA10009, 0x40);
+    let mut seq = Vec::new();
+    for _ in 0..4 {
+        b.write_byte(0xA10003, 0x40);
+        seq.push(b.read_byte(0xA10003) & 0x7F);
+        b.write_byte(0xA10003, 0x00);
+        seq.push(b.read_byte(0xA10003) & 0x7F);
+    }
+    assert_eq!(seq[0], 0x7E, "TH high: C B R L D U, up pressed");
+    assert_eq!(seq[1], 0x32, "TH low: S A 0 0 D U");
+    assert_eq!(seq[5], 0x30, "3rd TH low: up and down low = 6-button ID");
+    assert_eq!(seq[6], 0x40 | 0x30 | 0x02 | 0x01, "4th TH high: C B M X Y Z with mode and X pressed");
+    assert_eq!(seq[7], 0x3F, "4th TH low: all high");
+    // after 1.5 ms without TH changes it starts over
+    b.io.now += 30;
+    b.write_byte(0xA10003, 0x40);
+    assert_eq!(b.read_byte(0xA10003) & 0x7F, 0x7E);
+    b.write_byte(0xA10003, 0x00);
+    assert_eq!(b.read_byte(0xA10003) & 0x7F, 0x32);
+    // as a 3-button pad the 3rd TH low is ordinary
+    b.io.now += 30;
+    b.io.pads[0].six_button = false;
+    let mut last = 0;
+    for _ in 0..3 {
+        b.write_byte(0xA10003, 0x40);
+        b.write_byte(0xA10003, 0x00);
+        last = b.read_byte(0xA10003) & 0x7F;
+    }
+    assert_eq!(last, 0x32);
+}
+
+#[test]
+fn pal_timing_and_v30() {
+    let mut rom = test_rom();
+    rom[0x1F0..0x1F3].copy_from_slice(b"E  ");
+    let mut s = GenesisSystem::from_rom(&rom, "test", &[]).unwrap();
+    assert!(s.bus.vdp.pal);
+    assert_eq!(s.bus.read_byte(0xA10001), 0xE0, "overseas PAL console");
+    assert_eq!(s.frame_time_usec(), 313 * 3420 * 1_000_000 / 53_203_424);
+    assert_eq!(s.display_info().visible_height, 240);
+    assert_eq!(s.bus.vdp.status() & 1, 1, "PAL status bit");
+    // options can force a region and the 3-button pad
+    let s2 = GenesisSystem::from_rom(&rom, "test", b"MDOP\x01\x01").unwrap();
+    assert!(!s2.bus.vdp.pal);
+    assert!(!s2.bus.io.pads[0].six_button);
+    // V30: 240 lines, vblank at 240, V counter 0x10A then 0x1D2
+    let v = &mut s.bus.vdp;
+    reg(v, 1, 0x4C);
+    assert_eq!(v.vblank_line(), 240);
+    v.begin_line(0x10A);
+    assert_eq!(v.hv_counter() >> 8, 0x0A);
+    v.begin_line(0x10B);
+    assert_eq!(v.hv_counter() >> 8, 0xD2);
+    // V28 on PAL: the picture moves down 8 rows, with the backdrop above it
+    reg(v, 1, 0x44);
+    reg(v, 7, 0x01);
+    v.cram[1] = 0x00E0;
+    v.cram[0] = 0;
+    v.render_line(0);
+    assert_eq!(px(v, 0, 0), [0, 255, 0, 255], "border");
+    assert_eq!(px(v, 0, 239), [0, 255, 0, 255], "border");
+    assert_eq!(px(v, 0, 8), [0, 255, 0, 255], "line 0 (empty planes show the backdrop)");
+}
+
+#[test]
+fn interlace_mode_2_uses_8x16_tiles() {
+    let mut v = Vdp::new();
+    reg(&mut v, 1, 0x44);
+    reg(&mut v, 4, 0x07);                     // plane B at 0xE000
+    reg(&mut v, 12, 0x87);                    // H40, interlace mode 2
+    v.cram[1] = 0x000E;
+    v.cram[2] = 0x0E00;
+    // tile 1 = 64 bytes: rows 0-7 colour 1, rows 8-15 colour 2
+    for i in 0..32 { v.vram[64 + i] = 0x11; v.vram[96 + i] = 0x22; }
+    for x in 0..64 { name(&mut v, 0xE000, 64, x, 0, 1); }
+    // each display line is two of the 448: line 3 = rows 6/7, line 4 = rows 8/9
+    v.render_line(3);
+    v.render_line(4);
+    assert_eq!(px(&v, 0, 3), [255, 0, 0, 255]);
+    assert_eq!(px(&v, 0, 4), [0, 0, 255, 255]);
+}
+
+/// Bit-bang a 24C01-style transfer through the Sega board wiring (SDA = D0, SCL = D1).
+struct I2c<'a>(&'a mut MdBus);
+impl I2c<'_> {
+    fn lines(&mut self, sda: u8, scl: u8) { self.0.write_byte(0x200001, scl << 1 | sda); }
+    fn sda(&mut self) -> u8 { self.0.read_byte(0x200001) & 1 }
+    fn start(&mut self) { self.lines(1, 1); self.lines(0, 1); self.lines(0, 0); }
+    fn stop(&mut self) { self.lines(0, 0); self.lines(0, 1); self.lines(1, 1); }
+    fn bit(&mut self, b: u8) -> u8 { self.lines(b, 0); self.lines(b, 1); let r = self.sda(); self.lines(b, 0); r }
+    fn byte_out(&mut self, v: u8) -> u8 {
+        for i in (0..8).rev() { self.bit((v >> i) & 1); }
+        self.bit(1)                                  // the chip's ACK
+    }
+    fn byte_in(&mut self, ack: bool) -> u8 {
+        let mut v = 0;
+        for _ in 0..8 { v = v << 1 | self.bit(1); }
+        self.bit(if ack { 0 } else { 1 });
+        v
+    }
+}
+
+#[test]
+fn serial_eeprom_saves() {
+    let psg = crate::common::audio::sn76489::Sn76489::new(crate::common::audio::sn76489::Sn76489Variant::Sega, 3_579_545, 44_100);
+    let mut rom = vec![0u8; 0x80000];
+    rom[0x180..0x18E].copy_from_slice(b"GM G-4060 -00 ");          // Wonder Boy in Monster World
+    let mut b = MdBus::new(rom, None, 0xA0, psg);
+    assert!(b.eeprom.is_some());
+    let mut i = I2c(&mut b);
+    // X24C01: START, 7-bit word address 0x05 + write, two data bytes, STOP
+    i.start();
+    assert_eq!(i.byte_out(0x05 << 1), 0, "ACK");
+    i.byte_out(0x12);
+    i.byte_out(0x34);
+    i.stop();
+    // read them back: address + read, two bytes
+    i.start();
+    i.byte_out(0x05 << 1 | 1);
+    let a = i.byte_in(true);
+    let c = i.byte_in(false);
+    i.stop();
+    assert_eq!((a, c), (0x12, 0x34));
+    let e = b.eeprom.as_ref().unwrap();
+    assert_eq!(&e.data[5..7], &[0x12, 0x34]);
+    assert!(e.dirty);
+}
+
+#[test]
+fn rom_mirroring_and_quackshot_layout() {
+    // a 256 KB ROM repeats through the cartridge space
+    let psg = || crate::common::audio::sn76489::Sn76489::new(crate::common::audio::sn76489::Sn76489Variant::Sega, 3_579_545, 44_100);
+    let mut rom = vec![0u8; 0x40000];
+    rom[0x10] = 0x5A;
+    let mut b = MdBus::new(rom, None, 0xA0, psg());
+    assert_eq!(b.read_byte(0x40010), 0x5A);
+    assert_eq!(b.read_byte(0xC0010), 0x5A);
+    // QuackShot Rev A: lower 256 KB at 000000-0FFFFF, upper 256 KB at 100000-1FFFFF
+    let mut q = vec![0u8; 0x80000];
+    q[0x180..0x18E].copy_from_slice(b"GM 00004054-01");
+    q[0x18E] = 0xA4;
+    q[0x18F] = 0xB3;
+    q[0x40000] = 0x77;
+    let q = md_cart::normalize(&q);
+    assert_eq!(q.len(), 0x200000);
+    let mut b = MdBus::new(q, None, 0xA0, psg());
+    assert_eq!(b.read_byte(0x100000), 0x77, "upper half");
+    assert_eq!(b.read_byte(0x1C0000), 0x77, "repeats");
+    assert_eq!(b.read_byte(0x040180), b'G', "lower half repeats");
+    assert_eq!(b.read_byte(0x040000), 0x00, "not the upper half");
 }

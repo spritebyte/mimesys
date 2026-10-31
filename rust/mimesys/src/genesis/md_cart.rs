@@ -24,9 +24,28 @@ pub fn is_smd(data: &[u8]) -> bool {
     (data[8] == 0xAA && data[9] == 0xBB) || decode_smd(&data[..0x4200]).get(0x100..0x104) == Some(b"SEGA".as_slice())
 }
 
-/// Plain ROM bytes from whatever was loaded.
+/// Plain ROM bytes from whatever was loaded, laid out as the 68000 sees them.
 pub fn normalize(data: &[u8]) -> Vec<u8> {
-    if is_smd(data) { decode_smd(data) } else { data.to_vec() }
+    let rom = if is_smd(data) { decode_smd(data) } else { data.to_vec() };
+    board_layout(rom)
+}
+
+/// Boards that don't wire the ROM straight. QuackShot Rev A (the original 512 KB dump):
+/// its first 256 KB repeats through 000000-0FFFFF and the second 256 KB through
+/// 100000-1FFFFF (address lines 18-19 not connected, line 20 goes to the chip's A18).
+/// After Genesis Plus GX.
+fn board_layout(rom: Vec<u8>) -> Vec<u8> {
+    let product = rom.get(0x180..0x18E).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+    let checksum = rom.get(0x18E..0x190).map(|b| u16::from_be_bytes([b[0], b[1]])).unwrap_or(0);
+    if product.contains("00004054-01") && rom.len() == 0x80000 && checksum == 0xA4B3 {
+        let mut out = vec![0u8; 0x200000];
+        for (a, b) in out.iter_mut().enumerate() {
+            let half = if a >= 0x100000 { 0x40000 } else { 0 };
+            *b = rom[half + (a & 0x3FFFF)];
+        }
+        return out;
+    }
+    rom
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

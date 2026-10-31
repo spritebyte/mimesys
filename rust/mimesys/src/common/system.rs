@@ -39,6 +39,8 @@ pub trait System: Send {
     fn set_audio_rate_adjust(&mut self, _factor: f32) {}
     fn cheats_mut(&mut self) -> Option<&mut crate::common::cheats::Cheats> { None }
     fn set_option(&mut self, _key: &str, _value: i64) {}
+    /// How long one frame lasts, in microseconds; 0 = the frontend's default (about 60 Hz).
+    fn frame_time_usec(&self) -> i64 { 0 }
     /// Pointer for light guns: position in framebuffer pixels (-1 = off screen) and mouse
     /// buttons (bit 0 left, bit 1 right). Systems without one ignore it.
     fn set_pointer(&mut self, _x: i32, _y: i32, _buttons: u32) {}

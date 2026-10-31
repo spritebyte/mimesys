@@ -187,8 +187,8 @@ impl JediSystem {
         Ok(Self {
             cpu, bus, main_phase: 0, sound_phase: 0, current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://GD_EMU/Arcade/Atari/Save".to_string(),
-            state_path: "user://GD_EMU/Arcade/Atari/State".to_string(),
+            save_path: "user://Arcade/Atari/Save".to_string(),
+            state_path: "user://Arcade/Atari/State".to_string(),
         })
     }
 }

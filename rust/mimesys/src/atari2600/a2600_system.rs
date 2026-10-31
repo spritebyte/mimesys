@@ -87,8 +87,8 @@ impl A2600System {
             display: vec![0; SCREEN_W * FB_LINES * 4],
             prev_raw: vec![0; SCREEN_W * FB_LINES * 4],
             save_filename: filename.to_string(),
-            save_battery_path: "user://GD_EMU/A2600/Save".to_string(),
-            save_state_path: "user://GD_EMU/A2600/State".to_string(),
+            save_battery_path: "user://A2600/Save".to_string(),
+            save_state_path: "user://A2600/State".to_string(),
         };
         sys.cpu.power_on(&mut sys.bus);
         Ok(sys)

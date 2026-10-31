@@ -31,7 +31,6 @@ var emu_mutex: Mutex
 var exit_thread: bool = false
 var is_paused: bool = false
 var thread_heartbeat: int = 0
-var sram_timer: Timer
 
 #const CPU_CLOCK: float = 4000000.0
 var audio_gen: AudioStreamGenerator
@@ -76,7 +75,7 @@ func _ready() -> void:
 	get_tree().set_auto_accept_quit(false)
 	# battery saves / arcade high scores: write changes every 30 s, not only on exit,
 	# so a crash doesn't lose them (only touches the disk when something changed)
-	sram_timer = Timer.new()
+	var sram_timer := Timer.new()
 	sram_timer.wait_time = 30.0
 	sram_timer.autostart = true
 	sram_timer.timeout.connect(func():
@@ -581,6 +580,8 @@ func _get_serialized_input() -> int:
 	return mask
 
 const FRAME_TIME_USEC := 16743
+## Frame length for the running game: the core's own when it has one (Genesis PAL = 50 Hz)
+var _frame_time_usec := FRAME_TIME_USEC
 
 func _thread_loop():
 	var next_frame_time := Time.get_ticks_usec()
@@ -601,7 +602,7 @@ func _thread_loop():
 		emu_system.update_audio_buffer();
 		emu_mutex.unlock()
 		_virtual_frame_count += 1
-		next_frame_time += FRAME_TIME_USEC
+		next_frame_time += _frame_time_usec
 		var now := Time.get_ticks_usec()
 		if next_frame_time > now:
 			OS.delay_usec(next_frame_time - now)
@@ -619,8 +620,6 @@ func _to_binary_string(byte: int) -> String:
 #	file_dialog.popup_centered_ratio(0.4)
 
 func stop_emulation():
-	if sram_timer:
-		sram_timer.stop()
 	emu_mutex.lock()
 	exit_thread = true
 	emu_mutex.unlock()
@@ -642,7 +641,6 @@ func _on_rom_selection_dialog_confirmed() -> void:
 
 ## Load a game: read it, work out its system (asking if the detector isn't sure), start it.
 func execute_load(path: String, internal_zip_file: String = "") -> void:
-	_stop_current()
 	print("Call load_rom: %s" % path)
 	var rom: Dictionary = RomLoader.read_rom(path, internal_zip_file)
 	if rom.is_empty():
@@ -650,6 +648,7 @@ func execute_load(path: String, internal_zip_file: String = "") -> void:
 		return
 
 	if rom["kind"] == "arcade":
+		_stop_current()
 		var arcade = RomLoader.load_arcade(path)
 		if not arcade:
 			OS.alert("Could not load arcade set: %s" % path.get_file())
@@ -767,12 +766,9 @@ func _poll_trace_now() -> void:
 	_poll_trace()
 
 func _stop_current() -> void:
-	if sram_timer:
-		sram_timer.stop()
 	_stop_trace()
 	if emu_system:
 		emu_system.power_off()
-		emu_system = null
 	if cpu_thread.is_alive():
 		stop_emulation()
 
@@ -781,13 +777,13 @@ func _start_system(new_system, system_id: String, title: String) -> void:
 	current_system_id = system_id
 	AppSettings.apply_input_profile(current_system_id)
 	emu_system.power_on()
-	if sram_timer:
-		sram_timer.start()
 	cheats_dialog.game_loaded(emu_system, emu_mutex, current_system_id, title)   # NEW (cheats)
 	if cheats_dialog.active_count() > 0:
 		_toast("%d cheat(s) on" % cheats_dialog.active_count())
 	var playback = audio_player.get_stream_playback()
 	emu_system.set_audio_playback(playback)
+	var ft: int = emu_system.frame_time_usec()
+	_frame_time_usec = ft if ft > 0 else FRAME_TIME_USEC
 	cpu_thread.start(Callable(self, "_thread_loop"))
 	var display_info = emu_system.display_info()
 	if display_info:

@@ -237,8 +237,8 @@ impl SimpsonsSystem {
             firq_off_at: None,
             current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://GD_EMU/Arcade/Konami/Save".to_string(),
-            state_path: "user://GD_EMU/Arcade/Konami/State".to_string(),
+            save_path: "user://Arcade/Konami/Save".to_string(),
+            state_path: "user://Arcade/Konami/State".to_string(),
         };
         sys.reset();
         Ok(sys)

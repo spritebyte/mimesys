@@ -360,8 +360,8 @@ impl WilliamsSystem {
             current_frame: 0,
             framebuffer: vec![0; SCREEN_W * SCREEN_H * 4],
             save_filename: set_name.to_string(),
-            save_path: "user://GD_EMU/Arcade/Williams/Save".to_string(),
-            state_path: "user://GD_EMU/Arcade/Williams/State".to_string(),
+            save_path: "user://Arcade/Williams/Save".to_string(),
+            state_path: "user://Arcade/Williams/State".to_string(),
         })
     }
 

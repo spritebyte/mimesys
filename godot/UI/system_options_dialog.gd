@@ -115,6 +115,24 @@ func _rebuild() -> void:
 		zap.toggled.connect(func(on): _put("zapper", on))
 		_row("Light gun", zap)
 
+	# Genesis: console region (PAL = 50 Hz) and pad type; both apply when a game loads
+	if sys == "md":
+		var region := OptionButton.new()
+		var regions := [["auto", "Auto (from the cartridge)"], ["usa", "USA (60 Hz)"],
+			["japan", "Japan (60 Hz)"], ["europe", "Europe (50 Hz)"]]
+		for i in regions.size():
+			region.add_item(regions[i][1])
+			if _opt("md_region") == regions[i][0]:
+				region.select(i)
+		region.item_selected.connect(func(i): _put("md_region", regions[i][0]))
+		_row("Console region (next load)", region)
+		var pad := OptionButton.new()
+		pad.add_item("6-button pad")
+		pad.add_item("3-button pad (for the odd game that dislikes the 6-button one)")
+		pad.select(1 if _opt("md_pad") == "3" else 0)
+		pad.item_selected.connect(func(i): _put("md_pad", "3" if i == 1 else "6"))
+		_row("Controller (next load)", pad)
+
 	# Overscan crop
 	var crop := HBoxContainer.new()
 	for side in [["crop_top", "Top"], ["crop_bottom", "Bottom"], ["crop_left", "Left"], ["crop_right", "Right"]]:

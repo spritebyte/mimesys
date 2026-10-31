@@ -73,8 +73,8 @@ impl SmsSystem {
             pause_pending: false,
             current_frame: 0,
             save_filename: filename.to_string(),
-            save_battery_path: format!("user://GD_EMU/{dir}/Save"),
-            save_state_path: format!("user://GD_EMU/{dir}/State"),
+            save_battery_path: format!("user://{dir}/Save"),
+            save_state_path: format!("user://{dir}/State"),
         };
         sys.reset();
         println!("{}: {} KB, {:?} mapper", if game_gear { "Game Gear" } else { "Master System" },
