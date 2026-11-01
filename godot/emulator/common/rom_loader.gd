@@ -66,7 +66,7 @@ static func guess_system(data: PackedByteArray, path: String) -> Dictionary:
 	return {"clear": lines.size() > 0 and lines[0] == "clear", "guesses": guesses}
 
 
-## Build the system. `system_id`: nes gb gbc gba sms gg md coleco pce a2600 a7800
+## Build the system. `system_id`: nes gb gbc gba sms gg md coleco pce a2600 a7800 a5200 lynx snes
 static func create_system(system_id: String, data: PackedByteArray, name: String) -> Variant:
 	var bios := PackedByteArray()
 	match system_id:
@@ -80,6 +80,16 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 			bios = md_options_blob()
 		"nds":
 			bios = nds_bios_blob()
+		"a5200":
+			# optional: without a real 5200 BIOS the core uses its bundled AltirraOS
+			var path := AppSettings.bios_path("a5200", "user://BIOS/5200.rom")
+			if FileAccess.file_exists(path):
+				bios = load_bios(path)
+		"lynx":
+			# optional: without lynxboot.img the core does the boot ROM's job itself
+			var lpath := AppSettings.bios_path("lynx", "user://BIOS/lynxboot.img")
+			if FileAccess.file_exists(lpath):
+				bios = load_bios(lpath)
 		"gba":
 			bios = load_bios(AppSettings.bios_path("gba", "user://BIOS/gba_bios.bin"))
 			if bios.is_empty():

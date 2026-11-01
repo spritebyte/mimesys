@@ -1,0 +1,17 @@
+The 5200 OS ROM replacement (altirra_5200_os.bin) is AltirraOS by Avery Lee, as compiled
+and distributed in the Atari800 emulator (src/roms/altirra_5200_os.c). Its notice:
+
+/*
+ * altirra_5200_os.c - 5200 OS ROM replacement
+ *
+ * Compiled from the sources in the emuos folder.
+ *
+ * Altirra - Atari 800/800XL emulator
+ * 5200 OS ROM replacement
+ * Copyright (C) 2008-2018 Avery Lee
+ *
+ * Copying and distribution of this file, with or without modification,
+ * are permitted in any medium without royalty provided the copyright
+ * notice and this notice are preserved.  This file is offered as-is,
+ * without any warranty.
+ */

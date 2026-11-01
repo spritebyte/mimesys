@@ -1,7 +1,7 @@
 //! Atari POKEY (C012294): 4 audio channels, polynomial noise, timers, pots.
 //! Port of MAME's pokey.cpp (Juergen Buchmueller, Couriersud), clocked one
-//! chip cycle at a time. Not ported: serial I/O and keyboard scanning
-//! (no arcade board here uses them); SEROC reads as "complete".
+//! chip cycle at a time. Not ported: serial I/O; SEROC reads as "complete". The keyboard
+//! scan (Altirra's model) runs for machines that give it a key matrix (the 5200).
 //!
 //! `step()` once per chip clock; `output()` is MAME's LEGACY_LINEAR level, 0.0-1.0.
 
@@ -122,6 +122,31 @@ pub struct Pokey {
     skstat: u8,
     skctl: u8,
     pot_counter: u8,
+    /// The keyboard scan (only machines that call `set_key_matrix`: the Atari 5200).
+    #[serde(skip)]
+    kb: KeyScan,
+}
+
+/// POKEY's keyboard scan: a 6-bit counter steps through the 64 keys once per scan line
+/// (15 kHz) and a two-bit state machine debounces (Altirra's model, pokey.cpp):
+///   0 waiting for a key -> 1 (latch it); 1 the same key again -> 2, KBCODE + key IRQ;
+///   2 the key gone -> 3; 3 back -> 2, still gone -> 0.
+/// With debounce off (SKCTL bit 0 clear) any key compares equal, so a held key keeps
+/// raising IRQs: the 5200 wires each key to four codes, giving about 8 IRQs a frame.
+/// Shift (code 0x10), control (0x00) and break (0x30) are sampled as the counter passes.
+#[derive(Clone, Default)]
+struct KeyScan {
+    enabled: bool,
+    matrix: u64,
+    shift: bool,
+    control: bool,
+    brk: bool,
+    code: u8,
+    state: u8,
+    latch: u8,
+    shift_latched: bool,
+    control_latched: bool,
+    break_latched: bool,
 }
 
 impl Default for Pokey { fn default() -> Self { Self::new() } }
@@ -138,12 +163,63 @@ impl Pokey {
             ch, out_raw: 0, clock_cnt: [0; 3], p4: 0, p5: 0, p9: 0, p17: 0,
             pot: [0; 8], pot_in: [228; 8], allpot_in: None,
             audctl: 0, allpot: 0, kbcode: 0x09, irqst: IRQ_SEROC, irqen: 0,
-            skstat: 0, skctl: 0, pot_counter: 0,
+            skstat: 0, skctl: 0, pot_counter: 0, kb: KeyScan::default(),
         }
     }
 
     /// IRQ output (active high here).
     pub fn irq(&self) -> bool { self.irqen & self.irqst != 0 }
+
+    /// Keyboard lines, for machines that wire a keypad to POKEY's scan (the Atari 5200):
+    /// which of the 64 key codes are down (bit n = code n), and the shift / control / break lines (the
+    /// 5200's top fire button drives all three). The scan itself runs in `step`.
+    pub fn set_key_matrix(&mut self, matrix: u64, shift: bool, control: bool, brk: bool) {
+        let kb = &mut self.kb;
+        kb.enabled = true;
+        kb.matrix = matrix;
+        kb.shift = shift;
+        kb.control = control;
+        kb.brk = brk;
+    }
+
+    /// One keyboard scan step (every 114 clocks while SKCTL bit 1 is set).
+    fn scan_key(&mut self) {
+        let kb = &mut self.kb;
+        let kc = kb.code & 0x3F;
+        kb.code = kb.code.wrapping_add(1);
+        match kc {
+            0x00 => kb.control_latched = kb.control,
+            0x10 => if kb.shift_latched != kb.shift {
+                kb.shift_latched = kb.shift;
+                if kb.shift { self.skstat |= 0x08; } else { self.skstat &= !0x08; }
+            },
+            0x30 => if kb.break_latched != kb.brk {
+                kb.break_latched = kb.brk;
+                if kb.brk { self.irqst |= 0x80 & self.irqen; }
+            },
+            _ => {}
+        }
+        let down = kb.matrix >> kc & 1 != 0;
+        let same = kc == kb.latch || self.skctl & 1 == 0;
+        match kb.state {
+            0 => if down { kb.latch = kc; kb.state = 1; },
+            1 => if down {
+                if same {
+                    kb.state = 2;
+                    self.kbcode = kc | if kb.shift_latched { 0x40 } else { 0 } | if kb.control_latched { 0x80 } else { 0 };
+                    self.skstat |= 0x04;
+                    if self.irqen & 0x40 != 0 {
+                        if self.irqst & 0x40 != 0 { self.skstat |= SK_KBERR; }     // overrun
+                        else { self.irqst |= 0x40; }
+                    }
+                } else { kb.state = 0; }
+            } else if same { kb.state = 0; },
+            2 => if same && !down { kb.state = 3; },
+            _ => if same {
+                if down { kb.state = 2; } else { self.skstat &= !0x04; kb.state = 0; }
+            },
+        }
+    }
 
     /// Output level 0.0-1.0 (sum of the 4 channel volumes, MAME's linear mode).
     pub fn output(&self) -> f32 {
@@ -216,6 +292,7 @@ impl Pokey {
             }
 
             if (trig[2] || self.skctl & SK_PADDLE != 0) && self.pot_counter < 228 { self.step_pot(); }
+            if trig[2] && self.kb.enabled && self.skctl & 2 != 0 { self.scan_key(); }
         }
 
         if self.ch[2].check_borrow() {

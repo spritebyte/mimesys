@@ -399,10 +399,14 @@ func _apply_display_options() -> void:
 		return
 	var sys := current_system_id
 	# DS: the screen layout changes the picture's size; set it up again when it does
-	if sys == "nds" and emu_system:
+	# (so does the Lynx's screen rotation)
+	if (sys == "nds" or sys == "lynx") and emu_system:
 		emu_mutex.lock()
-		emu_system.set_option("screen_layout", int(AppSettings.get_option(sys, "nds_layout")))
-		emu_system.set_option("screen_swap", 1 if AppSettings.get_option(sys, "nds_swap") else 0)
+		if sys == "nds":
+			emu_system.set_option("screen_layout", int(AppSettings.get_option(sys, "nds_layout")))
+			emu_system.set_option("screen_swap", 1 if AppSettings.get_option(sys, "nds_swap") else 0)
+		else:
+			emu_system.set_option("lynx_rotate", int(AppSettings.get_option(sys, "lynx_rotate")))
 		var fresh: SystemDisplayInfo = emu_system.display_info()
 		emu_mutex.unlock()
 		if fresh.buffer_width != _display_info.buffer_width or fresh.buffer_height != _display_info.buffer_height:
@@ -428,12 +432,16 @@ func _apply_display_options() -> void:
 		if AppSettings.get_option(sys, "smooth") else CanvasItem.TEXTURE_FILTER_NEAREST
 	# NEW (zapper): light gun in port 2
 	# the DS stylus uses the same mouse pointer as the Zapper
-	_zapper_on = (sys == "nes" and AppSettings.get_option(sys, "zapper")) or sys == "nds"
+	# and so does the 5200 Trak-Ball (it reads how far the mouse moved each frame)
+	var trackball: bool = sys == "a5200" and AppSettings.get_option(sys, "a5200_trackball")
+	_zapper_on = (sys == "nes" and AppSettings.get_option(sys, "zapper")) or sys == "nds" or trackball
 	emu_mutex.lock()
 	emu_system.set_option("zapper", 1 if _zapper_on else 0)
+	emu_system.set_option("trackball", 1 if trackball else 0)
 	# GBA cartridge clock (Pokemon etc.): local time = UTC + this many minutes
 	emu_system.set_option("rtc_utc_offset", Time.get_time_zone_from_system().bias)
-	emu_system.set_option("debug_report", 1 if sys == "nds" and AppSettings.get_option(sys, "nds_debug") else 0)
+	var dbg_key := "nds_debug" if sys == "nds" else ("lynx_debug" if sys == "lynx" else "")
+	emu_system.set_option("debug_report", 1 if dbg_key != "" and AppSettings.get_option(sys, dbg_key) else 0)
 	emu_mutex.unlock()
 	EmulatorScreen.mouse_default_cursor_shape = Control.CURSOR_CROSS \
 		if _zapper_on else Control.CURSOR_ARROW

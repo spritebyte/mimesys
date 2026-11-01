@@ -24,7 +24,7 @@ const ALL_ACTIONS := [
 ## File extension -> system (controls profile) id, for extensions that only one system uses.
 const SYSTEM_BY_EXT := {
 	"nes": "nes", "gb": "gb", "gbc": "gb", "gba": "gba", "agb": "gba", "col": "coleco", "cv": "coleco",
-	"sms": "sms", "gg": "gg", "pce": "pce", "a26": "a2600", "a78": "a7800",
+	"sms": "sms", "gg": "gg", "pce": "pce", "a26": "a2600", "a78": "a7800", "a52": "a5200", "lnx": "lynx", "lyx": "lynx", "sfc": "snes", "smc": "snes",
 	"md": "md", "gen": "md", "smd": "md", "nds": "nds",
 }
 ## Extensions several systems use: the ROM detector looks inside these files.
@@ -63,6 +63,9 @@ const OPTION_DEFAULTS := {
 	"nds_debug": false,      # DS: print CPU / video state every 10 s (for bug reports)
 	"nds_layout": 0,         # DS: 0 stacked, 1 side by side, 2 top screen only, 3 touch screen only
 	"nds_swap": false,       # DS: swap the screens' places
+	"lynx_debug": false,     # Lynx: print the sound registers every 10 s (for bug reports)
+	"lynx_rotate": 0,        # Lynx: 0 from the cartridge, 1 none, 2 left, 3 right
+	"a5200_trackball": false, # 5200: controller 1 is a Trak-Ball rolled with the mouse
 }
 ## Game Boy boot ROMs: "bios" (above) is the Game Boy Color one, this is the original's.
 const GB_DMG_BIOS_DEFAULT := "user://BIOS/dmg_boot.bin"
@@ -72,6 +75,8 @@ const BIOS_DEFAULTS := {
 	"coleco": "user://BIOS/colecovision.rom",
 	"gb": "user://BIOS/gbc_bios.bin",
 	"gba": "user://BIOS/gba_bios.bin",
+	"a5200": "user://BIOS/5200.rom",
+	"lynx": "user://BIOS/lynxboot.img",
 }
 const BIOS_OPTIONAL := ["gb", "gba"]    # these can boot without it
 var _options := {}               # system id -> {option: value} (only changed ones)
@@ -117,6 +122,17 @@ func _init() -> void:
 		"a2600": {"name": "Atari 2600", "actions": dpad + [
 			["c1_a", "Fire [A]"], ["c1_select", "Game Select [Select]"], ["c1_start", "Game Reset [Start]"]] + dpad2 + [
 			["c2_a", "P2 Fire [A]"]]},
+		"snes": {"name": "Super Nintendo", "actions": dpad + [
+			["c1_a", "A"], ["c1_b", "B"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_l1", "L"], ["c1_r1", "R"],
+			["c1_select", "Select"], ["c1_start", "Start"]] + dpad2 + [
+			["c2_a", "P2 A"], ["c2_b", "P2 B"], ["c2_x", "P2 X"], ["c2_select", "P2 Select"], ["c2_start", "P2 Start"]]},
+		"lynx": {"name": "Atari Lynx", "actions": dpad + [
+			["c1_a", "A (outer) [A]"], ["c1_b", "B (inner) [B]"], ["c1_l1", "Option 1 [L]"],
+			["c1_r1", "Option 2 [R]"], ["c1_start", "Pause [Start]"]]},
+		"a5200": {"name": "Atari 5200", "actions": dpad + [
+			["c1_a", "Bottom fire [A]"], ["c1_b", "Top fire [B]"], ["c1_start", "Start"],
+			["c1_select", "Pause [Select]"], ["c2_start", "Reset [P2 Start]"]] + keypad + dpad2 + [
+			["c2_a", "P2 Bottom fire [A]"], ["c2_b", "P2 Top fire [B]"]]},
 		"a7800": {"name": "Atari 7800", "actions": dpad + [
 			["c1_a", "Button 1 [A]"], ["c1_b", "Button 2 [B]"], ["c1_start", "Pause [Start]"],
 			["c1_select", "Select"], ["c2_start", "Reset [P2 Start]"]] + dpad2 + [

@@ -10,11 +10,11 @@ extends ConfirmationDialog
 signal picked(system_id: String, remember: bool)
 
 ## Every system that can be loaded (ids as the Rust factory takes them)
-const ALL := ["nes", "gb", "gbc", "gba", "nds", "sms", "gg", "md", "coleco", "pce", "a2600", "a7800"]
+const ALL := ["nes", "gb", "gbc", "gba", "nds", "sms", "gg", "md", "coleco", "pce", "a2600", "a7800", "a5200", "lynx", "snes"]
 const NAMES := {
 	"nes": "NES / Famicom", "gb": "Game Boy", "gbc": "Game Boy Color", "gba": "Game Boy Advance", "sms": "Master System",
 	"nds": "Nintendo DS", "gg": "Game Gear", "md": "Genesis / Mega Drive", "coleco": "ColecoVision", "pce": "TurboGrafx-16 / PC Engine",
-	"a2600": "Atari 2600", "a7800": "Atari 7800",
+	"a2600": "Atari 2600", "a7800": "Atari 7800", "a5200": "Atari 5200", "lynx": "Atari Lynx", "snes": "Super Nintendo",
 }
 
 var _question := Label.new()

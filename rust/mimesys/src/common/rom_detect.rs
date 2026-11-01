@@ -14,7 +14,7 @@
 //
 // Returns every plausible system, best first. The frontend loads the best one straight away
 // when it's clear (score >= 80, or 30+ ahead of the next) and asks otherwise.
-// System ids are the ones the system factory takes: nes gb gbc gba sms gg md coleco pce a2600 a7800.
+// System ids are the ones the system factory takes: nes gb gbc gba sms gg md coleco pce a2600 a7800 a5200 lynx snes.
 //      Genesis "SEGA" at 0x100 (or an interleaved .smd dump)
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,7 +26,7 @@ pub struct Guess {
 
 const GB_LOGO: [u8; 16] = [0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D];
 
-pub const SYSTEMS: [&str; 12] = ["nes", "gb", "gbc", "gba", "nds", "sms", "gg", "md", "coleco", "pce", "a2600", "a7800"];
+pub const SYSTEMS: [&str; 15] = ["nes", "gb", "gbc", "gba", "nds", "sms", "gg", "md", "coleco", "pce", "a2600", "a7800", "a5200", "lynx", "snes"];
 
 fn count(data: &[u8], pattern: &[u8]) -> usize {
     data.windows(pattern.len()).filter(|w| *w == pattern).count()
@@ -60,6 +60,17 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
     }
     if data.len() > 128 && &data[1..10] == b"ATARI7800" {
         return vec![Guess { system: "a7800", score: 100, why: "A78 header".into() }];
+    }
+    // Atari800 .car header with a 5200 cartridge type
+    if data.len() > 16 && &data[0..4] == b"CART" && matches!(u32::from_be_bytes([data[4], data[5], data[6], data[7]]), 4 | 6 | 16 | 19 | 20) {
+        return vec![Guess { system: "a5200", score: 100, why: "CART header, 5200 type".into() }];
+    }
+    // Lynx: "LYNX" .lnx header, or a BLL homebrew program (80 08 ... "BS93")
+    if data.len() >= 64 && &data[0..4] == b"LYNX" {
+        return vec![Guess { system: "lynx", score: 100, why: "LYNX header".into() }];
+    }
+    if data.len() >= 10 && data[0] == 0x80 && data[1] == 0x08 && &data[6..10] == b"BS93" {
+        return vec![Guess { system: "lynx", score: 100, why: "Lynx homebrew (BS93) header".into() }];
     }
     // DS: the logo's CRC16 (CF56) at 0x15C, and the header's own CRC
     if data.len() >= 0x200 && data[0x15C] == 0x56 && data[0x15D] == 0xCF
@@ -95,6 +106,21 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
     }
 
     // ---- 2. fingerprints ----
+    // SNES: an internal header at 7FC0 / FFC0 / 40FFC0 (after any 512-byte copier header)
+    // with checksum + complement = FFFF, a printable title and a matching map mode
+    {
+        let body = if data.len() % 1024 == 512 { &data[512..] } else { data };
+        for (at, mode) in [(0x7FC0usize, 0u8), (0xFFC0, 1), (0x40FFC0, 5)] {
+            if body.len() < at + 0x40 { continue; }
+            let h = &body[at..at + 0x40];
+            let sum_ok = (word(h, 0x1C) ^ word(h, 0x1E)) == 0xFFFF;
+            let title_ok = h[..21].iter().all(|&c| (0x20..0x7F).contains(&c));
+            let mode_ok = h[0x15] & 0xE0 == 0x20 && (h[0x15] & 0x0F == mode || mode == 0 && matches!(h[0x15] & 0x0F, 2 | 3));
+            let reset_ok = word(h, 0x3C) >= 0x8000;
+            let p = sum_ok as u32 * 35 + title_ok as u32 * 15 + mode_ok as u32 * 25 + reset_ok as u32 * 10;
+            if p >= 60 { s.add("snes", p, &format!("SNES header at {at:X}")); break; }
+        }
+    }
     let len = data.len();
     let kb = len / 1024;
     if len >= 2048 && len <= 512 * 1024 && len % 2048 == 0 {
@@ -132,12 +158,23 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
         }
     }
 
+    // 5200: 4-32 KB, the start address (last two bytes) inside the cartridge, and stores to
+    // the 5200's GTIA (C0xx), ANTIC (D4xx) or POKEY (E8xx)
+    if matches!(data.len(), 0x1000 | 0x2000 | 0x4000 | 0x8000) {
+        let start = word(data, data.len() - 2);
+        let hw = count(data, &[0x8D, 0x00, 0xD4]) + count(data, &[0x8D, 0x0E, 0xD4]) + count(data, &[0x8D, 0x0A, 0xD4])
+            + data.windows(3).filter(|w| w[0] == 0x8D && (w[2] == 0xC0 || w[2] == 0xE8)).count();
+        if (0x4000..0xC000).contains(&start) && hw >= 3 {
+            s.add("a5200", 40 + (hw as u32).min(20), &format!("start {start:04X}, {hw} stores to GTIA/ANTIC/POKEY"));
+        }
+    }
+
     // ---- 3. hints ----
     let by_ext: &[&'static str] = match ext.as_str() {
         "nes" => &["nes"], "gb" => &["gb"], "gbc" | "cgb" => &["gbc"], "sms" => &["sms"],
         "gg" => &["gg"], "col" | "cv" => &["coleco"], "pce" => &["pce"], "a26" => &["a2600"],
         "a78" => &["a7800"], "gba" | "agb" => &["gba"],
-        "md" | "gen" | "smd" => &["md"], "nds" | "srl" => &["nds"], _ => &[],
+        "md" | "gen" | "smd" => &["md"], "nds" | "srl" => &["nds"], "a52" => &["a5200"], "lnx" | "lyx" => &["lynx"], "sfc" | "smc" | "swc" | "fig" => &["snes"], _ => &[],
     };
     for &sys in by_ext {
         s.add(sys, 30, &format!(".{ext} file"));
@@ -145,12 +182,13 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
     let folders = path.to_ascii_lowercase().replace('\\', "/");
     let mut parts: Vec<&str> = folders.split('/').collect();
     parts.pop();                                          // the file name itself
-    const FOLDER_HINTS: [(&str, &str); 17] = [
-        ("genesis", "md"), ("mega drive", "md"), ("megadrive", "md"),
+    const FOLDER_HINTS: [(&str, &str); 22] = [
+        ("snes", "snes"), ("super nintendo", "snes"), ("super famicom", "snes"),
+        ("genesis", "md"), ("mega drive", "md"), ("megadrive", "md"), ("5200", "a5200"),
         ("2600", "a2600"), ("vcs", "a2600"), ("7800", "a7800"), ("nes", "nes"), ("famicom", "nes"),
         ("gameboy color", "gbc"), ("gbc", "gbc"), ("gameboy", "gb"), ("game boy", "gb"),
         ("master system", "sms"), ("game gear", "gg"), ("coleco", "coleco"),
-        ("turbografx", "pce"), ("pc engine", "pce"),
+        ("turbografx", "pce"), ("pc engine", "pce"), ("lynx", "lynx"),
     ];
     for part in parts {
         if let Some(&(_, sys)) = FOLDER_HINTS.iter().find(|(k, _)| part.contains(k)) {

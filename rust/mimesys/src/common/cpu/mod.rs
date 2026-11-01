@@ -1,4 +1,7 @@
 pub mod m6502;
+pub mod m65c02;
+pub mod w65816;
+pub mod spc700;
 pub mod z80;
 pub mod mcs48;pub mod i8088;
 pub mod m6801;

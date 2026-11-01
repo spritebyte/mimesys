@@ -1,8 +1,8 @@
 Systems currently supported:
-Atari 2600
-Atari 7800
+Atari 2600,5200,7800,Lynx
 Colecovision
 NES
+SNES (in progress)
 Sega Master System/Game Gear
 Sega Genesis
 Gameboy/Gameboy Color
@@ -60,8 +60,6 @@ NES Mapper Support:
 Total: 49
 
 Planned for future:
-Atari 5200 (will require BIOS), more arcade
-Possibly SNES
 Allow custom palette for Gameboy games
 Wheel controls for Colecovision
 Cheats for systems besides NES and Gameboy

@@ -9,7 +9,7 @@ use crate::pce::pce_system::PceSystem;
 use std::collections::HashMap;
  
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CartSystem { GameBoy, GameBoyColor, Gba, Coleco, Nes, Sms, GameGear, Atari2600, Pce, A7800, Genesis, Nds, }
+pub enum CartSystem { GameBoy, GameBoyColor, Gba, Coleco, Nes, Sms, GameGear, Atari2600, Pce, A7800, A5200, Genesis, Nds, Lynx, Snes, }
 
 impl CartSystem {
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -24,8 +24,11 @@ impl CartSystem {
             "a2600"  => Ok(Self::Atari2600),
             "pce"    => Ok(Self::Pce),
             "a7800"  => Ok(Self::A7800),
+            "a5200"  => Ok(Self::A5200),
             "md"     => Ok(Self::Genesis),
             "nds"    => Ok(Self::Nds),
+            "lynx"   => Ok(Self::Lynx),
+            "snes"   => Ok(Self::Snes),
             other    => Err(format!("Unknown system id '{other}'")),
         }
     }
@@ -60,6 +63,21 @@ fn load_cartridge(system: CartSystem, rom: &[u8], filename: &str, bios: Option<V
                 .map_err(|e| format!("Atari 7800 from_rom failed: {e}"))?;
             Ok(Box::new(core))
         }     
+        CartSystem::A5200 => {
+            let core = crate::atari5200::a5200_system::A5200System::from_rom(rom, filename, bios_or_empty)
+                .map_err(|e| format!("Atari 5200 from_rom failed: {e}"))?;
+            Ok(Box::new(core))
+        }
+        CartSystem::Snes => {
+            let core = crate::snes::snes_system::SnesSystem::from_rom(rom, filename)
+                .map_err(|e| format!("SNES from_rom failed: {e}"))?;
+            Ok(Box::new(core))
+        }
+        CartSystem::Lynx => {
+            let core = crate::lynx::lynx_system::LynxSystem::from_rom(rom, filename, bios_or_empty)
+                .map_err(|e| format!("Atari Lynx from_rom failed: {e}"))?;
+            Ok(Box::new(core))
+        }
         CartSystem::GameBoy | CartSystem::GameBoyColor => {
             let core = GbSystem::from_rom(rom, filename, bios_or_empty)
                 .map_err(|e| format!("GB from_rom failed: {e}"))?;

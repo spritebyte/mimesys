@@ -115,6 +115,28 @@ func _rebuild() -> void:
 		zap.toggled.connect(func(on): _put("zapper", on))
 		_row("Light gun", zap)
 
+	# Lynx: screen rotation (for dumps whose header doesn't say)
+	if sys == "lynx":
+		var rot := OptionButton.new()
+		for item in ["From the cartridge", "None", "Left (top of the picture on the left)", "Right (top on the right)"]:
+			rot.add_item(item)
+		rot.select(int(_opt("lynx_rotate")))
+		rot.item_selected.connect(func(i): _put("lynx_rotate", i))
+		_row("Screen rotation", rot)
+		var ldbg := CheckBox.new()
+		ldbg.text = "Print the sound registers every 10 seconds (for bug reports)"
+		ldbg.button_pressed = _opt("lynx_debug")
+		ldbg.toggled.connect(func(on): _put("lynx_debug", on))
+		_row("Debug", ldbg)
+
+	# 5200: Trak-Ball on controller 1, rolled with the mouse
+	if sys == "a5200":
+		var tb := CheckBox.new()
+		tb.text = "Trak-Ball on controller 1 (roll with the mouse over the picture, left click bottom fire, right click top fire)"
+		tb.button_pressed = _opt("a5200_trackball")
+		tb.toggled.connect(func(on): _put("a5200_trackball", on))
+		_row("Controller", tb)
+
 	# Genesis: console region (PAL = 50 Hz) and pad type; both apply when a game loads
 	if sys == "md":
 		var region := OptionButton.new()
