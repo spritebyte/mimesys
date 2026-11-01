@@ -26,7 +26,7 @@ pub struct Guess {
 
 const GB_LOGO: [u8; 16] = [0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D];
 
-pub const SYSTEMS: [&str; 11] = ["nes", "gb", "gbc", "gba", "sms", "gg", "md", "coleco", "pce", "a2600", "a7800"];
+pub const SYSTEMS: [&str; 12] = ["nes", "gb", "gbc", "gba", "nds", "sms", "gg", "md", "coleco", "pce", "a2600", "a7800"];
 
 fn count(data: &[u8], pattern: &[u8]) -> usize {
     data.windows(pattern.len()).filter(|w| *w == pattern).count()
@@ -60,6 +60,12 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
     }
     if data.len() > 128 && &data[1..10] == b"ATARI7800" {
         return vec![Guess { system: "a7800", score: 100, why: "A78 header".into() }];
+    }
+    // DS: the logo's CRC16 (CF56) at 0x15C, and the header's own CRC
+    if data.len() >= 0x200 && data[0x15C] == 0x56 && data[0x15D] == 0xCF
+        && crate::nds::nds_spi::crc16(&data[0..0x15E], 0xFFFF) == u16::from_le_bytes([data[0x15E], data[0x15F]])
+    {
+        return vec![Guess { system: "nds", score: 100, why: "Nintendo DS header".into() }];
     }
     // GBA: fixed byte 0x96 at 0xB2 and the start of the Nintendo logo at 0x04
     if data.len() >= 0xC0 && data[0xB2] == 0x96 && data[4..8] == [0x24, 0xFF, 0xAE, 0x51] {
@@ -131,7 +137,7 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
         "nes" => &["nes"], "gb" => &["gb"], "gbc" | "cgb" => &["gbc"], "sms" => &["sms"],
         "gg" => &["gg"], "col" | "cv" => &["coleco"], "pce" => &["pce"], "a26" => &["a2600"],
         "a78" => &["a7800"], "gba" | "agb" => &["gba"],
-        "md" | "gen" | "smd" => &["md"], _ => &[],
+        "md" | "gen" | "smd" => &["md"], "nds" | "srl" => &["nds"], _ => &[],
     };
     for &sys in by_ext {
         s.add(sys, 30, &format!(".{ext} file"));

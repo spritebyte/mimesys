@@ -16,4 +16,5 @@ mod atari7800;
 mod pce;
 mod gba;
 mod genesis;
+mod nds;
 

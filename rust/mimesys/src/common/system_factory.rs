@@ -9,7 +9,7 @@ use crate::pce::pce_system::PceSystem;
 use std::collections::HashMap;
  
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CartSystem { GameBoy, GameBoyColor, Gba, Coleco, Nes, Sms, GameGear, Atari2600, Pce, A7800, Genesis, }
+pub enum CartSystem { GameBoy, GameBoyColor, Gba, Coleco, Nes, Sms, GameGear, Atari2600, Pce, A7800, Genesis, Nds, }
 
 impl CartSystem {
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -25,6 +25,7 @@ impl CartSystem {
             "pce"    => Ok(Self::Pce),
             "a7800"  => Ok(Self::A7800),
             "md"     => Ok(Self::Genesis),
+            "nds"    => Ok(Self::Nds),
             other    => Err(format!("Unknown system id '{other}'")),
         }
     }
@@ -89,6 +90,11 @@ fn load_cartridge(system: CartSystem, rom: &[u8], filename: &str, bios: Option<V
         CartSystem::Genesis => {
             let core = crate::genesis::md_system::GenesisSystem::from_rom(rom, filename, bios_or_empty)
                 .map_err(|e| format!("Genesis from_rom failed: {e}"))?;
+            Ok(Box::new(core))
+        }
+        CartSystem::Nds => {
+            let core = crate::nds::nds_system::NdsSystem::from_rom(rom, filename, bios_or_empty)
+                .map_err(|e| format!("DS from_rom failed: {e}"))?;
             Ok(Box::new(core))
         }
         CartSystem::Pce => {

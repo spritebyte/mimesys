@@ -25,7 +25,7 @@ const ALL_ACTIONS := [
 const SYSTEM_BY_EXT := {
 	"nes": "nes", "gb": "gb", "gbc": "gb", "gba": "gba", "agb": "gba", "col": "coleco", "cv": "coleco",
 	"sms": "sms", "gg": "gg", "pce": "pce", "a26": "a2600", "a78": "a7800",
-	"md": "md", "gen": "md", "smd": "md",
+	"md": "md", "gen": "md", "smd": "md", "nds": "nds",
 }
 ## Extensions several systems use: the ROM detector looks inside these files.
 const AMBIGUOUS_EXT := ["bin", "rom"]
@@ -101,6 +101,9 @@ func _init() -> void:
 			["c1_x", "A [X]"], ["c1_b", "B [B]"], ["c1_a", "C [A]"], ["c1_start", "Start"],
 			["c1_y", "X [Y]"], ["c1_l1", "Y [L]"], ["c1_r1", "Z [R]"], ["c1_select", "Mode [Select]"]] + dpad2 + [
 			["c2_select", "P2 A [P2 Select]"], ["c2_b", "P2 B [B]"], ["c2_a", "P2 C [A]"], ["c2_start", "P2 Start"]]},
+		"nds": {"name": "Nintendo DS (stylus = mouse on the bottom screen)", "actions": dpad + [
+			["c1_a", "A"], ["c1_b", "B"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_l1", "L"], ["c1_r1", "R"],
+			["c1_select", "Select"], ["c1_start", "Start"]]},
 		"gg": {"name": "Game Gear", "actions": dpad + [
 			["c1_b", "Button 1 [B]"], ["c1_a", "Button 2 [A]"], ["c1_start", "Start"]]},
 		"coleco": {"name": "ColecoVision", "actions": dpad + [

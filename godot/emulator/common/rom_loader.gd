@@ -78,6 +78,8 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 			bios = gb_boot_blob()
 		"md":
 			bios = md_options_blob()
+		"nds":
+			bios = nds_bios_blob()
 		"gba":
 			bios = load_bios(AppSettings.bios_path("gba", "user://BIOS/gba_bios.bin"))
 			if bios.is_empty():
@@ -129,6 +131,24 @@ static func md_options_blob() -> PackedByteArray:
 	var out := PackedByteArray("MDOP".to_ascii_buffer())
 	out.append(region)
 	out.append(pad)
+	return out
+
+
+## DS BIOS / firmware dumps, all optional (the core has a free BIOS and makes a firmware):
+## "NDSB", then entries of a 4-byte tag, a u32 little-endian length and the data.
+static func nds_bios_blob() -> PackedByteArray:
+	var out := PackedByteArray("NDSB".to_ascii_buffer())
+	for pair in [["B9", "bios9.bin"], ["B7", "bios7.bin"], ["FW", "firmware.bin"]]:
+		var path: String = BIOS_DIR + "/" + pair[1]
+		if not FileAccess.file_exists(path):
+			continue
+		var data := FileAccess.get_file_as_bytes(path)
+		var tag := PackedByteArray([pair[0].unicode_at(0), pair[0].unicode_at(1), 0, 0])
+		out.append_array(tag)
+		var n := data.size()
+		out.append_array(PackedByteArray([n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF]))
+		out.append_array(data)
+		print("DS: using %s" % path)
 	return out
 
 

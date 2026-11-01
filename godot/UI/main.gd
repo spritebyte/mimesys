@@ -417,7 +417,8 @@ func _apply_display_options() -> void:
 	EmulatorScreen.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR \
 		if AppSettings.get_option(sys, "smooth") else CanvasItem.TEXTURE_FILTER_NEAREST
 	# NEW (zapper): light gun in port 2
-	_zapper_on = sys == "nes" and AppSettings.get_option(sys, "zapper")
+	# the DS stylus uses the same mouse pointer as the Zapper
+	_zapper_on = (sys == "nes" and AppSettings.get_option(sys, "zapper")) or sys == "nds"
 	emu_mutex.lock()
 	emu_system.set_option("zapper", 1 if _zapper_on else 0)
 	# GBA cartridge clock (Pokemon etc.): local time = UTC + this many minutes

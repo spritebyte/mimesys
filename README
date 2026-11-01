@@ -4,8 +4,10 @@ Atari 7800
 Colecovision
 NES
 Sega Master System/Game Gear
+Sega Genesis
 Gameboy/Gameboy Color
 GBA
+NDS - in progress (no sound)
 TG-16
 Some Arcade - list below
 
@@ -18,8 +20,7 @@ Double Dragon 1&2
 Paperboy
 Green Beret/Rush N' Attack
 Simpsons
-
-Save states not completed for Gameboy or Arcade, should work on other systems. F6/F7 to switch save slots. F5 to save state and F8 to load
+Rastan
 
 Fullscreen Mode - use F11
 
@@ -58,11 +59,12 @@ NES Mapper Support:
 85,87,88,95,105,118,119,159,184,206,
 Total: 49
 
-Planned TODO:
+Planned for future:
 Atari 5200 (will require BIOS), more arcade
-Possibly SNES and Genesis.
+Possibly SNES
 Allow custom palette for Gameboy games
 Wheel controls for Colecovision
+Cheats for systems besides NES and Gameboy
 Zapper (mouse) support for SMS
 Add debugging tools for all systems
 Video recording
