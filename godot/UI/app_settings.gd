@@ -60,6 +60,9 @@ const OPTION_DEFAULTS := {
 	"bios_sgb": "",          # Game Boy: Super Game Boy boot ROM ("" = default path)
 	"md_region": "auto",     # Genesis: "auto" (from the cartridge), "usa", "japan", "europe" (50 Hz)
 	"md_pad": "6",           # Genesis: "6" six-button pad, "3" three-button pad
+	"nds_debug": false,      # DS: print CPU / video state every 10 s (for bug reports)
+	"nds_layout": 0,         # DS: 0 stacked, 1 side by side, 2 top screen only, 3 touch screen only
+	"nds_swap": false,       # DS: swap the screens' places
 }
 ## Game Boy boot ROMs: "bios" (above) is the Game Boy Color one, this is the original's.
 const GB_DMG_BIOS_DEFAULT := "user://BIOS/dmg_boot.bin"
@@ -103,7 +106,7 @@ func _init() -> void:
 			["c2_select", "P2 A [P2 Select]"], ["c2_b", "P2 B [B]"], ["c2_a", "P2 C [A]"], ["c2_start", "P2 Start"]]},
 		"nds": {"name": "Nintendo DS (stylus = mouse on the bottom screen)", "actions": dpad + [
 			["c1_a", "A"], ["c1_b", "B"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_l1", "L"], ["c1_r1", "R"],
-			["c1_select", "Select"], ["c1_start", "Start"]]},
+			["c1_select", "Select"], ["c1_start", "Start"], ["c1_z", "Microphone (blow) [Z]"]]},
 		"gg": {"name": "Game Gear", "actions": dpad + [
 			["c1_b", "Button 1 [B]"], ["c1_a", "Button 2 [A]"], ["c1_start", "Start"]]},
 		"coleco": {"name": "ColecoVision", "actions": dpad + [

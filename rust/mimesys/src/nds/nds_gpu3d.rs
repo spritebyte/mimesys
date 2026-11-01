@@ -15,8 +15,10 @@
 //! texture coordinate generation, frustum clipping (far-plane option), culling, the 2048
 //! polygon / 6144 vertex limits, opaque/translucent sorting, z and w depth, all 7 texture
 //! formats with repeat/flip/clamp, modulate/decal/toon/highlight, alpha test and blending,
-//! translucent polygon IDs, wireframe, fog, box/position/vector tests.
-//! Not yet: shadow polygons (skipped), edge marking, anti-aliasing, the rear-plane bitmap,
+//! translucent polygon IDs, wireframe, fog, box/position/vector tests, shadow polygons
+//! (stencil masks), edge marking, anti-aliasing.
+//! Anti-aliasing smooths object outlines (by edge distance, blended with the layer behind).
+//! Not yet: the rear-plane bitmap,
 //! exact hardware interpolation and depth rounding.
 
 use serde::{Deserialize, Serialize};
@@ -630,7 +632,21 @@ struct Target {
     depth: Vec<u32>,
     /// polygon id (bits 0-5), drawn by a translucent polygon (bit 6), fog (bit 7)
     attr: Vec<u8>,
+    /// the opaque polygon's id, and whether the pixel is on its edge (edge marking)
+    oid: Vec<u8>,
+    edge: Vec<bool>,
+    /// set by shadow mask polygons where their depth test fails
+    stencil: Vec<u8>,
+    /// anti-aliasing: how much of the pixel the opaque polygon covers (0-31), and what's
+    /// behind a partly covered pixel (colour, depth); whether an opaque polygon is there
+    cov: Vec<u8>,
+    below: Vec<[u8; 4]>,
+    below_depth: Vec<u32>,
+    filled: Vec<bool>,
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind { Normal, ShadowMask, Shadow }
 
 impl Gpu3d {
     /// Draw the current polygon list into `frame`.
@@ -645,6 +661,13 @@ impl Gpu3d {
             color: vec![[cc[0] as u8, cc[1] as u8, cc[2] as u8, ((clear >> 16) & 31) as u8]; W * H],
             depth: vec![clear_depth; W * H],
             attr: vec![(((clear >> 24) & 63) | if clear & 0x8000 != 0 { 0x80 } else { 0 }) as u8; W * H],
+            oid: vec![((clear >> 24) & 63) as u8; W * H],
+            edge: vec![false; W * H],
+            stencil: vec![0; W * H],
+            cov: vec![31; W * H],
+            below: vec![[cc[0] as u8, cc[1] as u8, cc[2] as u8, ((clear >> 16) & 31) as u8]; W * H],
+            below_depth: vec![clear_depth; W * H],
+            filled: vec![false; W * H],
         };
         let mut opaque: Vec<&Poly> = self.render_polys.iter().filter(|p| !p.translucent).collect();
         let mut trans: Vec<&Poly> = self.render_polys.iter().filter(|p| p.translucent).collect();
@@ -653,13 +676,25 @@ impl Gpu3d {
         if self.render_param & 1 == 0 { trans.sort_by_key(key); }
         let wbuf = self.render_param & 2 != 0;
         let toon: Vec<u16> = (0..32).map(|i| regs.r16(0x380 + i * 2)).collect();
-        let ctx = Ctx { disp, wbuf, alpha_ref: (regs.r16(0x340) & 31) as u32, toon, vram,
+        let ctx = Ctx { disp, wbuf, alpha_ref: (regs.r16(0x340) & 31) as u32, toon, vram, aa: disp & 0x10 != 0,
                         tex_pages: vram.page_slices(Region::Texture), pal_pages: vram.page_slices(Region::TexPal) };
+        // shadows: polygons in mode 3 with id 0 are masks (they mark the stencil where they
+        // fail the depth test; a run of masks starts with a clear stencil), other mode-3
+        // polygons draw only on marked pixels
+        let mut prev_mask = false;
         for p in opaque.iter().chain(trans.iter()) {
-            if (p.attr >> 4) & 3 == 3 { continue; }        // shadow polygons: not yet
-            raster(&ctx, p, &mut t);
+            let kind = match ((p.attr >> 4) & 3, (p.attr >> 24) & 63) {
+                (3, 0) => Kind::ShadowMask,
+                (3, _) => Kind::Shadow,
+                _ => Kind::Normal,
+            };
+            if kind == Kind::ShadowMask && !prev_mask { t.stencil.fill(0); }
+            prev_mask = kind == Kind::ShadowMask;
+            raster(&ctx, p, &mut t, kind);
         }
+        if disp & 0x20 != 0 { edge_marking(&regs, clear, clear_depth, &mut t); }
         if disp & 0x80 != 0 { fog(&regs, disp, &mut t); }
+        if disp & 0x10 != 0 { anti_alias(&mut t); }
         for (o, (c, _)) in self.frame.iter_mut().zip(t.color.iter().zip(t.depth.iter())) {
             *o = (c[0] as u32 >> 1) | (c[1] as u32 >> 1) << 5 | (c[2] as u32 >> 1) << 10 | (c[3] as u32) << 16;
         }
@@ -671,6 +706,8 @@ impl Gpu3d {
 
 struct Ctx<'a> {
     disp: u32,
+    /// DISP3DCNT bit 4: anti-aliased polygon edges
+    aa: bool,
     wbuf: bool,
     alpha_ref: u32,
     toon: Vec<u16>,
@@ -728,7 +765,7 @@ impl Span {
     }
 }
 
-fn raster(ctx: &Ctx, p: &Poly, t: &mut Target) {
+fn raster(ctx: &Ctx, p: &Poly, t: &mut Target, kind: Kind) {
     let n = p.v.len();
     let spans: Vec<Span> = p.v.iter().map(Span::of).collect();
     let y0 = ((p.ymin - 0.5).ceil().max(0.0)) as i32;
@@ -741,6 +778,26 @@ fn raster(ctx: &Ctx, p: &Poly, t: &mut Target) {
     let fmt = if ctx.disp & 1 != 0 { (p.tex >> 26) & 7 } else { 0 };
     let depth_equal = p.attr & 0x4000 != 0;
     let blend = ctx.disp & 8 != 0;
+    // anti-aliasing: each edge as a line, with its sign chosen so the inside is positive
+    // (the polygon is convex, so its centroid is inside every edge)
+    let aa = ctx.aa && kind == Kind::Normal && !wire;
+    let edges: Vec<(f32, f32, f32, f32)> = if aa {
+        let (cx, cy) = (p.v.iter().map(|v| v.x).sum::<f32>() / n as f32, p.v.iter().map(|v| v.y).sum::<f32>() / n as f32);
+        (0..n).filter_map(|i| {
+            let (a, b) = (&p.v[i], &p.v[(i + 1) % n]);
+            let (ex, ey) = (b.x - a.x, b.y - a.y);
+            let len = (ex * ex + ey * ey).sqrt();
+            if len < 1e-6 { return None; }
+            let d = |x: f32, y: f32| ((x - a.x) * ey - (y - a.y) * ex) / len;
+            let sgn = if d(cx, cy) >= 0.0 { 1.0 } else { -1.0 };
+            Some((a.x, a.y, ey * sgn / len, -ex * sgn / len))
+        }).collect()
+    } else { Vec::new() };
+    let coverage = |px: f32, py: f32| -> u8 {
+        let mut m = f32::MAX;
+        for &(ax, ay, nx, ny) in &edges { m = m.min((px - ax) * nx + (py - ay) * ny); }
+        ((0.5 + m).clamp(0.0, 1.0) * 31.0 + 0.5) as u8
+    };
     for y in y0..y1 {
         let yc = y as f32 + 0.5;
         let mut l: Option<Span> = None;
@@ -772,7 +829,15 @@ fn raster(ctx: &Ctx, p: &Poly, t: &mut Target) {
             let i = y as usize * W + x as usize;
             let dst = t.depth[i];
             let pass = if depth_equal { depth.abs_diff(dst) <= 0x200 } else { depth < dst };
-            if !pass { continue; }
+            match kind {
+                Kind::ShadowMask => { if !pass { t.stencil[i] = 1; } continue; }
+                Kind::Shadow => if t.stencil[i] == 0 || t.attr[i] & 63 == id { continue; },
+                Kind::Normal => {}
+            }
+            // behind a partly covered edge pixel but in front of what's under it: this
+            // polygon becomes the layer the edge blends with
+            let under = !pass && aa && t.cov[i] < 31 && depth < t.below_depth[i];
+            if !pass && !under { continue; }
             // colour
             let ch = |v: f32| (v * w).max(0.0).min(63.0) as i32 as u32;
             let vc = [ch(s.r), ch(s.g), ch(s.b)];
@@ -802,13 +867,28 @@ fn raster(ctx: &Ctx, p: &Poly, t: &mut Target) {
             if wire { a = 31; }
             if a == 0 || (ctx.disp & 4 != 0 && a <= ctx.alpha_ref) { continue; }
             let fogbit = if p.attr & 0x8000 != 0 { 0x80 } else { 0 };
-            if a == 31 {
+            if under {
+                if a == 31 { t.below[i] = [c[0] as u8, c[1] as u8, c[2] as u8, 31]; t.below_depth[i] = depth; }
+                continue;
+            }
+            if a == 31 && kind != Kind::Shadow {
+                if aa {
+                    let cv = coverage(x as f32 + 0.5, yc);
+                    if cv < 31 { t.below[i] = t.color[i]; t.below_depth[i] = t.depth[i]; }
+                    t.cov[i] = cv;
+                } else {
+                    t.cov[i] = 31;
+                }
+                t.filled[i] = true;
                 t.color[i] = [c[0] as u8, c[1] as u8, c[2] as u8, 31];
                 t.depth[i] = depth;
                 t.attr[i] = id | fogbit;
+                t.oid[i] = id;
+                t.edge[i] = x == x0 || x == x1 - 1 || y == y0 || y == y1 - 1;
             } else {
                 let da = t.attr[i];
-                if da & 0x40 != 0 && da & 63 == id { continue; }     // this translucent polygon was here
+                // this translucent polygon was here (shadows check opaque ids too)
+                if (da & 0x40 != 0 || kind == Kind::Shadow) && da & 63 == id { continue; }
                 let d = t.color[i];
                 if blend && d[3] != 0 {
                     for k in 0..3 { t.color[i][k] = ((c[k] * (a + 1) + d[k] as u32 * (31 - a)) / 32) as u8; }
@@ -906,6 +986,64 @@ fn texel(ctx: &Ctx, tex: u32, pal: u32, s: i32, t: i32) -> (u16, u32) {
             (c & 0x7FFF, if c & 0x8000 != 0 { 31 } else { 0 })
         }
         _ => (0, 0),
+    }
+}
+
+/// Anti-aliasing (DISP3DCNT bit 4): on object outlines (an edge pixel next to another
+/// polygon id or to no opaque polygon), blend the partly covering polygon with what's
+/// behind it by coverage. Over the clear plane (alpha 0) the pixel's alpha fades instead,
+/// so the edge blends with the 2D layers.
+fn anti_alias(t: &mut Target) {
+    for y in 0..H {
+        for x in 0..W {
+            let i = y * W + x;
+            let cv = t.cov[i] as u32;
+            if cv >= 31 || !t.filled[i] || t.attr[i] & 0x40 != 0 { continue; }
+            let id = t.oid[i];
+            let outline = [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| {
+                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                if nx < 0 || ny < 0 || nx >= W as i32 || ny >= H as i32 { return false; }
+                let j = ny as usize * W + nx as usize;
+                !t.filled[j] || t.oid[j] != id
+            });
+            if !outline { continue; }
+            let (top, under) = (t.color[i], t.below[i]);
+            if under[3] == 0 {
+                t.color[i][3] = ((top[3] as u32 * cv) / 31) as u8;
+            } else {
+                for k in 0..3 { t.color[i][k] = ((top[k] as u32 * cv + under[k] as u32 * (31 - cv)) / 31) as u8; }
+            }
+        }
+    }
+}
+
+/// Edge marking (DISP3DCNT bit 5): an opaque polygon's edge pixel takes EDGE_COLOR
+/// (0x330, by polygon id / 8) where a neighbour belongs to another polygon and lies further
+/// back. Off-screen neighbours count as the clear plane.
+fn edge_marking(regs: &RenderRegs, clear: u32, clear_depth: u32, t: &mut Target) {
+    let colors: Vec<[u32; 3]> = (0..8).map(|k| rgb6(regs.r16(0x330 + k * 2))).collect();
+    let clear_id = ((clear >> 24) & 63) as u8;
+    let mut marks = Vec::new();
+    for y in 0..H {
+        for x in 0..W {
+            let i = y * W + x;
+            if !t.edge[i] { continue; }
+            let (id, z) = (t.oid[i], t.depth[i]);
+            let n = |dx: i32, dy: i32| -> (u8, u32) {
+                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                if nx < 0 || ny < 0 || nx >= W as i32 || ny >= H as i32 { return (clear_id, clear_depth); }
+                let j = ny as usize * W + nx as usize;
+                (t.oid[j], t.depth[j])
+            };
+            if [n(-1, 0), n(1, 0), n(0, -1), n(0, 1)].iter().any(|&(nid, nz)| nid != id && z < nz) {
+                marks.push((i, colors[(id >> 3) as usize]));
+            }
+        }
+    }
+    for (i, c) in marks {
+        t.color[i][0] = c[0] as u8;
+        t.color[i][1] = c[1] as u8;
+        t.color[i][2] = c[2] as u8;
     }
 }
 

@@ -143,6 +143,11 @@ pub struct Spi {
     tsc_out: u16,
     /// stylus position (pixels on the bottom screen) and contact
     pub touch: (u16, u16, bool),
+    /// microphone: "blowing" (loud noise) while held, silence otherwise
+    #[serde(skip)]
+    pub mic: bool,
+    #[serde(skip)]
+    mic_seed: u32,
 }
 
 impl Spi {
@@ -150,7 +155,7 @@ impl Spi {
         Self {
             cnt: 0, data: 0, firmware, fw_cmd: 0, fw_pos: 0, fw_addr: 0, fw_status: 0,
             pm_index: 0, pm_pos: 0, pm_regs: [0x0D, 0x00, 0x01, 0x00, 0x03, 0, 0, 0], tsc_out: 0,
-            touch: (0, 0, false),
+            touch: (0, 0, false), mic: false, mic_seed: 0x1234_5678,
         }
     }
 
@@ -248,8 +253,9 @@ impl Spi {
         out
     }
 
-    /// TSC2046: a control byte picks the channel; the 12-bit sample comes out over the
-    /// next two bytes (bits 11-5, then bits 4-0 in the top of the second).
+    /// TSC2046: a control byte picks the channel (1 = y, 5 = x, 6 = microphone); the 12-bit
+    /// sample comes out over the next two bytes (bits 11-5, then bits 4-0 in the top of the
+    /// second). Control bit 3 asks for 8 bits instead.
     fn touchscreen(&mut self, v: u8) -> u8 {
         let out = (self.tsc_out >> 8) as u8;
         self.tsc_out <<= 8;
@@ -258,9 +264,20 @@ impl Spi {
             let sample = match (v >> 4) & 7 {
                 1 => if down { (y.min(191) << 4) + 8 } else { 0xFFF },
                 5 => if down { (x.min(255) << 4) + 8 } else { 0 },
+                6 => {
+                    // silence sits in the middle; blowing is loud noise around it
+                    if self.mic {
+                        self.mic_seed ^= self.mic_seed << 13;
+                        self.mic_seed ^= self.mic_seed >> 17;
+                        self.mic_seed ^= self.mic_seed << 5;
+                        0x100 + (self.mic_seed % 0xE00) as u16
+                    } else {
+                        0x800
+                    }
+                }
                 _ => 0,
             };
-            self.tsc_out = (sample & 0xFFF) << 3;
+            self.tsc_out = if v & 0x08 != 0 { ((sample >> 4) & 0xFF) << 7 } else { (sample & 0xFFF) << 3 };
         }
         out
     }

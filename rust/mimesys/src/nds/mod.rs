@@ -6,6 +6,7 @@ pub mod nds_gpu2d;
 pub mod nds_gpu3d;
 pub mod nds_io;
 pub mod nds_rtc;
+pub mod nds_sound;
 pub mod nds_spi;
 pub mod nds_system;
 pub mod nds_vram;

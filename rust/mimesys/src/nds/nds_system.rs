@@ -27,7 +27,7 @@ const FREE_BIOS9: &[u8] = include_bytes!("free_bios9.bin");
 const FREE_BIOS7: &[u8] = include_bytes!("free_bios7.bin");
 const BUS_CLOCK: u64 = 33_513_982;
 const SLICE: u64 = 32;
-const STATE_VERSION: u32 = 3;
+const STATE_VERSION: u32 = 4;
 /// save chip for games missing from the save-type table (melonDS's guess too)
 const DEFAULT_SAVE: (SaveType, usize) = (SaveType::Eeprom, 0x2000);
 
@@ -38,7 +38,14 @@ pub struct NdsSystem {
     /// bus cycle the current line started at
     line_start: u64,
     current_frame: u64,
-    audio_phase: u64,
+    /// print the state every 10 s (option "debug_report")
+    debug_report: bool,
+    /// how the two screens are laid out (option "screen_layout": 0 stacked, 1 side by side,
+    /// 2 top screen only, 3 bottom screen only) and whether they swap places ("screen_swap")
+    layout: u8,
+    swap: bool,
+    /// the picture in that layout (unused for plain stacked)
+    out: Vec<u8>,
     pub header: Header,
     pub notes: Vec<String>,
     save_filename: String,
@@ -109,12 +116,12 @@ impl NdsSystem {
             nds: Nds::new(cart, spi, bios9, bios7),
             line_start: 0,
             current_frame: 0,
-            audio_phase: 0,
+            debug_report: false, layout: 0, swap: false, out: Vec::new(),
             header,
             notes: Vec::new(),
             save_filename: filename.to_string(),
-            save_battery_path: "user://NDS/Save".to_string(),
-            save_state_path: "user://NDS/State".to_string(),
+            save_battery_path: "user://GD_EMU/NDS/Save".to_string(),
+            save_state_path: "user://GD_EMU/NDS/State".to_string(),
         };
         sys.direct_boot(rom, real_bios7);
         println!("DS: \"{}\" ({}), {} MB{}", sys.header.title, sys.header.code_str(), rom.len() >> 20,
@@ -204,6 +211,37 @@ impl NdsSystem {
         self.nds.powcnt2 = 0x0001;
     }
 
+    /// Output size for the layout.
+    fn out_size(&self) -> (usize, usize) {
+        match self.layout { 1 => (SCREEN_W * 2, SCREEN_H), 2 | 3 => (SCREEN_W, SCREEN_H), _ => (SCREEN_W, SCREEN_H * 2) }
+    }
+
+    /// Where each physical screen (0 top, 1 bottom/touch) goes in the output: Some((x, y)).
+    fn screen_pos(&self, screen: usize) -> Option<(usize, usize)> {
+        let first = (screen == 1) == self.swap;           // drawn first (top / left)?
+        match self.layout {
+            1 => Some((if first { 0 } else { SCREEN_W }, 0)),
+            2 => (screen == 0).then_some((0, 0)),
+            3 => (screen == 1).then_some((0, 0)),
+            _ => Some((0, if first { 0 } else { SCREEN_H })),
+        }
+    }
+
+    /// Lay the screens out in `out` (stacked unswapped uses the frame buffer as it is).
+    fn compose(&mut self) {
+        if self.layout == 0 && !self.swap { return; }
+        let (w, h) = self.out_size();
+        self.out.resize(w * h * 4, 0);
+        for screen in 0..2 {
+            let Some((ox, oy)) = self.screen_pos(screen) else { continue };
+            for y in 0..SCREEN_H {
+                let src = (screen * SCREEN_H + y) * SCREEN_W * 4;
+                let dst = ((oy + y) * w + ox) * 4;
+                self.out[dst..dst + SCREEN_W * 4].copy_from_slice(&self.nds.framebuffer[src..src + SCREEN_W * 4]);
+            }
+        }
+    }
+
     /// Every 10 seconds: where the CPUs are (helps tell a running game from a stuck one).
     fn report(&self) {
         let st = |h: bool| if h { " (waiting for an IRQ)" } else { "" };
@@ -282,10 +320,12 @@ impl System for NdsSystem {
             self.nds.hblank(line);
             if (line as usize) < SCREEN_H { self.nds.render_line(line as usize); }
             self.run_to(self.line_start + LINE_CYCLES);
+            self.nds.sound_sync();
             self.line_start += LINE_CYCLES;
         }
         self.current_frame += 1;
-        if self.current_frame % 600 == 0 { self.report(); }
+        if self.debug_report && self.current_frame % 600 == 0 { self.report(); }
+        self.compose();
     }
 
     fn set_input(&mut self, m: u32) {
@@ -298,29 +338,33 @@ impl System for NdsSystem {
         let mut e = 0x7Fu16;
         if on(pad::X) { e &= !0x01; }
         if on(pad::Y) { e &= !0x02; }
+        self.nds.spi.mic = on(pad::Z);
         if self.nds.spi.touch.2 { e &= !0x40; }
         self.nds.extkeyin = e;
     }
 
     fn set_pointer(&mut self, x: i32, y: i32, buttons: u32) {
-        let on_bottom = (0..256).contains(&x) && (192..384).contains(&y);
-        self.nds.spi.touch = if buttons & 1 != 0 && on_bottom { (x as u16, (y - 192) as u16, true) } else { (0, 0, false) };
+        // the touch screen's place in the current layout
+        let (bx, by) = match self.screen_pos(1) { Some((a, b)) => (a as i32, b as i32), None => (-10_000, -10_000) };
+        let (tx, ty) = (x - bx, y - by);
+        let on_bottom = (0..SCREEN_W as i32).contains(&tx) && (0..SCREEN_H as i32).contains(&ty);
+        self.nds.spi.touch = if buttons & 1 != 0 && on_bottom { (tx as u16, ty as u16, true) } else { (0, 0, false) };
         let mut e = self.nds.extkeyin | 0x40;
         if self.nds.spi.touch.2 { e &= !0x40; }
         self.nds.extkeyin = e;
     }
 
     fn set_option(&mut self, key: &str, value: i64) {
-        if key == "rtc_utc_offset" { self.nds.rtc.utc_offset = value as i32; }
+        match key {
+            "rtc_utc_offset" => self.nds.rtc.utc_offset = value as i32,
+            "debug_report" => self.debug_report = value != 0,
+            "screen_layout" => { self.layout = (value as u8).min(3); self.compose(); }
+            "screen_swap" => { self.swap = value != 0; self.compose(); }
+            _ => {}
+        }
     }
 
-    /// No sound yet (stage 5): silence at the right rate.
-    fn drain_audio(&mut self) -> Vec<f32> {
-        self.audio_phase += 44_100 * self.frame_time_usec() as u64;
-        let n = self.audio_phase / 1_000_000;
-        self.audio_phase %= 1_000_000;
-        vec![0.0; n as usize * 2]
-    }
+    fn drain_audio(&mut self) -> Vec<f32> { self.nds.sound.drain() }
     fn sample_rate(&self) -> u32 { 44_100 }
     fn frame_time_usec(&self) -> i64 { (LINES as u64 * LINE_CYCLES * 1_000_000 / BUS_CLOCK) as i64 }
     fn power_on(&mut self) {}
@@ -348,7 +392,9 @@ impl System for NdsSystem {
         }
     }
 
-    fn framebuffer(&self) -> &[u8] { &self.nds.framebuffer }
+    fn framebuffer(&self) -> &[u8] {
+        if self.layout == 0 && !self.swap { &self.nds.framebuffer } else { &self.out }
+    }
 
     fn reset(&mut self) {
         let rom = std::mem::take(&mut self.nds.cart.rom);
@@ -365,14 +411,15 @@ impl System for NdsSystem {
     }
 
     fn display_info(&self) -> DisplayInfo {
+        let (w, h) = self.out_size();
         DisplayInfo {
-            buffer_width: SCREEN_W as i32,
-            buffer_height: (SCREEN_H * 2) as i32,
+            buffer_width: w as i32,
+            buffer_height: h as i32,
             visible_x: 0,
             visible_y: 0,
-            visible_width: SCREEN_W as i32,
-            visible_height: (SCREEN_H * 2) as i32,
-            target_aspect_ratio: SCREEN_W as f32 / (SCREEN_H * 2) as f32,
+            visible_width: w as i32,
+            visible_height: h as i32,
+            target_aspect_ratio: w as f32 / h as f32,
             rotation: Rotation::None,
         }
     }

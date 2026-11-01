@@ -133,6 +133,25 @@ func _rebuild() -> void:
 		pad.item_selected.connect(func(i): _put("md_pad", "3" if i == 1 else "6"))
 		_row("Controller (next load)", pad)
 
+	# DS: screen layout, and the 10-second debug log in the Output panel
+	if sys == "nds":
+		var layout := OptionButton.new()
+		for item in ["Stacked (top above touch screen)", "Side by side", "Top screen only", "Touch screen only"]:
+			layout.add_item(item)
+		layout.select(int(_opt("nds_layout")))
+		layout.item_selected.connect(func(i): _put("nds_layout", i))
+		_row("Screens", layout)
+		var swap := CheckBox.new()
+		swap.text = "Swap the two screens"
+		swap.button_pressed = _opt("nds_swap")
+		swap.toggled.connect(func(on): _put("nds_swap", on))
+		_row("", swap)
+		var dbg := CheckBox.new()
+		dbg.text = "Print a debug log every 10 seconds (for bug reports)"
+		dbg.button_pressed = _opt("nds_debug")
+		dbg.toggled.connect(func(on): _put("nds_debug", on))
+		_row("Debug", dbg)
+
 	# Overscan crop
 	var crop := HBoxContainer.new()
 	for side in [["crop_top", "Top"], ["crop_bottom", "Bottom"], ["crop_left", "Left"], ["crop_right", "Right"]]:

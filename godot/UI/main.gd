@@ -398,6 +398,16 @@ func _apply_display_options() -> void:
 	if _display_info == null or current_system_id == "":
 		return
 	var sys := current_system_id
+	# DS: the screen layout changes the picture's size; set it up again when it does
+	if sys == "nds" and emu_system:
+		emu_mutex.lock()
+		emu_system.set_option("screen_layout", int(AppSettings.get_option(sys, "nds_layout")))
+		emu_system.set_option("screen_swap", 1 if AppSettings.get_option(sys, "nds_swap") else 0)
+		var fresh: SystemDisplayInfo = emu_system.display_info()
+		emu_mutex.unlock()
+		if fresh.buffer_width != _display_info.buffer_width or fresh.buffer_height != _display_info.buffer_height:
+			setup_screen(fresh)   # comes back here with the new size
+			return
 	var info := _display_info
 	var top: int = AppSettings.get_option(sys, "crop_top")
 	var bottom: int = AppSettings.get_option(sys, "crop_bottom")
@@ -423,6 +433,7 @@ func _apply_display_options() -> void:
 	emu_system.set_option("zapper", 1 if _zapper_on else 0)
 	# GBA cartridge clock (Pokemon etc.): local time = UTC + this many minutes
 	emu_system.set_option("rtc_utc_offset", Time.get_time_zone_from_system().bias)
+	emu_system.set_option("debug_report", 1 if sys == "nds" and AppSettings.get_option(sys, "nds_debug") else 0)
 	emu_mutex.unlock()
 	EmulatorScreen.mouse_default_cursor_shape = Control.CURSOR_CROSS \
 		if _zapper_on else Control.CURSOR_ARROW

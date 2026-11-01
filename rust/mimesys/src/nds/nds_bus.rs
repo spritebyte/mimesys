@@ -22,6 +22,7 @@ use crate::nds::nds_gpu2d::{self, Engine2d, View};
 use crate::nds::nds_gpu3d::{Gpu3d, RenderRegs};
 use crate::nds::nds_io::*;
 use crate::nds::nds_rtc::Rtc;
+use crate::nds::nds_sound::{Sound, SoundMem};
 use crate::nds::nds_spi::Spi;
 use crate::nds::nds_vram::{Region, Vram};
 use crate::nds::nds_wifi::Wifi;
@@ -150,14 +151,18 @@ pub struct Nds {
     pub gpu3d: Gpu3d,
     #[serde(default)]
     pub wifi: Wifi,
+    #[serde(default)]
+    pub sound: Sound,
     #[serde(skip, default = "blank_frame")]
     pub framebuffer: Vec<u8>,
 }
 
 fn blank_frame() -> Vec<u8> { vec![0; SCREEN_W * SCREEN_H * 2 * 4] }
 
-fn rd16(m: &[u8], a: usize) -> u16 { u16::from_le_bytes([m[a], m[a + 1]]) }
-fn rd32(m: &[u8], a: usize) -> u32 { u32::from_le_bytes([m[a], m[a + 1], m[a + 2], m[a + 3]]) }
+#[inline(always)]
+fn rd16(m: &[u8], a: usize) -> u16 { u16::from_le_bytes(m[a..a + 2].try_into().unwrap()) }
+#[inline(always)]
+fn rd32(m: &[u8], a: usize) -> u32 { u32::from_le_bytes(m[a..a + 4].try_into().unwrap()) }
 fn wr16(m: &mut [u8], a: usize, v: u16) { m[a..a + 2].copy_from_slice(&v.to_le_bytes()); }
 fn wr32(m: &mut [u8], a: usize, v: u32) { m[a..a + 4].copy_from_slice(&v.to_le_bytes()); }
 
@@ -179,7 +184,7 @@ impl Nds {
             dispstat: [0; 2], vcount: 0, keyinput: 0x3FF, extkeyin: 0x7F, powcnt1: 0, powcnt2: 0,
             postflg: [0; 2], exmemcnt: 0, halted: [false; 2], cycles9: 0, cycles7: 0,
             gpu: Default::default(), capturing: false, gpu3d: Gpu3d::new(),
-            wifi,
+            wifi, sound: Sound::new(),
             framebuffer: blank_frame(),
         }
     }
@@ -430,6 +435,7 @@ impl Nds {
             0x2BC if cpu == ARM9 => (self.math.sqrt_param >> 32) as u32,
             0x600 if cpu == ARM9 => self.gpu3d.gxstat(rd32(&self.io9_raw, 0x600) >> 30),
             0x604..=0x6A3 if cpu == ARM9 => self.gpu3d.read(off),
+            0x400..=0x51F if cpu == ARM7 => { self.sound_sync(); self.sound.read(off) }
             0x80_0000..=0x80_FFFF if cpu == ARM7 => {
                 let now = self.cycles7;
                 let v = self.wifi.read16(a, now) as u32 | (self.wifi.read16(a + 2, now) as u32) << 16;
@@ -521,6 +527,12 @@ impl Nds {
             0x2B0 if cpu == ARM9 => { self.math.sqrtcnt = merge(self.math.sqrtcnt) & 1; self.math.sqrt(); }
             0x2B8 | 0x2BC if cpu == ARM9 => { let sh = (off - 0x2B8) * 8; self.math.sqrt_param = merge64(self.math.sqrt_param, v, mask, sh); self.math.sqrt(); }
             0x400..=0x5FF if cpu == ARM9 => self.gpu3d.write(off, v),
+            0x400..=0x51F if cpu == ARM7 => {
+                self.sound_sync();
+                let mut snd = std::mem::take(&mut self.sound);
+                snd.write(off, v, mask, &Mem7(self));
+                self.sound = snd;
+            }
             0x80_0000..=0x80_FFFF if cpu == ARM7 => {
                 let now = self.cycles7;
                 for half in 0..2u32 {
@@ -614,6 +626,26 @@ impl Nds {
     }
 
     // ------------------------------------------------------------ display timing
+
+    /// Run the sound unit up to the ARM7's time.
+    pub fn sound_sync(&mut self) {
+        let now = self.cycles7;
+        if now < self.sound.time + crate::nds::nds_sound::MIX_CYCLES { return; }
+        let mut snd = std::mem::take(&mut self.sound);
+        snd.run(now, &mut Mem7(self));
+        self.sound = snd;
+    }
+
+    /// A byte of ARM7 memory written with no timing (sound capture).
+    fn poke8(&mut self, a: u32, v: u8) {
+        match self.locate(ARM7, a, false, true) {
+            Loc::Main(i) => self.main_ram[i] = v,
+            Loc::Swram(i) => self.swram[i] = v,
+            Loc::Wram7(i) => self.wram7[i] = v,
+            Loc::Vram(r, o) => self.vram.write8(r, o, v),
+            _ => {}
+        }
+    }
 
     /// Pass on a wifi interrupt to the ARM7.
     fn wifi_irq(&mut self) {
@@ -769,6 +801,13 @@ impl Nds {
             self.capturing = false;
         }
     }
+}
+
+/// The ARM7's memory, as the sound unit reads and writes it.
+struct Mem7<'a>(&'a mut Nds);
+impl SoundMem for Mem7<'_> {
+    fn read8(&self, a: u32) -> u8 { (self.0.peek32(ARM7, a) >> ((a & 3) * 8)) as u8 }
+    fn write8(&mut self, a: u32, v: u8) { self.0.poke8(a, v) }
 }
 
 fn merge64(old: u64, v: u32, mask: u32, sh: u32) -> u64 {

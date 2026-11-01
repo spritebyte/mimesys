@@ -698,6 +698,7 @@ fn wifi_chip_startup() {
 #[ignore]
 fn nds_report() {
     let mut s = NdsSystem::from_rom(HW_TEST, "hw_test", &[]).unwrap();
+    s.set_option("debug_report", 1);
     for _ in 0..600 { s.run_frame(0); }
 }
 
@@ -738,4 +739,222 @@ fn firmware_flash_writes() {
     cmd(&mut spi, &[0x06]);
     cmd(&mut spi, &[0xDB, 0x03, 0xFA, 0x00]);
     assert_eq!(cmd(&mut spi, &[0x03, 0x03, 0xFA, 0x00, 0])[4], 0xFF, "page erased");
+}
+
+// ---------------------------------------------------------------- sound
+
+fn snd(n: &mut Nds, a: u32, v: u32) { n.io_write(ARM7, a, v, 0xFFFF_FFFF); }
+/// Run the sound unit for `ms` milliseconds; the 44.1 kHz stereo output.
+fn play(n: &mut Nds, ms: u64) -> Vec<f32> {
+    n.cycles7 += 33_514 * ms;
+    n.sound_sync();
+    n.sound.drain()
+}
+
+#[test]
+fn sound_pcm16_one_shot_and_output_rate() {
+    let mut s = blank_2d();
+    let n = &mut s.nds;
+    // 1000 PCM16 samples of +0x4000 in main RAM
+    for i in 0..1000 { n.main_ram[0x1000 + i * 2..0x1002 + i * 2].copy_from_slice(&0x4000i16.to_le_bytes()); }
+    snd(n, 0x0400_0500, 0x807F);                                // master on, volume 127
+    snd(n, 0x0400_0404, 0x0200_1000);                           // SAD
+    snd(n, 0x0400_0408, 0x10000 - 512);                         // TMR: one sample per mixer tick (32.7 kHz)
+    snd(n, 0x0400_040C, 500);                                   // LEN: 500 words = 1000 samples
+    snd(n, 0x0400_0400, 0x8000_0000 | 2 << 27 | 1 << 29 | 64 << 16 | 127);   // start, one-shot, PCM16, centre, vol 127
+    let out = play(n, 10);
+    assert!((440..=442).contains(&(out.len() / 2)), "10 ms at 44.1 kHz: {} frames", out.len() / 2);
+    let (l, r) = (out[100], out[101]);
+    assert!(l > 0.2 && (l - r).abs() < 1e-6, "centred: {l} {r}");
+    assert!(n.io_read(ARM7, 0x0400_0400) & 0x8000_0000 != 0, "still playing at 10 ms");
+    let out = play(n, 30);
+    assert!(n.io_read(ARM7, 0x0400_0400) & 0x8000_0000 == 0, "one-shot finished (1000 samples = 30.6 ms)");
+    assert_eq!(out[out.len() - 2], 0.0);
+}
+
+#[test]
+fn sound_adpcm_psg_and_noise() {
+    let mut s = blank_2d();
+    let n = &mut s.nds;
+    snd(n, 0x0400_0500, 0x807F);
+    // ADPCM: header (value 0, index 0), then nibbles 7, 7, ...: +11 first (7/8 + 7/4 + 7/2 + 7)
+    n.main_ram[0x2000..0x2004].copy_from_slice(&[0, 0, 0, 0]);
+    for i in 0..16 { n.main_ram[0x2004 + i] = 0x77; }
+    snd(n, 0x0400_0414, 0x0200_2000);
+    snd(n, 0x0400_0418, 0x10000 - 512);
+    snd(n, 0x0400_041C, 4);
+    snd(n, 0x0400_0410, 0x8000_0000 | 1 << 27 | 2 << 29 | 127 | 3 << 8);    // loop, ADPCM, divider /16 off (shift 0)
+    let ch = &n.sound.ch[1];
+    assert_eq!(ch.cnt >> 29 & 3, 2);
+    play(n, 1);
+    // rising: it's loud and positive after a few samples
+    let out = play(n, 1);
+    assert!(out[0] > 0.0);
+    // PSG on channel 8, 50% duty: a square wave
+    snd(n, 0x0400_0410, 0);
+    snd(n, 0x0400_0488, 0x10000 - 512);
+    snd(n, 0x0400_0480, 0x8000_0000 | 3 << 29 | 3 << 24 | 64 << 16 | 127);
+    let out = play(n, 2);
+    let pos = out.iter().step_by(2).filter(|&&x| x > 0.0).count();
+    let neg = out.iter().step_by(2).filter(|&&x| x < 0.0).count();
+    assert!(pos > 20 && neg > 20, "square wave: {pos} up, {neg} down");
+    // PSG duty on channel 0 makes no sound; noise on channel 14 does
+    snd(n, 0x0400_0480, 0);
+    snd(n, 0x0400_0400, 0x8000_0000 | 3 << 29 | 64 << 16 | 127);
+    play(n, 1);                                                 // the resampler's last blend of the square wave
+    assert!(play(n, 1).iter().all(|&x| x == 0.0));
+    snd(n, 0x0400_04E8, 0x10000 - 512);
+    snd(n, 0x0400_04E0, 0x8000_0000 | 3 << 29 | 64 << 16 | 127);
+    let out = play(n, 2);
+    assert!(out.iter().any(|&x| x > 0.0) && out.iter().any(|&x| x < 0.0), "noise");
+}
+
+#[test]
+fn sound_capture_records_the_mix() {
+    let mut s = blank_2d();
+    let n = &mut s.nds;
+    snd(n, 0x0400_0500, 0x807F);
+    // channel 0: constant PCM8 0x40, panned hard left
+    for i in 0..64 { n.main_ram[0x3000 + i] = 0x40; }
+    snd(n, 0x0400_0404, 0x0200_3000);
+    snd(n, 0x0400_0408, 0x10000 - 512);
+    snd(n, 0x0400_040C, 16);
+    snd(n, 0x0400_0400, 0x8000_0000 | 1 << 27 | 127);          // loop, PCM8, pan 0 (left), vol 127
+    // capture 0 at channel 1's rate: PCM16, one-shot, 4 words, into 0x02004000
+    snd(n, 0x0400_0418, 0x10000 - 512);
+    snd(n, 0x0400_0510, 0x0200_4000);
+    snd(n, 0x0400_0514, 4);
+    snd(n, 0x0400_0508, 0x84);
+    play(n, 2);
+    let v = i16::from_le_bytes([n.main_ram[0x4002], n.main_ram[0x4003]]);
+    assert!(v > 0x1000, "captured the left mix: {v:#x}");
+    assert_eq!(n.io_read(ARM7, 0x0400_0508) & 0x80, 0, "one-shot capture done");
+}
+
+fn tri(n: &mut Nds, attr: u32, color: u16, z: f32, scale: f32) {
+    gx(n, 0x29, &[attr]);
+    gx(n, 0x40, &[0]);
+    gx(n, 0x20, &[color as u32]);
+    v16(n, -scale, -scale, z); v16(n, scale, -scale, z); v16(n, 0.0, scale, z);
+}
+
+#[test]
+fn shadow_polygons_draw_through_the_stencil() {
+    let mut s = blank_2d();
+    let n = &mut s.nds;
+    setup_3d(n);
+    io(n, 0x0400_0060, 8);                                      // blending on
+    gx(n, 0x29, &[0x011F_00C0]);                                // floor: opaque, id 1, a full-screen quad
+    gx(n, 0x40, &[1]);
+    gx(n, 0x20, &[GREEN as u32]);
+    v16(n, -1.0, -1.0, 0.5); v16(n, 1.0, -1.0, 0.5); v16(n, 1.0, 1.0, 0.5); v16(n, -1.0, 1.0, 0.5);
+    // shadow mask (mode 3, id 0) behind the floor in the middle: its depth test fails there
+    tri(n, 0x000F_00F0, 0, 0.8, 0.5);
+    // shadow (mode 3, id 2), black, half transparent, in front of everything, full size
+    tri(n, 0x020F_00F0, 0, -0.5, 1.0);
+    swap(n);
+    let mid = frame3d(n, 128, 110).0;
+    let edge = frame3d(n, 5, 186).0;
+    assert!((mid >> 5) & 31 < 25, "shadowed: {mid:#x}");
+    assert_eq!(edge, GREEN, "outside the mask: untouched");
+}
+
+#[test]
+fn edge_marking_outlines_opaque_polygons() {
+    let mut s = blank_2d();
+    let n = &mut s.nds;
+    setup_3d(n);
+    io(n, 0x0400_0060, 0x20);                                   // edge marking
+    io16(n, 0x0400_0332, GREEN);                                // EDGE_COLOR[1]: ids 8-15
+    tri(n, 0x081F_00C0, RED, 0.0, 1.0);                         // id 8
+    swap(n);
+    assert_eq!(frame3d(n, 128, 150).0, RED, "inside");
+    // the bottom row of the triangle is an edge against the clear plane
+    let bottom = (0..192).rev().find(|&y| frame3d(n, 128, y).1 != 0).unwrap();
+    assert_eq!(frame3d(n, 128, bottom).0, GREEN, "edge at row {bottom}");
+}
+
+#[test]
+fn anti_aliasing_softens_outlines() {
+    let mut s = blank_2d();
+    let n = &mut s.nds;
+    setup_3d(n);
+    io(n, 0x0400_0060, 0x10);                                   // anti-aliasing
+    tri(n, 0x011F_00C0, RED, 0.0, 1.0);                         // id 1, over the clear plane
+    swap(n);
+    // along the slanted left edge, some pixel in each row is partly transparent
+    let row = 100;
+    let first = (0..256).find(|&x| frame3d(n, x, row).1 != 0).unwrap();
+    assert!(frame3d(n, first, row).1 < 31, "edge alpha {}", frame3d(n, first, row).1);
+    assert_eq!(frame3d(n, 128, row).1, 31, "inside stays solid");
+    // in front of another object (green wall, id 2): the edge mixes the two colours
+    gx(n, 0x29, &[0x021F_00C0]);
+    gx(n, 0x40, &[1]);
+    gx(n, 0x20, &[GREEN as u32]);
+    v16(n, -1.0, -1.0, 0.5); v16(n, 1.0, -1.0, 0.5); v16(n, 1.0, 1.0, 0.5); v16(n, -1.0, 1.0, 0.5);
+    tri(n, 0x011F_00C0, RED, 0.0, 1.0);
+    swap(n);
+    let mixed = (0..256).map(|x| frame3d(n, x, row).0).find(|&c| c & 31 > 0 && (c >> 5) & 31 > 0);
+    assert!(mixed.is_some(), "an edge pixel with both red and green");
+    // without anti-aliasing: no mixed pixels
+    io(n, 0x0400_0060, 0);
+    gx(n, 0x29, &[0x021F_00C0]);
+    gx(n, 0x40, &[1]);
+    gx(n, 0x20, &[GREEN as u32]);
+    v16(n, -1.0, -1.0, 0.5); v16(n, 1.0, -1.0, 0.5); v16(n, 1.0, 1.0, 0.5); v16(n, -1.0, 1.0, 0.5);
+    tri(n, 0x011F_00C0, RED, 0.0, 1.0);
+    swap(n);
+    assert!((0..256).all(|x| { let c = frame3d(n, x, row).0; !(c & 31 > 0 && (c >> 5) & 31 > 0) }));
+}
+
+#[test]
+fn microphone_silence_and_blowing() {
+    let mut spi = Spi::new(nds_spi::make_firmware());
+    let mut sample = |spi: &mut Spi, eight: bool| -> u16 {
+        spi.write_cnt(0x8A00, 0xFFFF);                         // touchscreen, hold
+        spi.write_data(0xE4 | if eight { 0x08 } else { 0 });   // channel 6 (AUX = mic)
+        spi.write_data(0);
+        let hi = spi.data as u16;
+        spi.write_cnt(0x8200, 0xFFFF);
+        spi.write_data(0);
+        let lo = spi.data as u16;
+        if eight { (hi << 1) | (lo >> 7) } else { (hi << 5) | (lo >> 3) }
+    };
+    assert_eq!(sample(&mut spi, false), 0x800, "silence: the midpoint");
+    assert_eq!(sample(&mut spi, true), 0x80, "8-bit silence");
+    spi.mic = true;
+    let vals: Vec<u16> = (0..32).map(|_| sample(&mut spi, false)).collect();
+    let spread = vals.iter().max().unwrap() - vals.iter().min().unwrap();
+    assert!(spread > 0x800, "blowing is loud: spread {spread:#x}");
+}
+
+#[test]
+fn screen_layouts_and_touch() {
+    let mut s = blank_2d();
+    // red top screen, blue bottom screen
+    for y in 0..384 { for x in 0..256 {
+        let i = (y * 256 + x) * 4;
+        s.nds.framebuffer[i..i + 4].copy_from_slice(if y < 192 { &[255, 0, 0, 255] } else { &[0, 0, 255, 255] });
+    } }
+    let px = |s: &NdsSystem, x: usize, y: usize| { let w = s.display_info().buffer_width as usize; let i = (y * w + x) * 4; s.framebuffer()[i..i + 3].to_vec() };
+    s.set_option("screen_layout", 1);
+    assert_eq!((s.display_info().buffer_width, s.display_info().buffer_height), (512, 192));
+    assert_eq!(px(&s, 10, 10), [255, 0, 0], "top screen on the left");
+    assert_eq!(px(&s, 300, 10), [0, 0, 255], "touch screen on the right");
+    s.set_pointer(256 + 40, 30, 1);
+    assert_eq!(s.nds.spi.touch, (40, 30, true));
+    s.set_option("screen_swap", 1);
+    assert_eq!(px(&s, 10, 10), [0, 0, 255], "swapped");
+    s.set_pointer(40, 30, 1);
+    assert_eq!(s.nds.spi.touch, (40, 30, true));
+    s.set_option("screen_layout", 3);
+    assert_eq!((s.display_info().buffer_width, s.display_info().buffer_height), (256, 192));
+    assert_eq!(px(&s, 10, 10), [0, 0, 255], "touch screen only");
+    s.set_option("screen_layout", 2);
+    s.set_pointer(40, 30, 1);
+    assert!(!s.nds.spi.touch.2, "no touch screen shown: no touch");
+    s.set_option("screen_layout", 0);
+    s.set_option("screen_swap", 0);
+    s.set_pointer(40, 192 + 30, 1);
+    assert_eq!(s.nds.spi.touch, (40, 30, true), "stacked as before");
 }
