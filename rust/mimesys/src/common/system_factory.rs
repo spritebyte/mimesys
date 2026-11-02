@@ -69,7 +69,7 @@ fn load_cartridge(system: CartSystem, rom: &[u8], filename: &str, bios: Option<V
             Ok(Box::new(core))
         }
         CartSystem::Snes => {
-            let core = crate::snes::snes_system::SnesSystem::from_rom(rom, filename)
+            let core = crate::snes::snes_system::SnesSystem::from_rom(rom, filename, bios_or_empty)
                 .map_err(|e| format!("SNES from_rom failed: {e}"))?;
             Ok(Box::new(core))
         }

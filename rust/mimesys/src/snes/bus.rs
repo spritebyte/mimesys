@@ -6,7 +6,9 @@
 //! cycle 6 (ares's CPU::wait). A line is 1364 clocks, a frame 262 lines (NTSC); the DRAM
 //! refresh steals 40 clocks a line. Events by position in the line:
 //!   H 0      new line; line 0 starts HDMA (reload), line 225 starts vblank (NMI)
-//!   H 1096   the line is drawn (rows are lines 1-224)
+//!   H 512    the line is drawn (rows are lines 1-224): register writes in the first
+//!            half of a line show on it, later ones from the next line (as ares's
+//!            scanline renderer; a few games want it earlier, see `render_point`)
 //!   H 1104   HDMA writes for the next line (lines 0-224)
 //!   H/V IRQ  at HTIME dots (x4 clocks) on matching lines
 //!
@@ -18,15 +20,19 @@ use crate::common::cpu::w65816::Bus816;
 use crate::snes::cart::Cart;
 use crate::snes::ppu::{Ppu, HEIGHT, WIDTH};
 use crate::snes::smp::Smp;
+use crate::snes::superfx::{self, Gsu};
+use crate::snes::sa1::Sa1;
+use crate::snes::necdsp::{NecDsp, NecMap};
+use crate::snes::cx4::{self, Cx4};
+use crate::common::cheats::{Cheats, CheatSystem};
 
 pub const LINE_CLOCKS: u32 = 1364;
 pub const LINES: u32 = 262;
 const VDISP: u32 = 225;
-const RENDER_AT: u32 = 1096;
 const HDMA_AT: u32 = 1104;
 const REFRESH_AT: u32 = 538;
 
-#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, Debug, Serialize, Deserialize)]
 pub struct Channel {
     pub dmap: u8,
     pub bbad: u8,
@@ -42,6 +48,27 @@ pub struct Channel {
     hdma_do: bool,
 }
 
+fn default_render_at() -> u32 { 512 }
+
+/// Where in the line to draw it: mid-line, earlier for the games ares lists as needing it.
+fn render_point(title: &str) -> u32 {
+    match title {
+        "ADVENTURES OF FRANKEN" | "AIR STRIKE PATROL" | "DESERT FIGHTER" | "FIREPOWER 2000" | "SUPER SWIV"
+        | "NHL '94" | "NHL PROHOCKEY'94" => 32,
+        "Sugoro Quest++" => 128,
+        _ => 512,
+    }
+}
+
+impl Channel {
+    /// The DMA registers read FF after power on (a stray transfer then goes to 21FF,
+    /// where nothing answers).
+    fn power_on() -> Self {
+        Self { dmap: 0xFF, bbad: 0xFF, a1t: 0xFFFF, a1b: 0xFF, das: 0xFFFF, dasb: 0xFF, a2a: 0xFFFF, ntrl: 0xFF, unused: 0xFF,
+               hdma_done: false, hdma_do: false }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Bus {
     #[serde(with = "serde_bytes")]
@@ -49,6 +76,25 @@ pub struct Bus {
     pub cart: Cart,
     pub ppu: Ppu,
     pub apu: Smp,
+    /// Super FX on the cartridge
+    pub gsu: Option<Gsu>,
+    /// SA-1 on the cartridge
+    pub sa1: Option<Box<Sa1>>,
+    /// NEC µPD7725 DSP on the cartridge, and where it answers
+    pub nec: Option<Box<NecDsp>>,
+    #[serde(default)]
+    pub nec_map: Option<NecMap>,
+    /// Cx4 (Mega Man X2 / X3), when the cartridge has one and its firmware was found
+    pub cx4: Option<Box<Cx4>>,
+    /// the CPU's last bus address (the SA-1 waits when both want the same memory)
+    #[serde(default)]
+    mar: u32,
+    /// where in a line it is drawn (master clocks)
+    #[serde(default = "default_render_at")]
+    render_at: u32,
+    /// channels whose general DMA an HDMA has cut short
+    #[serde(default)]
+    hdma_kill: u8,
     pub dma: [Channel; 8],
     // 5A22 registers
     pub nmitimen: u8,
@@ -82,20 +128,40 @@ pub struct Bus {
     pub mdr: u8,
     #[serde(skip)]
     pub framebuffer: Vec<u8>,
+    /// debug report: the last CPU writes to the APU ports (frame, line, port, value)
+    #[serde(skip)]
+    pub port_log: Vec<(u32, u16, u8, u8)>,
+    #[serde(skip)]
+    pub port_log_on: bool,
+    /// debug report: PPU register writes this frame (line, H clock, register, value);
+    /// register 0 = the H/V IRQ fired
+    #[serde(skip)]
+    pub ppu_log: Vec<(u16, u16, u8, u8)>,
+    #[serde(skip)]
+    pub ppu_log_last: Vec<(u16, u16, u8, u8)>,
     /// master clocks since power on
     pub clocks: u64,
+    /// cheat codes (Game Genie patches ROM reads, Pro Action Replay writes RAM each frame)
+    #[serde(skip, default = "no_cheats")]
+    pub cheats: Cheats,
 }
+
+fn no_cheats() -> Cheats { Cheats::new(CheatSystem::Snes) }
 
 impl Bus {
     pub fn new(cart: Cart) -> Self {
+        let gsu = (cart.map == crate::snes::cart::Map::SuperFx).then(Gsu::new);
+        let sa1 = (cart.map == crate::snes::cart::Map::Sa1).then(|| Box::new(Sa1::new()));
+        let render_at = render_point(&cart.title);
         Self {
-            wram: vec![0x55; 0x20000], cart, ppu: Ppu::new(), apu: Smp::new(), dma: [Channel::default(); 8],
+            wram: vec![0x55; 0x20000], cart, ppu: Ppu::new(), apu: Smp::new(), gsu, sa1, nec: None, nec_map: None, cx4: None, mar: 0, render_at, hdma_kill: 0, dma: [Channel::power_on(); 8],
             nmitimen: 0, wrio: 0xFF, wrmpya: 0xFF, wrdiv: 0xFFFF, htime: 0x1FF, vtime: 0x1FF, hdmaen: 0, memsel: 0,
             rddiv: 0, rdmpy: 0, joy: [0; 4], wram_addr: 0,
             nmi_flag: false, nmi_pending: false, irq_flag: false,
             pads: [0; 2], pad_latch: false, pad_shift: [0; 2], autojoy_busy_until: 0,
             h: 0, v: 0, frame: 0, frame_done: false, refreshed: false, mdr: 0,
-            framebuffer: vec![0; WIDTH * HEIGHT * 4], clocks: 0,
+            framebuffer: vec![0; WIDTH * HEIGHT * 4], clocks: 0, port_log: Vec::new(), port_log_on: false, ppu_log: Vec::new(), ppu_log_last: Vec::new(),
+            cheats: no_cheats(),
         }
     }
 
@@ -116,7 +182,7 @@ impl Bus {
         while n > 0 {
             // the next event in this line
             let mut next = LINE_CLOCKS;
-            for at in [REFRESH_AT, RENDER_AT, HDMA_AT, self.hirq_pos()] {
+            for at in [REFRESH_AT, self.render_at, HDMA_AT, self.hirq_pos()] {
                 if at > self.h && at < next { next = at; }
             }
             let step = (next - self.h).min(n);
@@ -125,6 +191,15 @@ impl Bus {
             n -= step;
             self.clocks += step as u64;
             self.apu.run(step);
+            if let Some(g) = &mut self.gsu {
+                g.run(step, &mut superfx::Mem { rom: &self.cart.rom, ram: &mut self.cart.sram });
+            }
+            if let Some(d) = &mut self.nec { d.run(step); }
+            if let Some(c) = &mut self.cx4 { c.run(step, &mut cx4::Mem { rom: &self.cart.rom, ram: &mut self.cart.sram }); }
+            if let Some(s) = &mut self.sa1 {
+                s.run(step, &self.cart.rom, &mut self.cart.sram, self.mar);
+                if s.st.bw_written { s.st.bw_written = false; if self.cart.battery { self.cart.sram_dirty = true; } }
+            }
             self.events(from, self.h);
             if self.h >= LINE_CLOCKS { self.h -= LINE_CLOCKS; self.new_line(); }
         }
@@ -138,7 +213,7 @@ impl Bus {
     fn events(&mut self, from: u32, to: u32) {
         let hit = |at: u32| from < at && at <= to;
         if hit(REFRESH_AT) && !self.refreshed { self.refreshed = true; self.tick(40); }
-        if hit(RENDER_AT) && self.v >= 1 && self.v as usize <= HEIGHT {
+        if hit(self.render_at) && self.v >= 1 && self.v as usize <= HEIGHT {
             let row = self.v as usize - 1;
             self.ppu.render_line(row, &mut self.framebuffer);
         }
@@ -147,6 +222,7 @@ impl Bus {
         let hen = self.nmitimen & 0x10 != 0;
         let ven = self.nmitimen & 0x20 != 0;
         if (hen || ven) && hit(self.hirq_pos()) && (!ven || self.v == self.vtime as u32) {
+            if self.port_log_on && !self.irq_flag && self.ppu_log.len() < 400 { self.ppu_log.push((self.v as u16, self.h as u16, 0, 0)); }
             self.irq_flag = true;
         }
     }
@@ -160,7 +236,9 @@ impl Bus {
             self.frame_done = true;
         }
         if self.v == 0 {
+            self.ppu_log_last = std::mem::take(&mut self.ppu_log);
             self.nmi_flag = false;
+            self.ppu.frame_start();
             self.hdma_init();
         }
         if self.v == VDISP {
@@ -171,7 +249,9 @@ impl Bus {
         }
     }
 
-    pub fn irq_line(&self) -> bool { self.irq_flag }
+    pub fn irq_line(&self) -> bool {
+        self.irq_flag || self.cx4.as_ref().map_or(false, |c| c.irq_line) || self.gsu.as_ref().map_or(false, |g| g.irq) || self.sa1.as_ref().map_or(false, |s| s.st.cpu_irq_line)
+    }
 
     // ---------------- joypads ----------------
 
@@ -237,11 +317,22 @@ impl Bus {
     fn write_io(&mut self, a: u16, v: u8) {
         match a {
             0x2100..=0x2133 => {
+                if self.port_log_on {
+                    // the debug report's PPU log: registers, not the data ports
+                    let data_port = matches!(a, 0x2104 | 0x2118 | 0x2119 | 0x2122);
+                    if !data_port && self.ppu_log.len() < 400 { self.ppu_log.push((self.v as u16, self.h as u16, a as u8, v)); }
+                }
                 let disp = self.in_display();
                 if a == 0x2100 && self.ppu.forced_blank() && v & 0x80 == 0 && self.v == VDISP { self.ppu.vblank(); }
                 self.ppu.write(a as u8, v, disp);
             }
-            0x2140..=0x217F => self.apu.cpu_write((a & 3) as usize, v),
+            0x2140..=0x217F => {
+                if self.port_log_on {
+                    if self.port_log.len() == 24 { self.port_log.remove(0); }
+                    self.port_log.push((self.frame as u32, self.v as u16, (a & 3) as u8, v));
+                }
+                self.apu.cpu_write((a & 3) as usize, v)
+            }
             0x2180 => { self.wram[self.wram_addr as usize] = v; self.wram_addr = (self.wram_addr + 1) & 0x1FFFF; }
             0x2181 => self.wram_addr = (self.wram_addr & 0x1FF00) | v as u32,
             0x2182 => self.wram_addr = (self.wram_addr & 0x100FF) | (v as u32) << 8,
@@ -295,6 +386,52 @@ impl Bus {
     // ---------------- memory ----------------
 
     /// A read without side effects on timing (DMA and the CPU both use it).
+    /// Read ROM / WRAM without side effects (debug report); 0 elsewhere.
+    pub fn peek(&self, a: u32) -> u8 {
+        let (bank, off) = (a >> 16 & 0xFF, a & 0xFFFF);
+        if bank == 0x7E || bank == 0x7F { return self.wram[(a & 0x1FFFF) as usize]; }
+        if bank & 0x40 == 0 && off < 0x2000 { return self.wram[off as usize]; }
+        self.cart.read(a).unwrap_or(0)
+    }
+
+    /// A cartridge read; while the Super FX runs, it may own the ROM (the CPU sees
+    /// fixed vectors) and its RAM (open bus).
+    fn cart_read(&mut self, a: u32) -> Option<u8> {
+        if let Some(c) = &mut self.cx4 {
+            match c.cpu_read(a) {
+                cx4::CpuRead::Value(v) => return Some(v),
+                cx4::CpuRead::OpenBus => return None,
+                cx4::CpuRead::Cart => {}
+            }
+        }
+        if let Some(m) = self.nec_map {
+            if let Some(sr) = m.hit(a) { return self.nec.as_mut().map(|d| d.read(sr)); }
+        }
+        if let Some(s) = &mut self.sa1 { return s.cpu_read(&self.cart.rom, &self.cart.sram, a, self.mdr); }
+        if let Some(g) = &self.gsu {
+            let b = (a >> 16) as u8 & 0x7F;
+            let off = a as u16;
+            let rom = (b < 0x40 && off >= 0x8000) || (0x40..0x60).contains(&b);
+            let ram = (b < 0x40 && (0x6000..0x8000).contains(&off)) || b == 0x70 || b == 0x71;
+            if rom && g.rom_owned() { return Some(superfx::rom_vector(a)); }
+            if ram && g.ram_owned() { return None; }
+        }
+        self.cart.read(a)
+    }
+
+    fn cart_write(&mut self, a: u32, v: u8) {
+        if let Some(c) = &mut self.cx4 { if c.cpu_write(a, v) { return; } }
+        if let Some(m) = self.nec_map {
+            if let Some(sr) = m.hit(a) { if let Some(d) = &mut self.nec { d.write(sr, v); } return; }
+        }
+        if let Some(s) = &mut self.sa1 {
+            s.cpu_write(&self.cart.rom, &mut self.cart.sram, a, v);
+            if s.st.bw_written { s.st.bw_written = false; if self.cart.battery { self.cart.sram_dirty = true; } }
+            return;
+        }
+        self.cart.write(a, v);
+    }
+
     fn bus_read(&mut self, a: u32) -> u8 {
         let bank = (a >> 16) as u8;
         let off = a as u16;
@@ -304,12 +441,24 @@ impl Bus {
             match off {
                 0x0000..=0x1FFF => Some(self.wram[off as usize]),
                 0x2100..=0x21FF | 0x4000..=0x43FF => self.read_io(off),
-                _ => self.cart.read(a),
+                0x3000..=0x34FF if self.gsu.is_some() => Some(self.gsu.as_mut().unwrap().read_io(off)),
+                _ => self.cart_read(a),
             }
         } else {
-            self.cart.read(a)
+            self.cart_read(a)
         };
-        v.unwrap_or(self.mdr)
+        let v = v.unwrap_or(self.mdr);
+        if self.cheats.is_empty() { return v; }
+        // a code for 00:8000 also hits its FastROM mirror 80:8000 (and the other way)
+        self.cheats.patched(a, v).or_else(|| self.cheats.patched(a ^ 0x800000, v)).unwrap_or(v)
+    }
+
+    /// Pro Action Replay codes: called once per frame.
+    pub fn apply_cheat_writes(&mut self) {
+        for i in 0..self.cheats.ram_writes().len() {
+            let w = self.cheats.ram_writes()[i];
+            self.bus_write(w.addr, w.value);
+        }
     }
 
     fn bus_write(&mut self, a: u32, v: u8) {
@@ -320,11 +469,12 @@ impl Bus {
             match off {
                 0x0000..=0x1FFF => self.wram[off as usize] = v,
                 0x2100..=0x21FF | 0x4000..=0x43FF => self.write_io(off, v),
-                _ => self.cart.write(a, v),
+                0x3000..=0x34FF if self.gsu.is_some() => self.gsu.as_mut().unwrap().write_io(off, v),
+                _ => self.cart_write(a, v),
             }
             return;
         }
-        self.cart.write(a, v);
+        self.cart_write(a, v);
     }
 
     // ---------------- DMA ----------------
@@ -340,6 +490,7 @@ impl Bus {
 
     fn transfer(&mut self, ch: usize, a: u32, i: u32) {
         let c = self.dma[ch];
+        self.mar = a;
         let b = 0x2100 | c.bbad.wrapping_add(Self::b_offset(c.dmap, i)) as u32;
         // WRAM to WRAM through 2180 doesn't work
         let valid = b != 0x2180 || ((a & 0xFE0000) != 0x7E0000 && (a & 0x40E000) != 0);
@@ -357,12 +508,17 @@ impl Bus {
 
     fn dma_run(&mut self, mask: u8) {
         if mask == 0 { return; }
+        // HDMA set up or run on a channel cancels its general DMA, even one still
+        // waiting its turn behind a long transfer on a lower channel
+        self.hdma_kill = 0;
         self.tick(8);
         for ch in 0..8 {
-            if mask & (1 << ch) == 0 { continue; }
+            if mask & (1 << ch) == 0 || self.hdma_kill & (1 << ch) != 0 { continue; }
             self.tick(8);
             let mut i = 0u32;
             loop {
+                // HDMA starting or running on this channel stops its general DMA
+                if self.hdma_kill & (1 << ch) != 0 { break; }
                 let c = self.dma[ch];
                 let a = (c.a1b as u32) << 16 | c.a1t as u32;
                 self.transfer(ch, a, i);
@@ -380,6 +536,7 @@ impl Bus {
             self.dma[ch].hdma_done = false;
             self.dma[ch].hdma_do = false;
             if self.hdmaen & (1 << ch) == 0 { continue; }
+            self.hdma_kill |= 1 << ch;
             self.dma[ch].a2a = self.dma[ch].a1t;
             self.dma[ch].ntrl = 0;
             self.hdma_reload(ch);
@@ -387,10 +544,13 @@ impl Bus {
         if self.hdmaen != 0 { self.tick(18); }
     }
 
+    /// A channel at the end of its line count reads the next table entry: 8 master
+    /// clocks for the count, 16 more for an indirect address.
     fn hdma_reload(&mut self, ch: usize) {
         let c = self.dma[ch];
-        let v = self.bus_read((c.a1b as u32) << 16 | c.a2a as u32);
         if c.ntrl & 0x7F == 0 {
+            self.tick(8);
+            let v = self.bus_read((c.a1b as u32) << 16 | c.a2a as u32);
             let c = &mut self.dma[ch];
             c.ntrl = v;
             c.a2a = c.a2a.wrapping_add(1);
@@ -399,6 +559,7 @@ impl Bus {
             if c.dmap & 0x40 != 0 {
                 let bank = (c.a1b as u32) << 16;
                 let a = c.a2a;
+                self.tick(16);
                 let lo = self.bus_read(bank | a as u32);
                 let hi = self.bus_read(bank | a.wrapping_add(1) as u32);
                 let c = &mut self.dma[ch];
@@ -415,6 +576,7 @@ impl Bus {
         const LEN: [u32; 8] = [1, 2, 2, 4, 4, 4, 2, 4];
         for ch in 0..8 {
             if self.hdmaen & (1 << ch) == 0 || self.dma[ch].hdma_done { continue; }
+            self.hdma_kill |= 1 << ch;
             if self.dma[ch].hdma_do {
                 for i in 0..LEN[(self.dma[ch].dmap & 7) as usize] {
                     let c = self.dma[ch];
@@ -442,6 +604,7 @@ impl Bus {
 impl Bus816 for Bus {
     fn read(&mut self, a: u32) -> u8 {
         let w = self.wait(a);
+        self.mar = a;
         self.tick(w - 4);
         let v = self.bus_read(a);
         self.tick(4);
@@ -451,10 +614,11 @@ impl Bus816 for Bus {
     }
     fn write(&mut self, a: u32, v: u8) {
         let w = self.wait(a);
+        self.mar = a;
         self.tick(w);
         self.mdr = v;
         self.bus_write(a, v);
     }
     fn idle(&mut self) { self.tick(6); }
-    fn interrupt_pending(&self) -> bool { self.nmi_pending || self.irq_flag }
+    fn interrupt_pending(&self) -> bool { self.nmi_pending || self.irq_line() }
 }

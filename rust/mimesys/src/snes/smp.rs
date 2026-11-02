@@ -1,7 +1,7 @@
 //! The S-SMP: the SNES sound CPU (SPC700, `common/cpu/spc700.rs`) with its 64 KB of RAM,
 //! I/O registers (F0-FF), three timers, the four ports to the main CPU and a 64-byte
 //! boot ROM. Behaviour follows ares's `sfc/smp` (ISC). The DSP is only a register file
-//! here (`dsp_regs`); stage 3 adds the voices.
+//! in `dsp.rs`; it makes a sample every 32 SMP cycles (768 APU clocks).
 //!
 //! Clocking: the APU crystal is 24.607 MHz. An SMP cycle is 24 of those clocks at the
 //! default wait states (ares: steps of 2 on a /12 clock). The SMP runs in step with the
@@ -11,10 +11,13 @@
 //! The boot ROM is our own (Nintendo's is not shipped). It does the same job with the
 //! same protocol, entry point (FFC0) and stack: clear zero page, show AA BB, wait for CC,
 //! then take blocks: port 2/3 = address, port 1 = 0 to jump there or non-zero for data,
-//! port 0 = byte index (echoed), a jump of 2+ in port 0 starts the next command.
+//! port 0 = byte index (echoed, starting at 0), a jump of 2+ in port 0 starts the next
+//! command. Like the real one it waits for index 0 before a block: until then port 1 may
+//! already hold the block's first byte, which must not be taken for a command.
 
 use serde::{Deserialize, Serialize};
 use crate::common::cpu::spc700::{Spc700, SpcBus, P};
+use crate::snes::dsp::Dsp;
 
 pub const APU_HZ: i64 = 32_040 * 768;       // 24.607 MHz
 const MASTER_HZ: i64 = 21_477_272;
@@ -38,19 +41,19 @@ pub const IPL: [u8; 64] = [
     0xDD,                   // FFDC mov a,y
     0x5D,                   // FFDD mov x,a
     0xF0, 0x1B,             // FFDE beq exec
-    0x8D, 0x00,             // FFE0 mov y,#0
-    0x7E, 0xF4,             // FFE2 loop: cmp y,$F4
-    0xD0, 0x0D,             // FFE4 bne other
-    0xE4, 0xF5,             // FFE6 mov a,$F5
-    0xCB, 0xF4,             // FFE8 mov $F4,y
-    0xD7, 0x00,             // FFEA mov [$00]+y,a
-    0xFC,                   // FFEC inc y
-    0xD0, 0xF3,             // FFED bne loop
-    0xAB, 0x01,             // FFEF inc $01
-    0x2F, 0xEF,             // FFF1 bra loop
-    0x10, 0xED,             // FFF3 other: bpl loop         (an old index: keep waiting)
+    0xEB, 0xF4,             // FFE0 zero: mov y,$F4         (wait for the first index, 0:
+    0xD0, 0xFC,             // FFE2 bne zero                 port 1 may already hold data)
+    0x7E, 0xF4,             // FFE4 loop: cmp y,$F4
+    0xD0, 0x0B,             // FFE6 bne other
+    0xE4, 0xF5,             // FFE8 mov a,$F5
+    0xCB, 0xF4,             // FFEA mov $F4,y
+    0xD7, 0x00,             // FFEC mov [$00]+y,a
+    0xFC,                   // FFEE inc y
+    0xD0, 0xF3,             // FFEF bne loop
+    0xAB, 0x01,             // FFF1 inc $01                 (falls into the bpl)
+    0x10, 0xEF,             // FFF3 other: bpl loop         (an old index: keep waiting)
     0x7E, 0xF4,             // FFF5 cmp y,$F4               (read twice, as the real one)
-    0x10, 0xE9,             // FFF7 bpl loop
+    0x10, 0xEB,             // FFF7 bpl loop
     0x2F, 0xD9,             // FFF9 bra start
     0x1F, 0x00, 0x00,       // FFFB exec: jmp [$0000+x]     (x = 0)
     0xC0, 0xFF,             // FFFE reset vector
@@ -94,7 +97,9 @@ impl Timer {
 pub struct Mem {
     #[serde(with = "serde_bytes")]
     pub ram: Vec<u8>,
-    pub dsp_regs: Vec<u8>,
+    pub dsp: Dsp,
+    /// APU clocks toward the next DSP sample (one per 768)
+    dsp_clock: u32,
     pub dsp_addr: u8,
     /// CPU -> SMP (F4-F7 reads) and SMP -> CPU (2140-2143 reads)
     pub from_cpu: [u8; 4],
@@ -112,17 +117,20 @@ pub struct Mem {
     p_flag: bool,
     /// APU clocks used by the current instruction
     pub used: u32,
+    /// APU clocks since power on
+    #[serde(default)]
+    pub total: u64,
 }
 
 impl Mem {
     fn new() -> Self {
         Self {
-            ram: vec![0; 0x10000], dsp_regs: vec![0; 128], dsp_addr: 0,
+            ram: vec![0; 0x10000], dsp: Dsp::new(), dsp_clock: 0, dsp_addr: 0,
             from_cpu: [0; 4], to_cpu: [0; 4], aux: [0; 2],
             timers_disable: false, ram_writable: true, ram_disable: false, timers_enable: true,
             ext_wait: 0, int_wait: 0, ipl_enable: true,
             timers: [Timer::new(128), Timer::new(128), Timer::new(16)],
-            p_flag: false, used: 0,
+            p_flag: false, used: 0, total: 0,
         }
     }
 
@@ -138,9 +146,17 @@ impl Mem {
             Some(a) if a >= 0xFFC0 && self.ipl_enable => self.int_wait,
             Some(_) => self.ext_wait,
         } as usize;
-        self.used += (CYCLE[ws] >> halve as u32) * 12;
+        let clocks = (CYCLE[ws] >> halve as u32) * 12;
+        self.used += clocks;
+        self.total += clocks as u64;
+        self.dsp_clock += clocks;
         let run = self.running();
         for t in &mut self.timers { t.step(TIMER[ws] >> halve as u32, run); }
+    }
+
+    /// The DSP makes a sample every 768 APU clocks; an access in that cycle lands first.
+    fn run_dsp(&mut self) {
+        if self.dsp_clock >= 768 { self.dsp_clock -= 768; self.dsp.sample(&mut self.ram); }
     }
 
     fn read_ram(&self, a: u16) -> u8 {
@@ -152,7 +168,7 @@ impl Mem {
     fn read_io(&mut self, a: u16) -> u8 {
         match a {
             0xF2 => self.dsp_addr,
-            0xF3 => self.dsp_regs[(self.dsp_addr & 0x7F) as usize],
+            0xF3 => self.dsp.read(self.dsp_addr),
             0xF4..=0xF7 => self.from_cpu[(a - 0xF4) as usize],
             0xF8 | 0xF9 => self.aux[(a - 0xF8) as usize],
             0xFD..=0xFF => { let t = &mut self.timers[(a - 0xFD) as usize]; let v = t.stage3; t.stage3 = 0; v }
@@ -186,9 +202,7 @@ impl Mem {
             0xF2 => self.dsp_addr = v,
             0xF3 => {
                 if self.dsp_addr & 0x80 != 0 { return; }
-                let r = self.dsp_addr as usize;
-                // ENDX: any write clears it
-                self.dsp_regs[r] = if r == 0x7C { 0 } else { v };
+                self.dsp.write(self.dsp_addr, v);
             }
             0xF4..=0xF7 => self.to_cpu[(a - 0xF4) as usize] = v,
             0xF8 | 0xF9 => self.aux[(a - 0xF8) as usize] = v,
@@ -205,14 +219,16 @@ impl SpcBus for Mem {
         let mut v = self.read_ram(a);
         if a & 0xFFF0 == 0x00F0 { v = self.read_io(a); }
         if port { self.wait(true, Some(a)); }
+        self.run_dsp();
         v
     }
     fn write(&mut self, a: u16, v: u8) {
         self.wait(false, Some(a));
         if self.ram_writable && !self.ram_disable { self.ram[a as usize] = v; }
         if a & 0xFFF0 == 0x00F0 { self.write_io(a, v); }
+        self.run_dsp();
     }
-    fn idle(&mut self) { self.wait(false, None); }
+    fn idle(&mut self) { self.wait(false, None); self.run_dsp(); }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -243,4 +259,53 @@ impl Smp {
 
     pub fn cpu_read(&mut self, port: usize) -> u8 { self.mem.to_cpu[port] }
     pub fn cpu_write(&mut self, port: usize, v: u8) { self.mem.from_cpu[port] = v; }
+}
+
+impl Smp {
+    /// Load an .spc snapshot (sound RAM, SPC700 and DSP registers), as SPC players do:
+    /// the I/O registers come from RAM F0-FF, voices start silent, the echo buffer is
+    /// cleared. Used to check the DSP against reference recordings.
+    pub fn load_spc(data: &[u8]) -> Result<Self, String> {
+        if data.len() < 0x10180 || !data.starts_with(b"SNES-SPC700 Sound File Data") {
+            return Err("not an .spc file".into());
+        }
+        let mut s = Self::new();
+        s.cpu.pc = u16::from_le_bytes([data[0x25], data[0x26]]);
+        s.cpu.a = data[0x27];
+        s.cpu.x = data[0x28];
+        s.cpu.y = data[0x29];
+        s.cpu.p = data[0x2A];
+        s.cpu.s = data[0x2B];
+        let m = &mut s.mem;
+        m.ram.copy_from_slice(&data[0x100..0x10100]);
+        let io = |a: usize| data[0x100 + a];
+        m.ipl_enable = io(0xF1) & 0x80 != 0;
+        for i in 0..3 {
+            m.timers[i].enable = io(0xF1) >> i & 1 != 0;
+            m.timers[i].target = io(0xFA + i);
+            m.timers[i].stage3 = io(0xFD + i) & 15;
+            // players start the timers on their first cycle
+            m.timers[i].stage1 = true;
+            m.timers[i].line = true;
+            m.timers[i].stage0 = m.timers[i].period - 2;
+        }
+        m.dsp_addr = io(0xF2);
+        for i in 0..4 { m.from_cpu[i] = io(0xF4 + i); }
+        m.aux = [io(0xF8), io(0xF9)];
+        m.dsp.load(&data[0x10100..0x10180]);
+        let flg = m.dsp.regs[0x6C];
+        if flg & 0x20 == 0 {
+            let start = (m.dsp.regs[0x6D] as usize) << 8;
+            let end = (start + ((m.dsp.regs[0x7D] as usize & 15) << 11)).min(0x10000);
+            m.ram[start..end].fill(0);
+        }
+        Ok(s)
+    }
+
+    /// Run until the DSP has made `n` more stereo samples; returns them.
+    pub fn run_samples(&mut self, n: usize) -> Vec<i16> {
+        while self.mem.dsp.out.len() < n * 2 { self.run(1364); }
+        let rest = self.mem.dsp.out.split_off(n * 2);
+        std::mem::replace(&mut self.mem.dsp.out, rest)
+    }
 }

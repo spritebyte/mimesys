@@ -129,6 +129,14 @@ func _rebuild() -> void:
 		ldbg.toggled.connect(func(on): _put("lynx_debug", on))
 		_row("Debug", ldbg)
 
+	# SNES: debug report
+	if sys == "snes":
+		var sdbg := CheckBox.new()
+		sdbg.text = "Print where the CPU and sound CPU are (each second for 10 s, then every 10 s; for bug reports)"
+		sdbg.button_pressed = _opt("snes_debug")
+		sdbg.toggled.connect(func(on): _put("snes_debug", on))
+		_row("Debug", sdbg)
+
 	# 5200: Trak-Ball on controller 1, rolled with the mouse
 	if sys == "a5200":
 		var tb := CheckBox.new()

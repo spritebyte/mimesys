@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Map { LoRom, HiRom, ExHiRom }
+pub enum Map { LoRom, HiRom, ExHiRom, SuperFx, Sa1 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Cart {
@@ -30,6 +30,14 @@ pub struct Cart {
     /// the coprocessor byte (header +16), for "this game needs a chip we don't have yet"
     pub chipset: u8,
     pub region: u8,
+    /// the RAM is battery backed (worth saving)
+    pub battery: bool,
+    /// a Cx4 board (chipset F3, extended-header subtype 10)
+    pub cx4: bool,
+    /// coprocessor firmware found appended to the ROM image (8 KB for a µPD7725, 3 KB
+    /// for a Cx4)
+    #[serde(skip)]
+    pub firmware: Option<Vec<u8>>,
     #[serde(skip)]
     pub sram_dirty: bool,
 }
@@ -40,7 +48,7 @@ fn score(rom: &[u8], at: usize, want: Map) -> i32 {
     let mut s = 0;
     let mode = h[0x15];
     let map_ok = match want {
-        Map::LoRom => mode & 0x0F == 0 || mode & 0x0F == 2 || mode & 0x0F == 3,
+        Map::LoRom | Map::SuperFx | Map::Sa1 => mode & 0x0F == 0 || mode & 0x0F == 2 || mode & 0x0F == 3,
         Map::HiRom => mode & 0x0F == 1,
         Map::ExHiRom => mode & 0x0F == 5,
     };
@@ -59,18 +67,46 @@ fn score(rom: &[u8], at: usize, want: Map) -> i32 {
 
 impl Cart {
     pub fn new(data: &[u8]) -> Result<Self, String> {
-        let rom: Vec<u8> = if data.len() % 1024 == 512 { data[512..].to_vec() } else { data.to_vec() };
+        let mut rom: Vec<u8> = if data.len() % 1024 == 512 { data[512..].to_vec() } else { data.to_vec() };
+
         if rom.len() < 0x8000 { return Err(format!("{} bytes is too small for a SNES cartridge", rom.len())); }
         let cands = [(0x7FC0usize, Map::LoRom), (0xFFC0, Map::HiRom), (0x40FFC0, Map::ExHiRom)];
         let (at, map) = cands.iter().map(|&(a, m)| (score(&rom, a, m), a, m))
             .max_by_key(|&(s, a, _)| (s, -(a as i64))).map(|(_, a, m)| (a, m)).unwrap();
         let h = &rom[at..at + 0x40];
         let title = String::from_utf8_lossy(&h[0..21]).trim().to_string();
-        let sram_size = if h[0x18] > 0 && h[0x18] <= 0x08 { 1024usize << h[0x18] } else { 0 };
+        let mut sram_size = if h[0x18] > 0 && h[0x18] <= 0x08 { 1024usize << h[0x18] } else { 0 };
         let fast_rom = h[0x15] & 0x10 != 0;
         let chipset = h[0x16];
         let region = h[0x19];
-        Ok(Self { rom, sram: vec![0xFF; sram_size], map, title, fast_rom, chipset, region, sram_dirty: false })
+        let mut map = map;
+        let mut battery = sram_size > 0;
+        if map == Map::LoRom && (0x13..=0x1A).contains(&chipset) {
+            // Super FX: its RAM size is in the extended header (FFBD) when there is one
+            // (FFDA = 33); the early boards (Star Fox) have 32 KB
+            map = Map::SuperFx;
+            let ext = at >= 0x10 && rom[at + 0x1A] == 0x33;
+            let exp = if ext { rom[at - 0x10 + 0x0D] } else { 0 };
+            sram_size = if (1..=7).contains(&exp) { 1024 << exp } else { 32 * 1024 };
+            battery = matches!(chipset & 0x0F, 5 | 6 | 0xA);
+        } else if map == Map::LoRom && h[0x15] & 0x0F == 3 && (0x32..=0x36).contains(&chipset) {
+            // SA-1 (map mode 23): the header's RAM size is the BW-RAM
+            map = Map::Sa1;
+            battery = sram_size > 0 && matches!(chipset & 0x0F, 2 | 5 | 6);
+        }
+        // some dumps of DSP cartridges carry the chip's 8 KB firmware after the ROM
+        let mut firmware = None;
+        let nec = chipset & 0xF0 == 0 && (3..=5).contains(&(chipset & 0x0F));
+        if nec && rom.len() > 0x8000 && rom.len() % 0x8000 == 0x2000 {
+            firmware = Some(rom.split_off(rom.len() - 0x2000));
+        }
+        // Cx4: chipset F3 and the extended header's subtype (FFBF) = 10
+        let cx4 = map == Map::LoRom && chipset == 0xF3 && at >= 0x10 && rom[at - 1] == 0x10;
+        if cx4 && rom.len() > 0x8000 && rom.len() % 0x8000 == 0x0C00 {
+            firmware = Some(rom.split_off(rom.len() - 0x0C00));
+        }
+        let fill = if map == Map::SuperFx { 0 } else { 0xFF };
+        Ok(Self { rom, sram: vec![fill; sram_size], map, title, fast_rom, chipset, region, battery, cx4, firmware, sram_dirty: false })
     }
 
     /// ROM offset with mirroring for sizes that aren't a power of two (as ares's
@@ -107,6 +143,18 @@ impl Cart {
                 }
                 None
             }
+            Map::Sa1 => None,      // the bus asks the SA-1 board
+            Map::SuperFx => {
+                let n = self.sram.len().max(1);
+                if b < 0x40 {
+                    if a >= 0x8000 { return Some(self.rom_at(b << 15 | (a & 0x7FFF))); }
+                    if (0x6000..0x8000).contains(&a) && !self.sram.is_empty() { return Some(self.sram[(a - 0x6000) % n]); }
+                    return None;
+                }
+                if b < 0x60 { return Some(self.rom_at((b & 0x1F) << 16 | a)); }
+                if (b == 0x70 || b == 0x71) && !self.sram.is_empty() { return Some(self.sram[((b & 1) << 16 | a) % n]); }
+                None
+            }
             Map::HiRom | Map::ExHiRom => {
                 if (0x20..=0x3F).contains(&b) && (0x6000..0x8000).contains(&a) && !self.sram.is_empty() {
                     return Some(self.sram[((b - 0x20) * 0x2000 + a - 0x6000) % self.sram.len()]);
@@ -128,6 +176,9 @@ impl Cart {
         if self.sram.is_empty() { return; }
         let n = self.sram.len();
         let at = match self.map {
+            Map::SuperFx if b < 0x40 && (0x6000..0x8000).contains(&a) => (a - 0x6000) % n,
+            Map::SuperFx if b == 0x70 || b == 0x71 => ((b & 1) << 16 | a) % n,
+            Map::SuperFx | Map::Sa1 => return,
             Map::LoRom if (0x70..=0x7D).contains(&b) && a < 0x8000 => a % n,
             Map::LoRom if bank >= 0xFE && a < 0x8000 => a % n,
             Map::HiRom | Map::ExHiRom if (0x20..=0x3F).contains(&b) && (0x6000..0x8000).contains(&a) => ((b - 0x20) * 0x2000 + a - 0x6000) % n,
@@ -137,6 +188,9 @@ impl Cart {
     }
 
     /// Fast ROM speed applies to banks 80-FF (the header bit only says the game wants it).
+    /// A NEC µPD7725 DSP board (chipset 03-05)?
+    pub fn has_nec_dsp(&self) -> bool { self.chipset & 0xF0 == 0 && (3..=5).contains(&(self.chipset & 0x0F)) }
+
     pub fn is_rom(&self, addr: u32) -> bool {
         let bank = (addr >> 16) & 0x7F;
         addr & 0x8000 != 0 || bank >= 0x40

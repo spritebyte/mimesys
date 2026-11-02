@@ -134,8 +134,8 @@ impl GenesisSystem {
             ym_mclk: 0, fm_out: Vec::new(), fm_acc: (0.0, 0.0, 0), fm_phase: 0, mclk, current_frame: 0,
             title: header.title,
             save_filename: filename.to_string(),
-            save_battery_path: "user://Genesis/Save".to_string(),
-            save_state_path: "user://Genesis/State".to_string(),
+            save_battery_path: "user://GD_EMU/Genesis/Save".to_string(),
+            save_state_path: "user://GD_EMU/Genesis/State".to_string(),
         };
         sys.cpu.reset(&mut sys.bus);
         Ok(sys)
@@ -217,6 +217,7 @@ impl System for GenesisSystem {
             self.tz80 -= MCLK_PER_LINE;
             self.z80_int_end = (self.z80_int_end - MCLK_PER_LINE).max(0);
         }
+        self.bus.apply_cheat_writes();
         self.current_frame += 1;
     }
 
@@ -259,6 +260,7 @@ impl System for GenesisSystem {
     fn sample_rate(&self) -> u32 { SAMPLE_RATE }
     fn power_on(&mut self) {}
     fn power_off(&mut self) {}
+    fn cheats_mut(&mut self) -> Option<&mut crate::common::cheats::Cheats> { Some(&mut self.bus.cheats) }
     fn has_battery(&self) -> bool { !self.bus.sram.is_empty() || self.bus.eeprom.is_some() }
     fn save_filename(&self) -> &str { &self.save_filename }
     fn save_battery_path(&self) -> &str { &self.save_battery_path }

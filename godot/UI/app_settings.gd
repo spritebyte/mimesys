@@ -64,6 +64,7 @@ const OPTION_DEFAULTS := {
 	"nds_layout": 0,         # DS: 0 stacked, 1 side by side, 2 top screen only, 3 touch screen only
 	"nds_swap": false,       # DS: swap the screens' places
 	"lynx_debug": false,     # Lynx: print the sound registers every 10 s (for bug reports)
+	"snes_debug": false,     # SNES: print where the CPU and sound CPU are (for bug reports)
 	"lynx_rotate": 0,        # Lynx: 0 from the cartridge, 1 none, 2 left, 3 right
 	"a5200_trackball": false, # 5200: controller 1 is a Trak-Ball rolled with the mouse
 }

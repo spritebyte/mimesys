@@ -318,7 +318,7 @@ impl NesBus {
             let w = self.cheats.ram_writes()[i];
             match w.addr {
                 0x0000..=0x1FFF => self.ram[(w.addr & 0x07FF) as usize] = w.value,
-                0x6000..=0x7FFF => self.cartridge.mapper_mut().cpu_write(w.addr, w.value),
+                0x6000..=0x7FFF => self.cartridge.mapper_mut().cpu_write(w.addr as u16, w.value),
                 _ => {}
             }
         }

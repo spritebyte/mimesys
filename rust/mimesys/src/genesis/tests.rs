@@ -527,3 +527,19 @@ fn rom_mirroring_and_quackshot_layout() {
     assert_eq!(b.read_byte(0x040180), b'G', "lower half repeats");
     assert_eq!(b.read_byte(0x040000), 0x00, "not the upper half");
 }
+
+#[test]
+fn cheats_patch_rom_and_write_ram() {
+    let mut b = bus_with_rom();
+    let errs = b.cheats.set(&["SCRA-MBLE".to_string(), "008010:ABCD".to_string(), "FF0100:1234".to_string()]);
+    assert!(errs.iter().all(|e| e.is_empty()), "{errs:?}");
+    assert_eq!(b.read_word(0x008010), 0xABCD, "word read");
+    assert_eq!(b.read_byte(0x008011), 0xCD, "byte read");
+    assert_eq!(b.read_word(0x008012), 0x1213, "untouched");
+    assert_eq!(b.read_word(0x059C44), 0xB078, "Game Genie (the ROM mirrors up there)");
+    assert_eq!(b.read_word(0xFF0100), 0x0000, "RAM codes wait for the end of the frame");
+    b.apply_cheat_writes();
+    assert_eq!(b.read_word(0xFF0100), 0x1234);
+    b.cheats.set(&[]);
+    assert_eq!(b.read_word(0x008010), 0x1011);
+}

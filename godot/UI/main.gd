@@ -440,7 +440,8 @@ func _apply_display_options() -> void:
 	emu_system.set_option("trackball", 1 if trackball else 0)
 	# GBA cartridge clock (Pokemon etc.): local time = UTC + this many minutes
 	emu_system.set_option("rtc_utc_offset", Time.get_time_zone_from_system().bias)
-	var dbg_key := "nds_debug" if sys == "nds" else ("lynx_debug" if sys == "lynx" else "")
+	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug"}
+	var dbg_key: String = dbg_keys.get(sys, "")
 	emu_system.set_option("debug_report", 1 if dbg_key != "" and AppSettings.get_option(sys, dbg_key) else 0)
 	emu_mutex.unlock()
 	EmulatorScreen.mouse_default_cursor_shape = Control.CURSOR_CROSS \

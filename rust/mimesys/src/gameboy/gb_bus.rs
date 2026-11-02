@@ -414,13 +414,13 @@ impl GameBoyBus {
         for i in 0..self.cheats.ram_writes().len() {
             let w = self.cheats.ram_writes()[i];
             match w.addr {
-                0xA000..=0xBFFF => unsafe { (*self.cartridge.mbc.get()).write(w.addr, w.value) },
+                0xA000..=0xBFFF => unsafe { (*self.cartridge.mbc.get()).write(w.addr as u16, w.value) },
                 0xC000..=0xCFFF => self.ram[(w.addr & 0x0FFF) as usize] = w.value,
                 0xD000..=0xDFFF => {
                     let off = match w.bank {
                         Some(b) if self.variant == GbVariant::Cgb =>
                             (b.max(1) as usize) * 0x1000 + (w.addr & 0x0FFF) as usize,
-                        _ => self.get_wram_offset(w.addr),
+                        _ => self.get_wram_offset(w.addr as u16),
                     };
                     self.ram[off] = w.value;
                 }

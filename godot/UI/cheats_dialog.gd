@@ -1,6 +1,6 @@
 class_name CheatsDialog
 extends AcceptDialog
-## Emulation > Cheats. One list per game, saved to user://Cheats/<system>/<game>.json
+## Emulation > Cheats. One list per game, saved to user://GD_EMU/Cheats/<system>/<game>.json
 ## and switched on automatically next time the game loads.
 ## Every change is sent to the core right away; a code the core can't read gets a red ✗
 ## with the reason in its tooltip.
@@ -11,6 +11,8 @@ const ROOT := "user://Cheats"
 const HELP := {
 	"nes": "Game Genie (SXIOPO, 8-letter codes too) or raw AAAA:VV / AAAA?CC:VV",
 	"gb": "Game Genie (ABC-DEF-GHI) or GameShark / Action Replay (01VVAAAA)",
+	"snes": "Game Genie (XXXX-XXXX) or Pro Action Replay (7E0DBE09), raw AAAAAA:VV",
+	"md": "Game Genie (XXXX-XXXX) or Action Replay / raw AAAAAA:VVVV (FF0A12:0009)",
 }
 
 var _emu: Variant = null           # the EmuSystem

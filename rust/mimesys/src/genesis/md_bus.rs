@@ -131,6 +131,8 @@ impl Io {
 }
 
 pub struct MdBus {
+    /// cheat codes (Game Genie patches ROM reads, RAM codes are written each frame)
+    pub cheats: crate::common::cheats::Cheats,
     pub rom: Vec<u8>,
     pub ram: Vec<u8>,
     pub vdp: Vdp,
@@ -170,6 +172,7 @@ impl MdBus {
             io: Io { version, data: [0x7F; 3], ctrl: [0; 3], pads: [Pad::new(); 2], now: 0 },
             psg, ym: Ym2612::new(), zram: vec![0; 0x2000], zbank: 0, zbusreq: false, zreset: true, zreset_released: false,
             sram: vec![0xFF; sram_len], sram_range, sram_on, sram_dirty: false, eeprom,
+            cheats: crate::common::cheats::Cheats::new(crate::common::cheats::CheatSystem::Genesis),
             banks: [0, 1, 2, 3, 4, 5, 6, 7], big_cart, stall: 0,
         }
     }
@@ -182,6 +185,18 @@ impl MdBus {
     }
 
     fn rom_byte(&self, a: u32) -> u8 {
+        let v = self.rom_byte_raw(a);
+        if self.cheats.is_empty() { v } else { self.cheats.patched(a, v).unwrap_or(v) }
+    }
+
+    /// Work-RAM cheat codes: called once per frame.
+    pub fn apply_cheat_writes(&mut self) {
+        for w in self.cheats.ram_writes() {
+            if w.addr >= 0xE00000 { self.ram[(w.addr & 0xFFFF) as usize] = w.value; }
+        }
+    }
+
+    fn rom_byte_raw(&self, a: u32) -> u8 {
         let a = if self.big_cart && a >= 0x80000 {
             (self.banks[(a >> 19) as usize & 7] as usize) << 19 | (a as usize & 0x7FFFF)
         } else {

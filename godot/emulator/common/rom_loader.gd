@@ -90,6 +90,9 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 			var lpath := AppSettings.bios_path("lynx", "user://BIOS/lynxboot.img")
 			if FileAccess.file_exists(lpath):
 				bios = load_bios(lpath)
+		"snes":
+			# coprocessor firmware (DSP-1 etc.); the core picks what the cartridge needs
+			bios = snes_firmware_blob()
 		"gba":
 			bios = load_bios(AppSettings.bios_path("gba", "user://BIOS/gba_bios.bin"))
 			if bios.is_empty():
@@ -98,6 +101,26 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 	if not sys.load_cartridge(system_id, data, name, bios):
 		return null
 	return sys
+
+
+## SNES coprocessor firmware for the core: "SNFW", then for each file found in
+## user://BIOS/ a name length byte, the file name, a u32 little-endian length and the data.
+const SNES_FIRMWARE := ["dsp1", "dsp1b", "dsp2", "dsp3", "dsp4"]
+
+static func snes_firmware_blob() -> PackedByteArray:
+	var out := PackedByteArray("SNFW".to_ascii_buffer())
+	for fw in SNES_FIRMWARE:
+		for suffix in [".rom", ".program.rom", ".data.rom"]:
+			var file: String = fw + suffix
+			var path := "user://BIOS/" + file
+			if FileAccess.file_exists(path):
+				var data := load_bios(path)
+				out.append(file.length())
+				out.append_array(file.to_ascii_buffer())
+				var n := data.size()
+				out.append_array(PackedByteArray([n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF]))
+				out.append_array(data)
+	return out
 
 
 ## Game Boy start-up for the core: the model, whether to skip the boot animation, and both

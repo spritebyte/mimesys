@@ -14,6 +14,14 @@
 //         GameShark    01VVAAAA (address little-endian)        0163B0D1 = $D1B0 <- 63
 //                      9nVVAAAA writes WRAM bank n (CGB)
 //         raw          same as NES: AAAA:VV, AAAA?CC:VV (ROM if < $8000)
+//   SNES  Game Genie   XXXX-XXXX (the dash tells it from PAR)
+//         Pro Action Replay  AAAAAAVV (8 hex digits)       7E0DBE09 = $7E0DBE <- 09
+//         raw          AAAAAA:VV / AAAAAA?CC:VV
+//         (RAM = banks 7E-7F, 70-7D:0000-7FFF and 00-3F/80-BF:0000-7FFF; else ROM)
+//   Genesis Game Genie XXXX-XXXX (dash optional)               SCRA-MBLE = 059C44:B078
+//         raw / Pro Action Replay  AAAAAA:VVVV (word) or AAAAAA:VV (byte),
+//                      AAAAAA?CC:VV (byte with compare)     FF0A12:0009
+//         (RAM = E00000-FFFFFF; else ROM)
 //
 // The bus calls `patch_read` on cartridge reads (cheap when there are no patches) and the
 // system calls `ram_writes()` after each frame.
@@ -22,18 +30,20 @@
 pub enum CheatSystem {
     Nes,
     GameBoy,
+    Snes,
+    Genesis,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RomPatch {
-    pub addr: u16,
+    pub addr: u32,
     pub value: u8,
     pub compare: Option<u8>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RamWrite {
-    pub addr: u16,
+    pub addr: u32,
     pub value: u8,
     pub bank: Option<u8>,     // GB: WRAM bank for $D000-$DFFF (CGB)
 }
@@ -87,12 +97,16 @@ impl Cheats {
         if self.rom.is_empty() {
             return value;
         }
-        for p in &self.rom {
-            if p.addr == addr && p.compare.map_or(true, |c| c == value) {
-                return p.value;
-            }
+        self.patched(addr as u32, value).unwrap_or(value)
+    }
+
+    /// The patched byte for `addr`, if a patch applies (24-bit addresses).
+    #[inline]
+    pub fn patched(&self, addr: u32, value: u8) -> Option<u8> {
+        if self.rom.is_empty() {
+            return None;
         }
-        value
+        self.rom.iter().find(|p| p.addr == addr && p.compare.map_or(true, |c| c == value)).map(|p| p.value)
     }
 
     pub fn ram_writes(&self) -> &[RamWrite] { &self.ram }
@@ -105,7 +119,7 @@ pub fn parse(system: CheatSystem, text: &str) -> Result<Vec<Effect>, String> {
         if part.is_empty() {
             continue;
         }
-        out.push(parse_one(system, part).map_err(|e| format!("{part}: {e}"))?);
+        out.extend(parse_one(system, part).map_err(|e| format!("{part}: {e}"))?);
     }
     if out.is_empty() {
         return Err("empty code".into());
@@ -113,12 +127,27 @@ pub fn parse(system: CheatSystem, text: &str) -> Result<Vec<Effect>, String> {
     Ok(out)
 }
 
-fn parse_one(system: CheatSystem, code: &str) -> Result<Effect, String> {
+fn parse_one(system: CheatSystem, code: &str) -> Result<Vec<Effect>, String> {
     let code = code.trim().to_ascii_uppercase();
     if code.contains(':') {
-        return parse_raw(system, &code);
+        return match system {
+            CheatSystem::Snes | CheatSystem::Genesis => parse_raw24(system, &code),
+            _ => parse_raw(system, &code).map(|e| vec![e]),
+        };
     }
-    match system {
+    let one = match system {
+        CheatSystem::Snes => {
+            if code.len() == 9 && code.as_bytes()[4] == b'-' {
+                snes_game_genie(&code)
+            } else if code.len() == 8 {
+                let addr = hex(&code[0..6])?;
+                let value = hex(&code[6..8])? as u8;
+                Ok(snes_effect(addr, value, None))
+            } else {
+                Err("expected a Game Genie (XXXX-XXXX) or Pro Action Replay (AAAAAAVV) code".into())
+            }
+        }
+        CheatSystem::Genesis => return genesis_game_genie(&code),
         CheatSystem::Nes => nes_game_genie(&code),
         CheatSystem::GameBoy => {
             let digits: String = code.chars().filter(|&c| c != '-').collect();
@@ -128,7 +157,105 @@ fn parse_one(system: CheatSystem, code: &str) -> Result<Effect, String> {
                 _ => Err("expected a Game Genie (ABC-DEF-GHI) or GameShark (01VVAAAA) code".into()),
             }
         }
+    };
+    one.map(|e| vec![e])
+}
+
+/// SNES: RAM (written every frame) or ROM (patched on read), by address.
+fn snes_effect(addr: u32, value: u8, compare: Option<u8>) -> Effect {
+    let bank = addr >> 16;
+    let off = addr & 0xFFFF;
+    let b = bank & 0x7F;
+    let ram = bank == 0x7E || bank == 0x7F || (b < 0x40 && off < 0x8000) || ((0x70..0x7E).contains(&b) && off < 0x8000);
+    if ram && compare.is_none() {
+        Effect::Ram(RamWrite { addr, value, bank: None })
+    } else {
+        Effect::Rom(RomPatch { addr, value, compare })
     }
+}
+
+/// SNES / Genesis raw codes with 24-bit addresses: AAAAAA:VV, AAAAAA?CC:VV, and on the
+/// Genesis AAAAAA:VVVV (a word: two bytes, high first).
+fn parse_raw24(system: CheatSystem, code: &str) -> Result<Vec<Effect>, String> {
+    let (left, v) = code.split_once(':').unwrap();
+    let (addr, compare) = match left.split_once('?') {
+        Some((a, c)) => (hex(a)?, Some(hex(c)?)),
+        None => (hex(left)?, None),
+    };
+    if addr > 0xFFFFFF || compare.map_or(false, |c| c > 0xFF) {
+        return Err("the address is up to 6 hex digits, the compare value 2".into());
+    }
+    let value = hex(v)?;
+    let compare = compare.map(|c| c as u8);
+    match system {
+        CheatSystem::Snes => {
+            if v.len() > 2 { return Err("SNES values are 2 hex digits".into()); }
+            Ok(vec![snes_effect(addr, value as u8, compare)])
+        }
+        _ => {
+            let bytes: Vec<(u32, u8)> = match v.len() {
+                1 | 2 => vec![(addr, value as u8)],
+                3 | 4 if compare.is_none() => {
+                    if addr & 1 != 0 { return Err("a word code needs an even address".into()); }
+                    vec![(addr, (value >> 8) as u8), (addr + 1, value as u8)]
+                }
+                _ => return Err("Genesis values are 2 or 4 hex digits (compare: 2)".into()),
+            };
+            Ok(bytes.into_iter().map(|(a, b)| genesis_effect(a, b, compare)).collect())
+        }
+    }
+}
+
+/// Genesis: work RAM (E00000-FFFFFF, written every frame) or ROM (patched on read).
+fn genesis_effect(addr: u32, value: u8, compare: Option<u8>) -> Effect {
+    if addr >= 0xE00000 && compare.is_none() {
+        Effect::Ram(RamWrite { addr, value, bank: None })
+    } else {
+        Effect::Rom(RomPatch { addr, value, compare })
+    }
+}
+
+/// SNES Game Genie, VVAA-AAAA: each character stands for a hex digit (DF4709156BC8A23E =
+/// 0-F); VV is the value and the 24 address bits are shuffled: the code's bits
+/// ijklqrst opabcduv wxefghmn are the address abcdefgh ijklmnop qrstuvwx.
+fn snes_game_genie(code: &str) -> Result<Effect, String> {
+    const DIGITS: &str = "DF4709156BC8A23E";
+    let mut n: u32 = 0;
+    for c in code.chars().filter(|&c| c != '-') {
+        n = n << 4 | DIGITS.find(c).ok_or_else(|| format!("'{c}' isn't a SNES Game Genie character"))? as u32;
+    }
+    let value = (n >> 24) as u8;
+    let x = n & 0xFFFFFF;
+    // the code's bit for each address letter, counting from the top (bit 23) down
+    let code_bit = |name: char| -> u32 {
+        let order = "ijklqrstopabcduvwxefghmn";
+        let i = order.find(name).unwrap() as u32;
+        (x >> (23 - i)) & 1
+    };
+    let addr = "abcdefghijklmnopqrstuvwx".chars().fold(0u32, |a, name| a << 1 | code_bit(name));
+    Ok(snes_effect(addr, value, None))
+}
+
+/// Genesis Game Genie, XXXX-XXXX: each character is 5 bits (ABCDEFGHJKLMNPRSTVWXYZ0123456789),
+/// 40 bits in all. The code's bits ijklm nopIJ KLMNO PABCD EFGHd efgha bcQRS TUVWX are the
+/// address ABCDEFGH IJKLMNOP QRSTUVWX and the word abcdefgh ijklmnop.
+fn genesis_game_genie(code: &str) -> Result<Vec<Effect>, String> {
+    const CHARS: &str = "ABCDEFGHJKLMNPRSTVWXYZ0123456789";
+    let chars: Vec<char> = code.chars().filter(|&c| c != '-').collect();
+    if chars.len() != 8 {
+        return Err("Genesis Game Genie codes are 8 characters (XXXX-XXXX); raw codes are AAAAAA:VVVV".into());
+    }
+    let mut n: u64 = 0;
+    for c in chars {
+        n = n << 5 | CHARS.find(c).ok_or_else(|| format!("'{c}' isn't a Genesis Game Genie character"))? as u64;
+    }
+    const ORDER: &str = "ijklmnopIJKLMNOPABCDEFGHdefghabcQRSTUVWX";
+    let bit = |name: char| -> u32 { ((n >> (39 - ORDER.find(name).unwrap())) & 1) as u32 };
+    let addr = "ABCDEFGHIJKLMNOPQRSTUVWX".chars().fold(0u32, |a, c| a << 1 | bit(c));
+    let data = "abcdefghijklmnop".chars().fold(0u32, |a, c| a << 1 | bit(c));
+    // the 68000 has no A0 line: the word is at the even address
+    let addr = addr & !1;
+    Ok(vec![genesis_effect(addr, (data >> 8) as u8, None), genesis_effect(addr + 1, data as u8, None)])
 }
 
 fn hex(s: &str) -> Result<u32, String> {
@@ -146,10 +273,10 @@ fn parse_raw(system: CheatSystem, code: &str) -> Result<Effect, String> {
     if addr > 0xFFFF || value > 0xFF || compare.map_or(false, |c| c > 0xFF) {
         return Err("address must be 4 hex digits, values 2".into());
     }
-    let (addr, value, compare) = (addr as u16, value as u8, compare.map(|c| c as u8));
+    let (addr, value, compare) = (addr, value as u8, compare.map(|c| c as u8));
     let is_rom = match system {
         CheatSystem::Nes => addr >= 0x8000,
-        CheatSystem::GameBoy => addr < 0x8000,
+        _ => addr < 0x8000,
     };
     if is_rom || compare.is_some() {
         Ok(Effect::Rom(RomPatch { addr, value, compare }))
@@ -181,7 +308,7 @@ fn nes_game_genie(code: &str) -> Result<Effect, String> {
         value |= n[5] & 8;
         None
     };
-    Ok(Effect::Rom(RomPatch { addr, value: value as u8, compare }))
+    Ok(Effect::Rom(RomPatch { addr: addr as u32, value: value as u8, compare }))
 }
 
 /// GB Game Genie, digits ABCDEF[GHI]: value = AB, address = (~F << 12) | CDE,
@@ -190,7 +317,7 @@ fn gb_game_genie(d: &str) -> Result<Effect, String> {
     let value = hex(&d[0..2])? as u8;
     let low = hex(&d[2..5])? as u16;
     let high = (!hex(&d[5..6])? & 0xF) as u16;
-    let addr = (high << 12) | low;
+    let addr = ((high << 12) | low) as u32;
     if addr >= 0x8000 {
         return Err("Game Genie codes patch ROM ($0000-$7FFF); this one points elsewhere".into());
     }
@@ -207,7 +334,7 @@ fn gb_game_genie(d: &str) -> Result<Effect, String> {
 fn gb_gameshark(d: &str) -> Result<Effect, String> {
     let kind = hex(&d[0..2])? as u8;
     let value = hex(&d[2..4])? as u8;
-    let addr = (hex(&d[6..8])? << 8 | hex(&d[4..6])?) as u16;
+    let addr = hex(&d[6..8])? << 8 | hex(&d[4..6])?;
     let bank = match kind & 0xF0 {
         0x00 | 0x80 => None,
         0x90 => Some(kind & 0x07),
@@ -303,5 +430,45 @@ mod tests {
         assert_eq!(c.patch_read(0x8000, 0x55), 0x55);
         c.set(&[]);
         assert!(c.is_empty());
+    }
+
+    fn rom(addr: u32, value: u8) -> Effect { Effect::Rom(RomPatch { addr, value, compare: None }) }
+    fn ram(addr: u32, value: u8) -> Effect { Effect::Ram(RamWrite { addr, value, bank: None }) }
+
+    #[test]
+    fn snes_game_genie() {
+        // worked example from gamehacking.org's "Game Genie Encryption Schemes"
+        assert_eq!(one(CheatSystem::Snes, "ABCD-EFFF"), rom(0xC4A704, 0xC9));
+        assert!(parse(CheatSystem::Snes, "ABCD-EFFG").unwrap_err().contains("'G'"));
+    }
+
+    #[test]
+    fn snes_action_replay_and_raw() {
+        assert_eq!(one(CheatSystem::Snes, "7E0DBE09"), ram(0x7E0DBE, 0x09), "WRAM");
+        assert_eq!(one(CheatSystem::Snes, "700010FF"), ram(0x700010, 0xFF), "LoROM SRAM");
+        assert_eq!(one(CheatSystem::Snes, "00800CEA"), rom(0x00800C, 0xEA), "ROM");
+        assert_eq!(one(CheatSystem::Snes, "C08000:EA"), rom(0xC08000, 0xEA));
+        assert_eq!(one(CheatSystem::Snes, "008000?A9:EA"),
+            Effect::Rom(RomPatch { addr: 0x008000, value: 0xEA, compare: Some(0xA9) }));
+        assert!(parse(CheatSystem::Snes, "7E0DBE:1234").is_err());
+        assert!(parse(CheatSystem::Snes, "7E0DBE0").is_err());
+    }
+
+    #[test]
+    fn genesis_game_genie() {
+        // examples from dgen's decode.c and gamehacking.org
+        assert_eq!(parse(CheatSystem::Genesis, "SCRA-MBLE").unwrap(), vec![rom(0x059C44, 0xB0), rom(0x059C45, 0x78)]);
+        // decodes to BE47BD:1F00; the word lands on the even address
+        assert_eq!(parse(CheatSystem::Genesis, "ABD5-78F7").unwrap(), vec![rom(0xBE47BC, 0x1F), rom(0xBE47BD, 0x00)]);
+        assert_eq!(parse(CheatSystem::Genesis, "scramble").unwrap(), parse(CheatSystem::Genesis, "SCRA-MBLE").unwrap());
+        assert!(parse(CheatSystem::Genesis, "SCRA-MBLI").unwrap_err().contains("'I'"));
+    }
+
+    #[test]
+    fn genesis_raw_codes() {
+        assert_eq!(parse(CheatSystem::Genesis, "FF0A12:0009").unwrap(), vec![ram(0xFF0A12, 0x00), ram(0xFF0A13, 0x09)]);
+        assert_eq!(parse(CheatSystem::Genesis, "FF0A13:63").unwrap(), vec![ram(0xFF0A13, 0x63)]);
+        assert_eq!(parse(CheatSystem::Genesis, "000200:4E71").unwrap(), vec![rom(0x000200, 0x4E), rom(0x000201, 0x71)]);
+        assert!(parse(CheatSystem::Genesis, "000201:4E71").is_err(), "odd word address");
     }
 }
