@@ -147,6 +147,11 @@ func _rebuild() -> void:
 
 	# Genesis: console region (PAL = 50 Hz) and pad type; both apply when a game loads
 	if sys == "md":
+		var mdbg := CheckBox.new()
+		mdbg.text = "Print where the CPUs and the Sega CD drive are (each second for 10 s, then every 10 s; for bug reports)"
+		mdbg.button_pressed = _opt("md_debug")
+		mdbg.toggled.connect(func(on): _put("md_debug", on))
+		_row("Debug", mdbg)
 		var region := OptionButton.new()
 		var regions := [["auto", "Auto (from the cartridge)"], ["usa", "USA (60 Hz)"],
 			["japan", "Japan (60 Hz)"], ["europe", "Europe (50 Hz)"]]

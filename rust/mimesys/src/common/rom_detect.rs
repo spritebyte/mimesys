@@ -14,7 +14,8 @@
 //
 // Returns every plausible system, best first. The frontend loads the best one straight away
 // when it's clear (score >= 80, or 30+ ahead of the next) and asks otherwise.
-// System ids are the ones the system factory takes: nes gb gbc gba sms gg md coleco pce a2600 a7800 a5200 lynx snes.
+// System ids are the ones the system factory takes: nes gb gbc gba sms gg md coleco pce a2600 a7800 a5200 lynx snes mcd.
+//      Sega CD: a .cue / .iso path ("MCDP" + path) whose sector 0 starts SEGADISCSYSTEM
 //      Genesis "SEGA" at 0x100 (or an interleaved .smd dump)
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,7 +27,7 @@ pub struct Guess {
 
 const GB_LOGO: [u8; 16] = [0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D];
 
-pub const SYSTEMS: [&str; 15] = ["nes", "gb", "gbc", "gba", "nds", "sms", "gg", "md", "coleco", "pce", "a2600", "a7800", "a5200", "lynx", "snes"];
+pub const SYSTEMS: [&str; 17] = ["nes", "gb", "gbc", "gba", "nds", "sms", "gg", "md", "coleco", "pce", "a2600", "a7800", "a5200", "lynx", "snes", "mcd", "32x"];
 
 fn count(data: &[u8], pattern: &[u8]) -> usize {
     data.windows(pattern.len()).filter(|w| *w == pattern).count()
@@ -55,6 +56,13 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
 
     // ---- 1. headers ----
+    // a disc image: the frontend sends its path ("MCDP" + path), the disc is read here
+    if data.starts_with(crate::segacd::PATH_MAGIC) {
+        return match crate::segacd::open_disc(data) {
+            Ok((_, h)) => vec![Guess { system: "mcd", score: 100, why: format!("Sega CD disc \"{}\"", h.title) }],
+            Err(e) => { println!("disc image: {e}"); Vec::new() }
+        };
+    }
     if data.starts_with(b"NES\x1A") {
         return vec![Guess { system: "nes", score: 100, why: "iNES header".into() }];
     }
@@ -94,6 +102,10 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
             return vec![Guess { system: if gg { "gg" } else { "sms" }, score: 100,
                                 why: format!("Sega header (region {region})") }];
         }
+    }
+    // 32X: "SEGA 32X" in the Genesis header, or the 32X start-up code's "MARS CHECK MODE"
+    if data.len() >= 0x400 && (&data[0x100..0x108] == b"SEGA 32X" || data[0x3C0..0x3D0].windows(10).any(|w| w == b"MARS CHECK")) {
+        return vec![Guess { system: "32x", score: 100, why: "Sega 32X header".into() }];
     }
     // Genesis: "SEGA" at 0x100 (also inside an interleaved .smd dump)
     if data.len() >= 0x200 && (data[0x100..0x104] == *b"SEGA" || data[0x101..0x105] == *b"SEGA")
@@ -174,7 +186,7 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
         "nes" => &["nes"], "gb" => &["gb"], "gbc" | "cgb" => &["gbc"], "sms" => &["sms"],
         "gg" => &["gg"], "col" | "cv" => &["coleco"], "pce" => &["pce"], "a26" => &["a2600"],
         "a78" => &["a7800"], "gba" | "agb" => &["gba"],
-        "md" | "gen" | "smd" => &["md"], "nds" | "srl" => &["nds"], "a52" => &["a5200"], "lnx" | "lyx" => &["lynx"], "sfc" | "smc" | "swc" | "fig" => &["snes"], _ => &[],
+        "md" | "gen" | "smd" => &["md"], "32x" => &["32x"], "nds" | "srl" => &["nds"], "a52" => &["a5200"], "lnx" | "lyx" => &["lynx"], "sfc" | "smc" | "swc" | "fig" => &["snes"], _ => &[],
     };
     for &sys in by_ext {
         s.add(sys, 30, &format!(".{ext} file"));

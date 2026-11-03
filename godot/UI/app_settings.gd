@@ -26,6 +26,8 @@ const SYSTEM_BY_EXT := {
 	"nes": "nes", "gb": "gb", "gbc": "gb", "gba": "gba", "agb": "gba", "col": "coleco", "cv": "coleco",
 	"sms": "sms", "gg": "gg", "pce": "pce", "a26": "a2600", "a78": "a7800", "a52": "a5200", "lnx": "lynx", "lyx": "lynx", "sfc": "snes", "smc": "snes",
 	"md": "md", "gen": "md", "smd": "md", "nds": "nds",
+	"cue": "md", "iso": "md",      # Sega CD discs (the Genesis pad profile)
+	"32x": "md",                   # 32X cartridges
 }
 ## Extensions several systems use: the ROM detector looks inside these files.
 const AMBIGUOUS_EXT := ["bin", "rom"]
@@ -65,6 +67,7 @@ const OPTION_DEFAULTS := {
 	"nds_swap": false,       # DS: swap the screens' places
 	"lynx_debug": false,     # Lynx: print the sound registers every 10 s (for bug reports)
 	"snes_debug": false,     # SNES: print where the CPU and sound CPU are (for bug reports)
+	"md_debug": false,       # Genesis / Sega CD: print where the CPUs and the CD drive are (for bug reports)
 	"lynx_rotate": 0,        # Lynx: 0 from the cartridge, 1 none, 2 left, 3 right
 	"a5200_trackball": false, # 5200: controller 1 is a Trak-Ball rolled with the mouse
 }

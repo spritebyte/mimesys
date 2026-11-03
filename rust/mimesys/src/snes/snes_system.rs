@@ -181,29 +181,29 @@ impl SnesSystem {
         let c = &self.cpu;
         let b = &self.bus;
         let m = &b.apu.mem;
-        println!("=== SNES debug, frame {} ===", b.frame);
-        println!("CPU  PC {:02X}:{:04X}  A {:04X} X {:04X} Y {:04X} S {:04X} D {:04X} DB {:02X} P {:02X} E {}  wai {} stp {}",
+        crate::dlog!("=== SNES debug, frame {} ===", b.frame);
+        crate::dlog!("CPU  PC {:02X}:{:04X}  A {:04X} X {:04X} Y {:04X} S {:04X} D {:04X} DB {:02X} P {:02X} E {}  wai {} stp {}",
                  c.pc >> 16, c.pc & 0xFFFF, c.a, c.x, c.y, c.s, c.d, c.b, c.p, c.e as u8, c.wai as u8, c.stp as u8);
         let code: Vec<String> = (0..12).map(|i| format!("{:02X}", b.peek((c.pc & 0xFF0000) | (c.pc.wrapping_add(i) & 0xFFFF)))).collect();
-        println!("CPU  code at PC: {}", code.join(" "));
-        println!("     NMITIMEN {:02X} INIDISP {:02X} HDMAEN {:02X} mode {:02X} TM {:02X}", b.nmitimen, b.ppu.inidisp, b.hdmaen, b.ppu.bgmode, b.ppu.tm);
-        if let Some(x) = &b.cx4 { println!("Cx4  {}", x.status()); }
+        crate::dlog!("CPU  code at PC: {}", code.join(" "));
+        crate::dlog!("     NMITIMEN {:02X} INIDISP {:02X} HDMAEN {:02X} mode {:02X} TM {:02X}", b.nmitimen, b.ppu.inidisp, b.hdmaen, b.ppu.bgmode, b.ppu.tm);
+        if let Some(x) = &b.cx4 { crate::dlog!("Cx4  {}", x.status()); }
         let s = &b.apu.cpu;
-        println!("SMP  PC {:04X}  A {:02X} X {:02X} Y {:02X} S {:02X} P {:02X}  sleep {} stop {}", s.pc, s.a, s.x, s.y, s.s, s.p, s.wait as u8, s.stop as u8);
+        crate::dlog!("SMP  PC {:04X}  A {:02X} X {:02X} Y {:02X} S {:02X} P {:02X}  sleep {} stop {}", s.pc, s.a, s.x, s.y, s.s, s.p, s.wait as u8, s.stop as u8);
         let scode: Vec<String> = (0..12).map(|i| format!("{:02X}", m.ram[s.pc.wrapping_add(i) as usize])).collect();
-        println!("SMP  code at PC (RAM): {}", scode.join(" "));
-        println!("Ports  CPU->SMP {:02X?}   SMP->CPU {:02X?}", m.from_cpu, m.to_cpu);
+        crate::dlog!("SMP  code at PC (RAM): {}", scode.join(" "));
+        crate::dlog!("Ports  CPU->SMP {:02X?}   SMP->CPU {:02X?}", m.from_cpu, m.to_cpu);
         let smp: Vec<String> = self.samples.iter().map(|&(v, cp, sp)| format!("line {v}: {:02X}:{:04X} / {sp:04X}", cp >> 16, cp & 0xFFFF)).collect();
-        println!("PC through the frame (CPU / SMP): {}", smp.join(", "));
+        crate::dlog!("PC through the frame (CPU / SMP): {}", smp.join(", "));
         let log: Vec<String> = b.port_log.iter().map(|&(f, v, p, val)| format!("f{f} l{v} 214{p}={val:02X}")).collect();
-        println!("Last CPU port writes: {}", log.join(" "));
+        crate::dlog!("Last CPU port writes: {}", log.join(" "));
         // PPU register writes in the last whole frame (lines 1-224 are the picture)
         let ppu: Vec<String> = b.ppu_log_last.iter().map(|&(v, h, r, val)| {
             if r == 0 { format!("[l{v} h{h} IRQ]") } else { format!("l{v} h{h} 21{r:02X}={val:02X}") }
         }).collect();
-        println!("PPU writes last frame ({}): {}", ppu.len(), ppu.join(", "));
+        crate::dlog!("PPU writes last frame ({}): {}", ppu.len(), ppu.join(", "));
         let p = &b.ppu;
-        println!("PPU now: mode {:02X} TM {:02X} TS {:02X} TMW {:02X} TSW {:02X} CGWSEL {:02X} CGADSUB {:02X} win {:02X?} BG3 hofs {} vofs {} BG1 vofs {} BG2 vofs {} NMITIMEN {:02X} VTIME {} HTIME {}",
+        crate::dlog!("PPU now: mode {:02X} TM {:02X} TS {:02X} TMW {:02X} TSW {:02X} CGWSEL {:02X} CGADSUB {:02X} win {:02X?} BG3 hofs {} vofs {} BG1 vofs {} BG2 vofs {} NMITIMEN {:02X} VTIME {} HTIME {}",
                  p.bgmode, p.tm, p.ts, p.tmw, p.tsw, p.cgwsel, p.cgadsub, &p.win[..9], p.bg[2].hofs, p.bg[2].vofs, p.bg[0].vofs, p.bg[1].vofs,
                  b.nmitimen, b.vtime, b.htime);
     }

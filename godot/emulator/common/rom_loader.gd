@@ -5,6 +5,9 @@ const BIOS_DIR := "user://BIOS"
 const HISCORE_DAT_PATH := "user://hiscore.dat"
 ## Not ROMs. (".md" is a Genesis ROM, so only README files with it are skipped.)
 const SKIP_EXT := ["txt", "nfo", "htm", "html", "jpg", "png", "pdf"]
+## Disc images (Sega CD): read from disk by the core, not loaded here. Zipped discs aren't
+## supported: unzip them first.
+const DISC_EXT := ["cue", "iso"]
 
 # Loading a game is three steps (main.gd's execute_load does them in order):
 #   1. read_rom(path, inner)       the bytes (from a file, or a zip), or "this is an arcade set"
@@ -20,6 +23,13 @@ const SKIP_EXT := ["txt", "nfo", "htm", "html", "jpg", "png", "pdf"]
 ##   {}                            couldn't read it
 ## file_inside_zip: a specific file from a zip (from the library or the zip picker).
 static func read_rom(path: String, file_inside_zip: String = "") -> Dictionary:
+	if path.get_extension().to_lower() in DISC_EXT:
+		# discs are too big to pass as bytes: the core gets the path and reads sectors itself
+		if not FileAccess.file_exists(path):
+			return {}
+		var blob := PackedByteArray("MCDP".to_ascii_buffer())
+		blob.append_array(ProjectSettings.globalize_path(path).to_utf8_buffer())
+		return _cart(blob, path.get_file())
 	if path.get_extension().to_lower() != "zip":
 		var data := FileAccess.get_file_as_bytes(path)
 		if data.is_empty():
@@ -66,7 +76,7 @@ static func guess_system(data: PackedByteArray, path: String) -> Dictionary:
 	return {"clear": lines.size() > 0 and lines[0] == "clear", "guesses": guesses}
 
 
-## Build the system. `system_id`: nes gb gbc gba sms gg md coleco pce a2600 a7800 a5200 lynx snes
+## Build the system. `system_id`: nes gb gbc gba sms gg md mcd 32x coleco pce a2600 a7800 a5200 lynx snes
 static func create_system(system_id: String, data: PackedByteArray, name: String) -> Variant:
 	var bios := PackedByteArray()
 	match system_id:
@@ -78,6 +88,10 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 			bios = gb_boot_blob()
 		"md":
 			bios = md_options_blob()
+		"mcd":
+			bios = mcd_bios_blob()
+		"32x":
+			bios = m32x_bios_blob()
 		"nds":
 			bios = nds_bios_blob()
 		"a5200":
@@ -105,7 +119,7 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 
 ## SNES coprocessor firmware for the core: "SNFW", then for each file found in
 ## user://BIOS/ a name length byte, the file name, a u32 little-endian length and the data.
-const SNES_FIRMWARE := ["dsp1", "dsp1b", "dsp2", "dsp3", "dsp4"]
+const SNES_FIRMWARE := ["dsp1", "dsp1b", "dsp2", "dsp3", "dsp4", "cx4"]
 
 static func snes_firmware_blob() -> PackedByteArray:
 	var out := PackedByteArray("SNFW".to_ascii_buffer())
@@ -120,6 +134,32 @@ static func snes_firmware_blob() -> PackedByteArray:
 				var n := data.size()
 				out.append_array(PackedByteArray([n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF]))
 				out.append_array(data)
+	return out
+
+
+## Sega CD BIOS files for the core: "MCDB", then every 128 KB file in user://BIOS/ whose
+## name looks like a Sega CD / Mega-CD BIOS (bios_CD_U.bin, segacd*.bin, Mega-CD*.bin ...),
+## as name length byte, name, u32 little-endian length, data. The core picks by region.
+static func mcd_bios_blob() -> PackedByteArray:
+	var out := PackedByteArray("MCDB".to_ascii_buffer())
+	var dir := DirAccess.open(BIOS_DIR)
+	if dir == null:
+		return out
+	for file in dir.get_files():
+		var low := file.to_lower()
+		var named := low.begins_with("bios_cd") or "segacd" in low or "sega cd" in low or "megacd" in low or "mega-cd" in low or "mega cd" in low
+		if not named or not (low.get_extension() in ["bin", "md", "rom"]):
+			continue
+		var data := load_bios(BIOS_DIR.path_join(file))
+		if data.size() != 0x20000:
+			print("Sega CD: skipping %s (%d bytes, a BIOS is 131072)" % [file, data.size()])
+			continue
+		var name_bytes := file.to_utf8_buffer()
+		out.append(name_bytes.size())
+		out.append_array(name_bytes)
+		var n := data.size()
+		out.append_array(PackedByteArray([n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF]))
+		out.append_array(data)
 	return out
 
 
@@ -167,6 +207,32 @@ static func md_options_blob() -> PackedByteArray:
 	return out
 
 
+## 32X: "MARB", then name length byte, name, u32 little-endian length, data for every
+## file in user://BIOS/ with "32x" in its name and a BIOS size (256 bytes 68000, 2 KB
+## master SH-2, 1 KB slave SH-2: 32X_G_BIOS.BIN, 32X_M_BIOS.BIN, 32X_S_BIOS.BIN), plus
+## "mdop" = the Genesis load options.
+static func m32x_bios_blob() -> PackedByteArray:
+	var out := PackedByteArray("MARB".to_ascii_buffer())
+	var entries: Array = [["mdop", md_options_blob()]]
+	var dir := DirAccess.open(BIOS_DIR)
+	if dir != null:
+		for file in dir.get_files():
+			if not ("32x" in file.to_lower()):
+				continue
+			var data := load_bios(BIOS_DIR.path_join(file))
+			if data.size() in [256, 1024, 2048]:
+				entries.append([file, data])
+	for e in entries:
+		var name_bytes: PackedByteArray = e[0].to_utf8_buffer()
+		var data: PackedByteArray = e[1]
+		out.append(name_bytes.size())
+		out.append_array(name_bytes)
+		var n := data.size()
+		out.append_array(PackedByteArray([n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF]))
+		out.append_array(data)
+	return out
+
+
 ## DS BIOS / firmware dumps, all optional (the core has a free BIOS and makes a firmware):
 ## "NDSB", then entries of a 4-byte tag, a u32 little-endian length and the data.
 static func nds_bios_blob() -> PackedByteArray:
@@ -187,7 +253,11 @@ static func nds_bios_blob() -> PackedByteArray:
 
 ## The controls/options profile for a system id (Game Boy Color shares the Game Boy's).
 static func profile_id(system_id: String) -> String:
-	return "gb" if system_id == "gbc" else system_id
+	match system_id:
+		"gbc": return "gb"
+		"mcd": return "md"      # same pad
+		"32x": return "md"
+	return system_id
 
 
 static func load_bios(p_path: String) -> PackedByteArray:

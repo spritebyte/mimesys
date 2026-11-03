@@ -19,5 +19,7 @@ mod snes;
 mod pce;
 mod gba;
 mod genesis;
+mod segacd;
+mod m32x;
 mod nds;
 

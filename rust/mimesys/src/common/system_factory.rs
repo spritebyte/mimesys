@@ -9,7 +9,7 @@ use crate::pce::pce_system::PceSystem;
 use std::collections::HashMap;
  
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CartSystem { GameBoy, GameBoyColor, Gba, Coleco, Nes, Sms, GameGear, Atari2600, Pce, A7800, A5200, Genesis, Nds, Lynx, Snes, }
+pub enum CartSystem { GameBoy, GameBoyColor, Gba, Coleco, Nes, Sms, GameGear, Atari2600, Pce, A7800, A5200, Genesis, Nds, Lynx, Snes, SegaCd, M32x, }
 
 impl CartSystem {
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -29,6 +29,8 @@ impl CartSystem {
             "nds"    => Ok(Self::Nds),
             "lynx"   => Ok(Self::Lynx),
             "snes"   => Ok(Self::Snes),
+            "mcd"    => Ok(Self::SegaCd),
+            "32x"    => Ok(Self::M32x),
             other    => Err(format!("Unknown system id '{other}'")),
         }
     }
@@ -66,6 +68,12 @@ fn load_cartridge(system: CartSystem, rom: &[u8], filename: &str, bios: Option<V
         CartSystem::A5200 => {
             let core = crate::atari5200::a5200_system::A5200System::from_rom(rom, filename, bios_or_empty)
                 .map_err(|e| format!("Atari 5200 from_rom failed: {e}"))?;
+            Ok(Box::new(core))
+        }
+        CartSystem::SegaCd => crate::segacd::load(rom, filename, bios_or_empty),
+        CartSystem::M32x => {
+            let core = crate::genesis::md_system::GenesisSystem::from_32x(rom, filename, bios_or_empty)
+                .map_err(|e| format!("32X: {e}"))?;
             Ok(Box::new(core))
         }
         CartSystem::Snes => {

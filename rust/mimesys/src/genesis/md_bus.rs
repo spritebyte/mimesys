@@ -158,6 +158,10 @@ pub struct MdBus {
     pub big_cart: bool,
     /// 68000 clocks to stall (DMA)
     pub stall: u32,
+    /// the Sega CD unit, when booting from a disc: it answers 000000-3FFFFF and A12000-A120FF
+    pub mcd: Option<Box<crate::segacd::mcd::Mcd>>,
+    /// the 32X, when the cartridge is a 32X game
+    pub m32x: Option<Box<crate::m32x::M32x>>,
 }
 
 impl MdBus {
@@ -173,6 +177,8 @@ impl MdBus {
             psg, ym: Ym2612::new(), zram: vec![0; 0x2000], zbank: 0, zbusreq: false, zreset: true, zreset_released: false,
             sram: vec![0xFF; sram_len], sram_range, sram_on, sram_dirty: false, eeprom,
             cheats: crate::common::cheats::Cheats::new(crate::common::cheats::CheatSystem::Genesis),
+            mcd: None,
+            m32x: None,
             banks: [0, 1, 2, 3, 4, 5, 6, 7], big_cart, stall: 0,
         }
     }
@@ -261,8 +267,15 @@ impl MdBus {
         self.stall += self.vdp.dma_cost(words);
     }
 
-    fn dma_source_word(&self, a: u32) -> u16 {
+    fn dma_source_word(&mut self, a: u32) -> u16 {
         let a = a & 0xFFFFFE;
+        if let (true, Some(m)) = (a < 0x400000, &mut self.mcd) {
+            return m.ext_read(a, true).unwrap_or(0xFFFF);
+        }
+        if let Some(x) = &self.m32x {
+            if a < 0x400000 { if let Some(w) = x.low_read(a, &self.rom) { return w; } }
+            if (0x800000..0xA00000).contains(&a) { return x.high_read(a, &self.rom); }
+        }
         if a < 0x400000 {
             (self.rom_byte(a) as u16) << 8 | self.rom_byte(a + 1) as u16
         } else if a >= 0xE00000 {
@@ -301,8 +314,47 @@ impl MdBus {
     }
 }
 
+impl MdBus {
+    /// The Sega CD unit's part of the 68000's map, if it answers `a`: (word, open bus?).
+    fn mcd_read(&mut self, a: u32) -> Option<u16> {
+        if let Some(x) = self.m32x.as_mut() {
+            return match a {
+                0x000000..=0x3FFFFF => x.low_read(a, &self.rom),
+                0x800000..=0x9FFFFF => Some(x.high_read(a, &self.rom)),
+                0xA130EC..=0xA130EF | 0xA15100..=0xA153FF => x.io_read(a),
+                _ => None,
+            };
+        }
+        let m = self.mcd.as_mut()?;
+        match a {
+            0x000000..=0x3FFFFF => Some(m.ext_read(a, false).unwrap_or(0xFFFF)),
+            0xA12000..=0xA120FF => Some(m.ext_io_read(a)),
+            _ => None,
+        }
+    }
+
+    /// True when the Sega CD unit took the write.
+    fn mcd_write(&mut self, a: u32, upper: bool, lower: bool, v: u16) -> bool {
+        if let Some(x) = self.m32x.as_mut() {
+            return match a {
+                0x000000..=0x3FFFFF => x.low_write(a, upper, lower, v),
+                0x800000..=0x9FFFFF => { x.high_write(a, upper, lower, v); true }
+                0xA15100..=0xA153FF => x.io_write(a, upper, lower, v),
+                _ => false,
+            };
+        }
+        let Some(m) = self.mcd.as_mut() else { return false };
+        match a {
+            0x000000..=0x3FFFFF => { m.ext_write(a, upper, lower, v); true }
+            0xA12000..=0xA120FF => { m.ext_io_write(a, upper, lower, v); true }
+            _ => false,
+        }
+    }
+}
+
 impl M68kBus for MdBus {
     fn read_byte(&mut self, a: u32) -> u8 {
+        if let Some(w) = self.mcd_read(a & 0xFFFFFE) { return if a & 1 == 0 { (w >> 8) as u8 } else { w as u8 }; }
         if let Some(i) = self.sram_index(a) { return self.sram[i]; }
         if let Some(e) = &self.eeprom { if e.reads(a) { return e.read_byte(a); } }
         match a {
@@ -320,6 +372,7 @@ impl M68kBus for MdBus {
     }
 
     fn read_word(&mut self, a: u32) -> u16 {
+        if let Some(w) = self.mcd_read(a) { return w; }
         if let Some(e) = &self.eeprom { if e.reads(a) { return e.read_word(); } }
         if self.sram_index(a).is_some() {
             return (self.read_byte(a) as u16) << 8 | self.read_byte(a + 1) as u16;
@@ -339,6 +392,7 @@ impl M68kBus for MdBus {
     }
 
     fn write_byte(&mut self, a: u32, v: u8) {
+        if self.mcd_write(a & 0xFFFFFE, a & 1 == 0, a & 1 == 1, (v as u16) << 8 | v as u16) { return; }
         if let Some(e) = &mut self.eeprom { if e.writes(a) { e.write_byte(a, v); return; } }
         if let Some(i) = self.sram_index(a) {
             if self.sram[i] != v { self.sram[i] = v; self.sram_dirty = true; }
@@ -359,6 +413,7 @@ impl M68kBus for MdBus {
     }
 
     fn write_word(&mut self, a: u32, v: u16) {
+        if self.mcd_write(a, true, true, v) { return; }
         if let Some(e) = &mut self.eeprom { if e.writes(a) { e.write_word(v); return; } }
         match a {
             0xA00000..=0xA0FFFF => self.write_byte(a, (v >> 8) as u8),

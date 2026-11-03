@@ -356,6 +356,12 @@ impl EmuSystem {
         true
     }
 
+    /// Debug reports also go to this file ("" = console only).
+    #[func]
+    fn set_debug_log(&mut self, path: GString) {
+        crate::common::debug_log::set_path(&path.to_string());
+    }
+
     #[func]
     fn set_option(&mut self, key: GString, value: i64) {
         if let Some(sys) = &mut self.system {

@@ -12,4 +12,7 @@ pub mod audio;
 pub mod video;
 pub mod io;
 pub mod cheats;
+pub mod debug_log;
+pub mod disc;
+pub mod firmware;
 pub mod rom_detect;pub mod serde_cell;

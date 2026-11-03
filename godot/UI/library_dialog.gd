@@ -155,9 +155,13 @@ func _scan_dir(dir: String, arcade_db: Dictionary) -> void:
 	for sub in d.get_directories():
 		if not sub.begins_with("."):
 			_scan_dir(dir.path_join(sub), arcade_db)
-	for f in d.get_files():
+	var files := d.get_files()
+	var has_cue := Array(files).any(func(x: String): return x.get_extension().to_lower() == "cue")
+	for f in files:
 		var path := dir.path_join(f)
 		var ext := f.get_extension().to_lower()
+		if has_cue and ext in ["bin", "wav", "img"]:
+			continue        # a disc's track files: the .cue is the game (and they're huge)
 		if ext == "zip":
 			_scan_zip(path, arcade_db)
 		elif AppSettings.SYSTEM_BY_EXT.has(ext) or ext in AppSettings.AMBIGUOUS_EXT:
