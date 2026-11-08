@@ -100,20 +100,82 @@ func _rebuild() -> void:
 	aspect.item_selected.connect(func(i): _put("aspect", "square" if i == 1 else "console"))
 	_row("Picture shape", aspect)
 
-	# Smoothing
-	var smooth := CheckBox.new()
-	smooth.text = "Smooth pixels (bilinear)"
-	smooth.button_pressed = _opt("smooth")
-	smooth.toggled.connect(func(on): _put("smooth", on))
-	_row("Filter", smooth)
+	# Picture filter
+	var filters := [["sharp", "Sharp pixels"], ["smooth", "Smooth (bilinear)"],
+		["sharp_smooth", "Sharp-smooth (even pixels at any size)"], ["scanlines", "Scanlines"],
+		["crt", "CRT (curve, scanlines, shadow mask)"], ["lcd", "LCD grid (handhelds)"]]
+	var filter := OptionButton.new()
+	for f in filters:
+		filter.add_item(f[1])
+	var cur := AppSettings.filter_of(sys)
+	for i in filters.size():
+		if filters[i][0] == cur:
+			filter.select(i)
+	_row("Filter", filter)
+	var strength := HSlider.new()
+	strength.min_value = 0
+	strength.max_value = 100
+	strength.step = 5
+	strength.value = _opt("filter_strength")
+	strength.custom_minimum_size = Vector2(200, 0)
+	strength.tooltip_text = "How strong the scanlines, CRT mask or LCD grid are"
+	strength.editable = cur in ["scanlines", "crt", "lcd"]
+	strength.value_changed.connect(func(v): _put("filter_strength", int(v)))
+	_row("Filter strength", strength)
+	filter.item_selected.connect(func(i):
+		_put("filter", filters[i][0])
+		strength.editable = filters[i][0] in ["scanlines", "crt", "lcd"]
+	)
+
+	# Flicker blend (sprites shown on every other frame look solid and see-through, as on a CRT)
+	var flicker := OptionButton.new()
+	flicker.add_item("Off")
+	flicker.add_item("Blend (best for every-other-frame flicker, e.g. Batman)")
+	flicker.add_item("Phosphor (CRT glow: bright pixels fade out)")
+	flicker.select(int(_opt("flicker")))
+	flicker.item_selected.connect(func(i): _put("flicker", i))
+	_row("Flicker blend", flicker)
 
 	# Light gun (NES Zapper in port 2, played with the mouse)
 	if sys == "nes":
+		var nbg := CheckBox.new()
+		nbg.text = "Write a debug log of the mapper (user://debug_nes.log; for bug reports; applies when a game loads)"
+		nbg.button_pressed = _opt("nes_debug")
+		nbg.toggled.connect(func(on): _put("nes_debug", on))
+		_row("Debug", nbg)
 		var zap := CheckBox.new()
 		zap.text = "Zapper in port 2 (aim with the mouse, left click fires, right click fires off screen)"
 		zap.button_pressed = _opt("zapper")
 		zap.toggled.connect(func(on): _put("zapper", on))
 		_row("Light gun", zap)
+
+		# VS System (arcade) cartridges
+		var ppu := OptionButton.new()
+		ppu.add_item("From the cartridge (NES 2.0 header or the game's name)")
+		for n in ["RP2C03B", "RP2C03G", "RP2C04-0001", "RP2C04-0002", "RP2C04-0003", "RP2C04-0004",
+				"RC2C03B", "RC2C03C", "RC2C05-01", "RC2C05-02", "RC2C05-03", "RC2C05-04", "RC2C05-05"]:
+			ppu.add_item(n)
+		ppu.select(int(_opt("vs_ppu")) + 1)
+		ppu.tooltip_text = "VS games were made for one PPU. Wrong colours or a black screen: try another"
+		ppu.item_selected.connect(func(i): _put("vs_ppu", i - 1))
+		_row("VS System PPU", ppu)
+		var swap := CheckBox.new()
+		swap.text = "Player 1 on the left stick (some VS games expect it)"
+		swap.button_pressed = _opt("vs_swap")
+		swap.toggled.connect(func(on): _put("vs_swap", on))
+		_row("VS sticks", swap)
+		var dips := HBoxContainer.new()
+		for k in 8:
+			var d := CheckBox.new()
+			d.text = str(k + 1)
+			d.button_pressed = int(_opt("vs_dip")) & (1 << k) != 0
+			d.toggled.connect(func(on):
+				var v := int(_opt("vs_dip"))
+				_put("vs_dip", v | (1 << k) if on else v & ~(1 << k))
+			)
+			dips.add_child(d)
+		dips.tooltip_text = "Coins per credit, lives, difficulty... depends on the game (all off is the usual default)"
+		_row("VS DIP switches", dips)
 
 	# Lynx: screen rotation (for dumps whose header doesn't say)
 	if sys == "lynx":
@@ -128,6 +190,19 @@ func _rebuild() -> void:
 		ldbg.button_pressed = _opt("lynx_debug")
 		ldbg.toggled.connect(func(on): _put("lynx_debug", on))
 		_row("Debug", ldbg)
+
+	# 7800: debug trace
+	if sys == "a7800":
+		var aq := CheckBox.new()
+		aq.text = "Timing workarounds for games that need them (Kung-Fu Master: WSYNC ignored, no DMA cycle stealing; applies when a game loads)"
+		aq.button_pressed = _opt("a7800_quirks")
+		aq.toggled.connect(func(on): _put("a7800_quirks", on))
+		_row("Compatibility", aq)
+		var adbg := CheckBox.new()
+		adbg.text = "Write a debug trace (user://debug_a7800.log; for bug reports; applies when a game loads)"
+		adbg.button_pressed = _opt("a7800_debug")
+		adbg.toggled.connect(func(on): _put("a7800_debug", on))
+		_row("Debug", adbg)
 
 	# SNES: debug report
 	if sys == "snes":

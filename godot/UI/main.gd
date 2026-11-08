@@ -65,7 +65,7 @@ var _toast_label: Label
 var _toast_tween: Tween
 
 enum FileMenuID { LOAD_ROM, RELOAD_ROM, SAVE_STATE, LOAD_STATE, QUIT, LIBRARY, LINK, NETWORK }
-enum EmuMenuID { RESET, PAUSE, RESUME, STEP_CPU, CHEATS }
+enum EmuMenuID { RESET, PAUSE, RESUME, STEP_CPU, CHEATS, DISK_SIDE }
 enum DebugMenuID { CPU_REGISTERS, AUDIO_REGISTERS, VDP_REGISTERS, MEMORY_VIEWER, DISASSEMBLY }
 enum SettingsMenuID { NES, GB, CONTROLS, OPTIONS }
 enum ViewMenuID { FULLSCREEN }
@@ -170,6 +170,7 @@ func init_menus():
 	emu_menu.add_item("Step CPU", EmuMenuID.STEP_CPU)
 	emu_menu.add_separator()
 	emu_menu.add_item("Cheats...   (Ctrl+H)", EmuMenuID.CHEATS)
+	emu_menu.add_item("Switch Disk Side (Famicom Disk System)   (F4)", EmuMenuID.DISK_SIDE)
 
 	emu_menu.id_pressed.connect(_on_emu_menu)
 
@@ -249,6 +250,9 @@ func _on_emu_menu(id):
 		EmuMenuID.STEP_CPU:
 			if emu_system: emu_system.cpu.step()
 
+		EmuMenuID.DISK_SIDE:
+			_switch_disk_side()
+
 		EmuMenuID.CHEATS:
 			cheats_dialog.open_dialog()
 
@@ -259,6 +263,17 @@ func _on_debug_menu(id):
 # ---------------- NEW: hotkeys ----------------
 # Fixed keys (not remappable): F5 save, F8 load, F6/F7 slot down/up, F11 fullscreen,
 # Esc leaves fullscreen.
+## Famicom Disk System: take the disk out and put the next side in (A, B, then the next
+## disk's sides...). The core keeps it out for about a second so the game notices.
+func _switch_disk_side() -> void:
+	if emu_system == null or current_system_id != "nes":
+		return
+	emu_mutex.lock()
+	emu_system.set_option("fds_side", -1)
+	emu_mutex.unlock()
+	_toast("Disk out: next side going in")
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
@@ -275,6 +290,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 	match event.keycode:
+		KEY_F4: _switch_disk_side()
 		KEY_F5: _save_state()
 		KEY_F8: _load_state()
 		KEY_F6: _change_slot(-1)
@@ -392,6 +408,49 @@ func _on_recent_menu(id: int) -> void:
 		return
 	execute_load(r["path"], r["inner"])
 
+# ---------------- picture filters ----------------
+const FILTER_SHADERS := {
+	"sharp_smooth": preload("res://UI/shaders/sharp_smooth.gdshader"),
+	"scanlines": preload("res://UI/shaders/scanlines.gdshader"),
+	"crt": preload("res://UI/shaders/crt.gdshader"),
+	"lcd": preload("res://UI/shaders/lcd.gdshader"),
+}
+var _filter_region_size := Vector2.ZERO   # frame texture size the CRT curve was fitted to
+
+## Filter shader, smoothing and flicker blend for the running system.
+func _apply_filter(sys: String) -> void:
+	var f := AppSettings.filter_of(sys)
+	EmulatorScreen.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST if f == "sharp" \
+		else CanvasItem.TEXTURE_FILTER_LINEAR
+	if FILTER_SHADERS.has(f):
+		var m := EmulatorScreen.material as ShaderMaterial
+		if m == null or m.shader != FILTER_SHADERS[f]:
+			m = ShaderMaterial.new()
+			m.shader = FILTER_SHADERS[f]
+			EmulatorScreen.material = m
+		m.set_shader_parameter("strength", float(AppSettings.get_option(sys, "filter_strength")) / 100.0)
+		_filter_region_size = Vector2.ZERO
+		_update_filter_region()
+	else:
+		EmulatorScreen.material = null
+	if emu_system:
+		emu_mutex.lock()
+		emu_system.set_option("frame_blend", int(AppSettings.get_option(sys, "flicker")))
+		emu_mutex.unlock()
+
+## The CRT curve fits the visible part of the frame: tell the shader where that is.
+func _update_filter_region() -> void:
+	var m := EmulatorScreen.material as ShaderMaterial
+	var atlas := EmulatorScreen.texture as AtlasTexture
+	if m == null or atlas == null or atlas.atlas == null:
+		return
+	var size: Vector2 = atlas.atlas.get_size()
+	if size == _filter_region_size or size.x <= 0.0 or size.y <= 0.0:
+		return
+	_filter_region_size = size
+	var r := atlas.region
+	m.set_shader_parameter("region", Vector4(r.position.x / size.x, r.position.y / size.y, r.size.x / size.x, r.size.y / size.y))
+
 # ---------------- NEW (pass 2): per-system picture options ----------------
 ## Crop, picture shape and smoothing for the running system (called on load and on change).
 func _apply_display_options() -> void:
@@ -428,8 +487,7 @@ func _apply_display_options() -> void:
 		# keep the TV shape, minus whatever was cropped off
 		ScreenContainer.ratio = info.target_aspect_ratio \
 			* (float(w) / info.visible_width) / (float(h) / info.visible_height)
-	EmulatorScreen.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR \
-		if AppSettings.get_option(sys, "smooth") else CanvasItem.TEXTURE_FILTER_NEAREST
+	_apply_filter(sys)
 	# NEW (zapper): light gun in port 2
 	# the DS stylus uses the same mouse pointer as the Zapper
 	# and so does the 5200 Trak-Ball (it reads how far the mouse moved each frame)
@@ -438,9 +496,16 @@ func _apply_display_options() -> void:
 	emu_mutex.lock()
 	emu_system.set_option("zapper", 1 if _zapper_on else 0)
 	emu_system.set_option("trackball", 1 if trackball else 0)
+	if sys == "nes":
+		# VS System cartridges only (a NES game ignores these)
+		emu_system.set_option("vs_dip", int(AppSettings.get_option(sys, "vs_dip")))
+		emu_system.set_option("vs_swap", 1 if AppSettings.get_option(sys, "vs_swap") else 0)
+		emu_system.set_option("vs_ppu", int(AppSettings.get_option(sys, "vs_ppu")))
+	if sys == "a7800":
+		emu_system.set_option("game_quirks", 1 if AppSettings.get_option(sys, "a7800_quirks") else 0)
 	# GBA cartridge clock (Pokemon etc.): local time = UTC + this many minutes
 	emu_system.set_option("rtc_utc_offset", Time.get_time_zone_from_system().bias)
-	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug", "md": "md_debug"}
+	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug", "md": "md_debug", "nes": "nes_debug", "a7800": "a7800_debug"}
 	var dbg_key: String = dbg_keys.get(sys, "")
 	var dbg_on: bool = dbg_key != "" and AppSettings.get_option(sys, dbg_key)
 	# the report also goes to user://debug_<system>.log (the console loses its start)
@@ -564,6 +629,7 @@ func _process(_delta):
 		if tex_to_apply:
 			if EmulatorScreen.texture is AtlasTexture:
 				EmulatorScreen.texture.atlas = tex_to_apply
+				_update_filter_region()
 			else:
 				# Fallback if a frame arrives before setup_screen executes
 				EmulatorScreen.texture = tex_to_apply

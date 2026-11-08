@@ -24,7 +24,9 @@ pub struct EmuSystem {
     cached_image: Option<Gd<Image>>,
     cached_texture: Option<Gd<ImageTexture>>,
     last_sample: Vector2,
-    audio_fifo: VecDeque<f32>
+    audio_fifo: VecDeque<f32>,
+    /// flicker blend (set_option "frame_blend": 0 off, 1 blend, 2 phosphor)
+    blend: crate::common::frame_blend::FrameBlend,
 }
 
 #[godot_api]
@@ -33,7 +35,7 @@ impl IRefCounted for EmuSystem {
         EmuSystem { system: None, base, playback: None,
              sys_display: Gd::from_object(SystemDisplayInfo::new_gameboy()),
              cached_image: None, cached_texture: None, last_sample: Vector2::ZERO,
-             audio_fifo: VecDeque::new(),
+             audio_fifo: VecDeque::new(), blend: Default::default(),
         }
     }
 }
@@ -240,7 +242,7 @@ impl EmuSystem {
             info.buffer_height as usize,
             info.rotation,
         );
-        let pixel_data = PackedByteArray::from(pixels.as_slice());
+        let pixel_data = PackedByteArray::from(self.blend.apply(&pixels));
         //        let (w, h) = { let d = sys.display_info(); (d.visible_width, d.visible_height) };
 //        let pixel_data = PackedByteArray::from(sys.framebuffer());
         let size_changed = self.cached_image.as_ref()
@@ -364,6 +366,7 @@ impl EmuSystem {
 
     #[func]
     fn set_option(&mut self, key: GString, value: i64) {
+        if key.to_string() == "frame_blend" { self.blend.set_mode(value as u8); return; }
         if let Some(sys) = &mut self.system {
             sys.set_option(&key.to_string(), value);
         }

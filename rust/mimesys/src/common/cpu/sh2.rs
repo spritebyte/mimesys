@@ -20,6 +20,8 @@ pub trait Sh2Bus {
     fn write8(&mut self, a: u32, v: u8);
     fn write16(&mut self, a: u32, v: u16);
     fn write32(&mut self, a: u32, v: u32);
+    /// An instruction fetch (a bus may have a faster path for these).
+    fn fetch16(&mut self, a: u32) -> u16 { self.read16(a) }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -101,7 +103,7 @@ impl Sh2 {
     pub fn accepts(&self, level: u8) -> bool { !self.id && !self.in_delay_slot() && self.sr.i < level }
 
     /// Take an interrupt (the caller checked `accepts`).
-    pub fn interrupt(&mut self, bus: &mut dyn Sh2Bus, level: u8, vector: u8) {
+    pub fn interrupt<B: Sh2Bus + ?Sized>(&mut self, bus: &mut B, level: u8, vector: u8) {
         self.push(bus, self.sr.get());
         self.push(bus, self.pc.wrapping_sub(4));
         let to = bus.read32(self.vbr.wrapping_add(vector as u32 * 4)).wrapping_add(4);
@@ -110,12 +112,12 @@ impl Sh2 {
         self.et = true;
     }
 
-    fn push(&mut self, bus: &mut dyn Sh2Bus, v: u32) {
+    fn push<B: Sh2Bus + ?Sized>(&mut self, bus: &mut B, v: u32) {
         self.r[15] = self.r[15].wrapping_sub(4);
         bus.write32(self.r[15], v);
     }
 
-    fn exception(&mut self, bus: &mut dyn Sh2Bus, vector: u32, ret: u32) {
+    fn exception<B: Sh2Bus + ?Sized>(&mut self, bus: &mut B, vector: u32, ret: u32) {
         self.push(bus, self.sr.get());
         self.push(bus, ret);
         let to = bus.read32(self.vbr.wrapping_add(vector * 4)).wrapping_add(4);
@@ -126,19 +128,19 @@ impl Sh2 {
     fn branch(&mut self, pc: u32) { self.ppc = pc; self.ppm = Branch::Take; }
     fn delay_slot(&mut self, pc: u32) { self.ppc = pc; self.ppm = Branch::Slot; }
 
-    fn illegal(&mut self, bus: &mut dyn Sh2Bus) {
+    fn illegal<B: Sh2Bus + ?Sized>(&mut self, bus: &mut B) {
         if self.in_delay_slot() { return self.illegal_slot(bus); }
         let ret = self.pc.wrapping_sub(4);
         self.exception(bus, 4, ret);
     }
 
-    fn illegal_slot(&mut self, bus: &mut dyn Sh2Bus) {
+    fn illegal_slot<B: Sh2Bus + ?Sized>(&mut self, bus: &mut B) {
         let ret = self.ppc.wrapping_sub(4);
         self.exception(bus, 6, ret);
     }
 
     /// Run one instruction.
-    pub fn step(&mut self, bus: &mut dyn Sh2Bus) {
+    pub fn step<B: Sh2Bus + ?Sized>(&mut self, bus: &mut B) {
         if self.exceptions != 0 && !self.in_delay_slot() {
             let (sp, pc) = if self.exceptions & RESET_COLD != 0 { (4, 0) } else { (12, 8) };
             self.exceptions = 0;
@@ -146,7 +148,7 @@ impl Sh2 {
             self.r[15] = bus.read32(sp);
         }
         self.id = false;
-        let op = bus.read16(self.pc.wrapping_sub(4));
+        let op = bus.fetch16(self.pc.wrapping_sub(4));
         self.execute(bus, op);
         match self.ppm {
             Branch::Step => self.pc = self.pc.wrapping_add(2),
@@ -155,7 +157,7 @@ impl Sh2 {
         }
     }
 
-    fn execute(&mut self, bus: &mut dyn Sh2Bus, op: u16) {
+    fn execute<B: Sh2Bus + ?Sized>(&mut self, bus: &mut B, op: u16) {
         let n = (op >> 8 & 15) as usize;
         let m = (op >> 4 & 15) as usize;
         let i = (op & 0xFF) as u32;
@@ -457,7 +459,7 @@ impl Sh2 {
     }
 
     /// MAC.W @Rm+,@Rn+ (S: 32-bit saturating, overflow sets MACH bit 0)
-    fn mac_w(&mut self, bus: &mut dyn Sh2Bus, m: usize, n: usize) {
+    fn mac_w<B: Sh2Bus + ?Sized>(&mut self, bus: &mut B, m: usize, n: usize) {
         let a = bus.read16(self.r[n]) as i16 as i64;
         self.r[n] = self.r[n].wrapping_add(2);
         let b = bus.read16(self.r[m]) as i16 as i64;
@@ -474,7 +476,7 @@ impl Sh2 {
     }
 
     /// MAC.L @Rm+,@Rn+ (S: the result saturates to 48 bits)
-    fn mac_l(&mut self, bus: &mut dyn Sh2Bus, m: usize, n: usize) {
+    fn mac_l<B: Sh2Bus + ?Sized>(&mut self, bus: &mut B, m: usize, n: usize) {
         let a = bus.read32(self.r[n]) as i32 as i64;
         self.r[n] = self.r[n].wrapping_add(4);
         let b = bus.read32(self.r[m]) as i32 as i64;

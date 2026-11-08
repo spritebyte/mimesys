@@ -39,14 +39,18 @@ use serde::{Deserialize, Serialize};
 pub const LINE_CELLS: usize = 160;
 pub const OUT_W: usize = 320;
 
-/// MARIA clock costs of DMA (7.16 MHz clocks; the CPU is halted meanwhile). ProSystem's numbers.
-const DMA_START: u32 = 31;
-const DMA_FIRST_LINE: u32 = 7;
+/// MARIA clock costs of DMA (7.16 MHz clocks; the CPU is halted meanwhile). MAME's numbers
+/// (MAME's maria.cpp, BSD-3-Clause), which were checked against the real console: 16 to start
+/// every DMA line, 6 more to shut down on a zone's last line, 17 more when the next zone
+/// raises a DLI. ProSystem charges 31 per line, which is too much: with it Kung-Fu Master's
+/// display-list interrupt handlers run past the next interrupt and the stack overflows.
+const DMA_START: u32 = 16;
+const DMA_SHUTDOWN: u32 = 6;
 const DMA_HEADER4: u32 = 8;
 const DMA_HEADER5: u32 = 10;
 const DMA_BYTE: u32 = 3;
 const DMA_CHAR: u32 = 3;
-const DMA_DLI: u32 = 20;
+const DMA_DLI: u32 = 17;
 const DMA_MAX: u32 = 400;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -120,7 +124,6 @@ impl Maria {
     pub fn dma_line(&mut self, first: bool, mem: &dyn Fn(u16) -> u8) -> u32 {
         let mut clocks = DMA_START;
         if first {
-            clocks += DMA_FIRST_LINE;
             self.dll = (self.regs[0x0C] as u16) << 8 | self.regs[0x10] as u16;
             if self.load_zone(mem) {
                 self.nmi = true;
@@ -131,6 +134,7 @@ impl Maria {
         clocks += self.run_display_list(mem);
         // move through the zone; on its last line, fetch the next zone (and maybe a DLI)
         if self.offset == 0 {
+            clocks += DMA_SHUTDOWN;
             if self.load_zone(mem) {
                 self.nmi = true;
                 clocks += DMA_DLI;
@@ -140,6 +144,9 @@ impl Maria {
         }
         clocks.min(DMA_MAX)
     }
+
+    /// DMA on a line that fetches nothing (the last picture line): just the start-up cost.
+    pub fn dma_idle(&self) -> u32 { DMA_START }
 
     fn run_display_list(&mut self, mem: &dyn Fn(u16) -> u8) -> u32 {
         let mut clocks = 0;

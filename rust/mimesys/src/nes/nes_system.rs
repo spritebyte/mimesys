@@ -37,6 +37,7 @@ pub struct NesSystem {
 
 impl NesSystem {
     pub fn from_rom(rom_bytes: &[u8], base_name: &str, bios: &[u8]) -> Result<Self, String> {
+        if crate::nes::fds::is_fds(rom_bytes) { return Self::from_fds(rom_bytes, base_name, bios); }
         // Validate header and get sizes
         let bytes = rom_bytes;
         let buffer_size = 256 * 240 * 4;
@@ -52,7 +53,7 @@ impl NesSystem {
         let mapper_low = bytes[CONTROL_BYTE_1_IDX as usize] >> 4;
         let mapper_mid = bytes[CONTROL_BYTE_2_IDX as usize] & 0xF0;
         let mapper_high = ((mapper_byte & 0x0F) as u16) << 8;
-        let mut mapper_id: u16;
+        let mapper_id: u16;
         // slice ROM bytes
         let has_trainer:bool = (bytes[CONTROL_BYTE_1_IDX as usize] & 0b100) != 0;
         let ines2: bool = (bytes[CONTROL_BYTE_2_IDX as usize] & 0b1100) == 0x08;
@@ -82,8 +83,7 @@ impl NesSystem {
             if mirroring_bit { "vertical" } else { "horizontal" });
         if let Some(fix) = crate::nes::rom_db::lookup(crc) {
             println!("NES ROM: header fix for {}", fix.name);
-            if let Some(mir) = fix.mirroring { initial_mirroring = mir; }
-            if let Some(m) = fix.mapper { mapper_id = m; }
+            if let Some(m) = fix.mirroring { initial_mirroring = m; }
             if let Some(sm) = fix.submapper { submapper = sm; }
         } else {
             println!("NES ROM: no header fix ({} entries in rom_db)", crate::nes::rom_db::entries());
@@ -105,25 +105,57 @@ impl NesSystem {
         let chr_banks = chr_rom.len() / chr_bank_size;
 
         let four_screen_bit = (header[6] & 0x08) != 0;
+        // VS System: old dumps of mapper-99 boards say mapper 0 (NROM can't have > 8 KB CHR)
+        let vs = crate::nes::vs::header(&header);
+        let mut mapper_id = mapper_id;
+        if vs.is_some() && mapper_id == 0 && (chr_rom.len() > 0x2000 || prg_rom.len() > 0x8000) { mapper_id = 99; }
+        let vs_ppu = vs.map(|h| h.ppu.or_else(|| crate::nes::vs::ppu_from_name(base_name)).unwrap_or(crate::nes::vs::VsPpu::Rp2c03b));
+        if let Some(h) = vs {
+            println!("NES ROM: VS System, {} PPU ({}){}", vs_ppu.unwrap().name(),
+                if h.ppu.is_some() { "from the NES 2.0 header" } else { "header doesn't say: from the name, or the 2C03" },
+                match h.hardware { 0 => "", 1..=3 => "; extra protection chip not emulated", 4 => "", _ => "; DualSystem (two screens) not emulated: first CPU only" });
+        }
         let mapper = mappers::make_mapper(mapper_id, submapper, prg_banks, chr_banks, prg_rom.clone(), chr_rom.clone(), initial_mirroring, four_screen_bit);
         // --- instantiate the atomic sync flag early ---
         let frame_ready = Arc::new(AtomicBool::new(false));
 
         // initialize cartridge and bus
         let cartridge = Cartridge::new(prg_rom, chr_rom, mapper?, base_name.to_string(), has_battery);
+        let _ = frame_ready;
+        let mut sys = Self::with_cartridge(cartridge, base_name);
+        if vs.is_some() {
+            let mut v = crate::nes::vs::VsInput::default();
+            v.detected = vs_ppu;
+            sys.bus.vs = Some(v);
+            sys.bus.ppu.get_mut().set_vs_ppu(vs_ppu);
+        }
+        Ok(sys)
+    }
+
+    /// A Famicom Disk System disk (.fds): the RAM adapter is the "cartridge".
+    pub fn from_fds(image: &[u8], base_name: &str, bios: &[u8]) -> Result<Self, String> {
+        let fds = crate::nes::fds::Fds::new(image, bios)?;
+        let cartridge = Cartridge::new(vec![], vec![], Box::new(fds), base_name.to_string(), true);
+        let mut sys = Self::with_cartridge(cartridge, base_name);
+        sys.save_battery_path = "user://GD_EMU/FDS/Save".to_string();
+        sys.save_state_path = "user://GD_EMU/FDS/State".to_string();
+        Ok(sys)
+    }
+
+    fn with_cartridge(cartridge: Cartridge, base_name: &str) -> Self {
+        let buffer_size = 256 * 240 * 4;
+        let frame_ready = Arc::new(AtomicBool::new(false));
         let bus = NesBus::new(cartridge, Arc::clone(&frame_ready));
         let rewind_buffer = RewindBuffer::new(60, 60);
-
-
-        Ok( {
+        {
             Self {
                 bus,
                 cpu: M6502Cpu::new(CpuVariant::Ricoh2A03),
                 save_filename: base_name.to_string(),
                 frame_ready,
                 is_running: Arc::new(AtomicBool::new(false)),
-                save_battery_path: "user://NES/Save".to_string(),
-                save_state_path: "user://NES/State".to_string(),
+                save_battery_path: "user://GD_EMU/NES/Save".to_string(),
+                save_state_path: "user://GD_EMU/NES/State".to_string(),
                 pending_load_request: None,
                 pending_save_request: None,
                 rewind_buffer,
@@ -131,7 +163,7 @@ impl NesSystem {
                 frame_cache: vec![0; buffer_size],
                 brk_trace_saved: false,
             }
-        })
+        }
     }
 
     /*
@@ -404,6 +436,25 @@ impl System for NesSystem {
         if key == "zapper" {
             self.bus.zapper_on = value != 0;
         }
+        // Famicom Disk System: -1 = next side, -2 = eject, else that side (0 = 1A, 1 = 1B...)
+        if key == "fds_side" {
+            if let Some(f) = self.bus.cartridge.mapper_mut().as_fds() {
+                match value { -1 => f.next_side(), -2 => f.insert(None), n => f.insert(Some(n as usize)) }
+            }
+        }
+        if let Some(v) = &mut self.bus.vs {
+            match key {
+                "vs_dip" => v.dips = value as u8,
+                "vs_swap" => v.swap = value != 0,
+                // -1 = as detected at load; else the NES 2.0 PPU number
+                "vs_ppu" => {
+                    let p = if value < 0 { v.detected } else { crate::nes::vs::VsPpu::from_nes2(value as u8).or(v.detected) };
+                    if let Some(p) = p { println!("NES: VS PPU {}", p.name()); }
+                    self.bus.ppu.get_mut().set_vs_ppu(p);
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Mouse as Zapper: left button fires at the pointer, right button fires off screen
@@ -420,6 +471,7 @@ impl System for NesSystem {
             return;
         }
         self.set_input(input_mask);
+        if let Some(v) = &mut self.bus.vs { let (coin, service) = self.bus.vs_buttons; v.frame(coin, service); }
         let mut cpu_cycles_run:u16 = 0;
         self.bus.accesses_this_cycle = 0;
         while !unsafe { (*self.bus.ppu.get()).is_frame_complete() } {
@@ -511,8 +563,18 @@ impl System for NesSystem {
         // (Road Runner jumps into RAM), so drop both when a keyboard sends that.
         if nes_pad_state & 0x30 == 0x30 { nes_pad_state &= !0x30; }   // Up + Down
         if nes_pad_state & 0xC0 == 0xC0 { nes_pad_state &= !0xC0; }   // Left + Right
+        let p2 = Self::nes_pad_bits(crate::common::input::player2(input_mask));
+        if let Some(v) = &self.bus.vs {
+            // VS: sticks + start buttons; coin = the Coin key or player 1's Select,
+            // service = player 2's Select
+            let (a, b) = v.reports(nes_pad_state, p2);
+            self.bus.pad1_state = a;
+            self.bus.pad2_state = b;
+            self.bus.vs_buttons = (input_mask & crate::common::input::COIN != 0 || nes_pad_state & 0x04 != 0, p2 & 0x04 != 0);
+            return;
+        }
         self.bus.pad1_state = nes_pad_state;
-        self.bus.pad2_state = Self::nes_pad_bits(crate::common::input::player2(input_mask));
+        self.bus.pad2_state = p2;
     }
 
         fn drain_audio(&mut self) -> Vec<f32> {
@@ -930,5 +992,127 @@ mod audio_dump {
             }
         }
         std::fs::write(out, pcm).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod vs_tests {
+    use super::*;
+    use crate::common::system::System;
+
+    /// A VS cartridge (NES 2.0 header, PPU `ppu`) whose program turns NMI on by writing
+    /// $80 to $2001 (PPUCTRL on a 2C05, PPUMASK on others), then copies $4016 / $4017 to
+    /// $10 / $11 forever; the NMI counts in $12. `mapper0` with 16 KB CHR = an old dump.
+    fn vs_rom(ppu: u8, nes2: bool) -> Vec<u8> {
+        let mut h = vec![b'N', b'E', b'S', 0x1A, 1, 2, 0x00, if nes2 { 0x09 } else { 0x01 }, 0, 0, 0, 0, 0, if nes2 { ppu } else { 0 }, 0, 0];
+        let mut prg = vec![0xEAu8; 0x4000];
+        let code = [0x78, 0xA2, 0xFF, 0x9A,             // sei; ldx #$ff; txs
+                    0xA9, 0x80, 0x8D, 0x01, 0x20,       // lda #$80; sta $2001
+                    0xAD, 0x16, 0x40, 0x85, 0x10,       // loop: lda $4016; sta $10
+                    0xAD, 0x17, 0x40, 0x85, 0x11,       // lda $4017; sta $11
+                    0x4C, 0x09, 0xC0];                  // jmp loop
+        prg[..code.len()].copy_from_slice(&code);
+        prg[0x100..0x103].copy_from_slice(&[0xE6, 0x12, 0x40]);   // nmi: inc $12; rti
+        prg[0x3FFA..].copy_from_slice(&[0x00, 0xC1, 0x00, 0xC0, 0x00, 0xC1]);
+        h.extend(prg);
+        let mut chr = vec![0u8; 0x4000];
+        chr[0x2000] = 0xAB;                                   // marks CHR bank 1
+        h.extend(chr);
+        h
+    }
+
+    fn run(rom: &[u8], name: &str, frames: u32, input: u32) -> NesSystem {
+        let mut s = NesSystem::from_rom(rom, name, &[]).unwrap();
+        s.rewind_buffer = RewindBuffer::new(1, 1);
+        s.power_on();
+        for _ in 0..frames { s.run_frame(input); }
+        s
+    }
+
+    #[test]
+    fn rc2c05_swaps_ctrl_and_mask() {
+        let s = run(&vs_rom(8, true), "x", 10, 0);
+        assert!(s.bus.ram[0x12] >= 8, "2C05: the write to $2001 turned NMI on ({} NMIs)", s.bus.ram[0x12]);
+        let s = run(&vs_rom(0, true), "x", 10, 0);
+        assert_eq!(s.bus.ram[0x12], 0, "2C03: $2001 is PPUMASK, no NMI");
+        // an old dump that doesn't say: the name decides
+        let mut s = run(&vs_rom(0, false), "Vs. Top Gun (VS)", 10, 0);
+        assert!(s.bus.ram[0x12] >= 8, "Top Gun is a 2C05-04");
+        assert_eq!(s.bus.ppu.get_mut().vs_status_id, Some(0x1B));
+        // System Options: another PPU, then back to the detected one
+        s.set_option("vs_ppu", 3);
+        assert_eq!((s.bus.ppu.get_mut().vs_palette, s.bus.ppu.get_mut().vs_status_id), (Some(2), None));
+        s.set_option("vs_ppu", -1);
+        assert_eq!(s.bus.ppu.get_mut().vs_status_id, Some(0x1B));
+    }
+
+    #[test]
+    fn dips_coins_and_old_mapper_0_dumps() {
+        let mut s = run(&vs_rom(0, false), "game", 2, 0);
+        assert_eq!(s.bus.ram[0x10] & 0xFE, 0, "nothing set");
+        s.set_option("vs_dip", 0xFF);
+        s.run_frame(0);
+        s.run_frame(0);
+        assert_eq!((s.bus.ram[0x10] & 0x18, s.bus.ram[0x11] & 0xFC), (0x18, 0xFC), "DIP switches 1-2 on $4016, 3-8 on $4017");
+        s.run_frame(crate::common::input::COIN);
+        assert_eq!(s.bus.ram[0x10] & 0x20, 0x20, "coin");
+        for _ in 0..5 { s.run_frame(crate::common::input::COIN); }
+        assert_eq!(s.bus.ram[0x10] & 0x20, 0, "one coin per press");
+        // 16 KB of CHR on "mapper 0": really mapper 99, $4016 bit 2 switches the bank
+        let m = s.bus.cartridge.mapper_mut();
+        assert_eq!(m.ppu_read(0), 0);
+        m.notify_4016(4);
+        assert_eq!(m.ppu_read(0), 0xAB, "CHR bank 1");
+    }
+}
+
+#[cfg(test)]
+mod fds_tests {
+    use super::*;
+    use crate::common::system::System;
+
+    /// A stand-in BIOS that reads the disk the way Nintendo's does: motor on, transfer IRQ
+    /// on, the IRQ handler takes each byte from $4031 into $0200+ (count in $00); stops after 15.
+    fn bios() -> Vec<u8> {
+        let mut b = vec![0xEAu8; 0x2000];
+        let reset = [0x78, 0xD8, 0xA2, 0xFF, 0x9A, 0xA9, 0x40, 0x8D, 0x17, 0x40,   // APU frame IRQ off
+                     0xA9, 0x83, 0x8D, 0x23, 0x40,
+                     0xA9, 0x2E, 0x8D, 0x25, 0x40, 0xA9, 0x2F, 0x8D, 0x25, 0x40, 0xA9, 0x2D, 0x8D, 0x25, 0x40,
+                     0xA2, 0x00, 0x86, 0x00, 0xA9, 0xED, 0x8D, 0x25, 0x40, 0x58,
+                     0xA5, 0x00, 0xC9, 0x0F, 0x90, 0xFA,                 // wait for 15 bytes
+                     0x78, 0xA9, 0x2E, 0x8D, 0x25, 0x40, 0x4C, 0x34, 0xE0];   // (jmp to itself)
+        b[..reset.len()].copy_from_slice(&reset);
+        let irq = [0x48, 0x8A, 0x48, 0xA6, 0x00, 0xAD, 0x31, 0x40, 0x9D, 0x00, 0x02, 0xE8, 0x86, 0x00, 0x68, 0xAA, 0x68, 0x40];
+        b[0x100..0x100 + irq.len()].copy_from_slice(&irq);
+        b[0x1F0] = 0x40;
+        b[0x1FFA..].copy_from_slice(&[0xF0, 0xE1, 0x00, 0xE0, 0x00, 0xE1]);
+        b
+    }
+
+    #[test]
+    fn bios_reads_the_disk_through_irqs() {
+        let mut s = NesSystem::from_rom(&crate::nes::fds::tests::image(), "disk", &bios()).unwrap();
+        s.rewind_buffer = RewindBuffer::new(1, 1);
+        s.power_on();
+        let mut frames = 0;
+        while s.bus.ram[0] < 15 && frames < 120 { s.run_frame(0); frames += 1; }
+        assert_eq!(&s.bus.ram[0x200..0x20F], b"\x01*NINTENDO-HVC*", "after {frames} frames");
+        assert!(frames < 40, "spin-up + lead-in + 15 bytes takes ~19 frames: {frames}");
+        // the side controls
+        s.set_option("fds_side", -1);
+        assert_eq!(s.bus.cartridge.mapper_mut().as_fds().unwrap().current_side(), None, "out while swapping");
+        for _ in 0..70 { s.run_frame(0); }
+        assert_eq!(s.bus.cartridge.mapper_mut().as_fds().unwrap().current_side(), Some(1));
+        assert!(s.has_battery(), "disk saves");
+        // the FDS's sound reaches the output: a square wave on the wavetable
+        s.drain_audio();
+        let quiet = s.drain_audio().iter().fold(0f32, |m, x| m.max(x.abs()));
+        let m = s.bus.cartridge.mapper_mut();
+        m.cpu_write(0x4089, 0x80);
+        for i in 0..64 { m.cpu_write(0x4040 + i, if i < 32 { 63 } else { 0 }); }
+        for (a, v) in [(0x4089, 0), (0x4080, 0xA0), (0x4087, 0x80), (0x4082, 0), (0x4083, 2)] { m.cpu_write(a, v); }
+        for _ in 0..10 { s.run_frame(0); }
+        let loud = s.drain_audio().iter().fold(0f32, |m, x| m.max(x.abs()));
+        assert!(quiet < 0.01 && loud > 0.1, "FDS tone in the mix: {quiet} -> {loud}");
     }
 }

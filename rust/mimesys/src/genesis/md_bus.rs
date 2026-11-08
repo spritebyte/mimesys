@@ -454,6 +454,9 @@ impl Z80Bus for Z80View<'_> {
             0x4000..=0x5FFF => b.ym.status(),
             0x8000..=0xFFFF => {
                 let a68 = (b.zbank << 15) | (a as u32 & 0x7FFF);
+                // with the 32X in, the window sees the 68000's whole map (the cartridge moves
+                // to 880000/900000; the 32X's registers answer at A15100), as in ares
+                if b.m32x.is_some() && a68 < 0xE00000 { return M68kBus::read_byte(b, a68); }
                 if a68 < 0x400000 { b.rom_byte(a68) }
                 else if a68 >= 0xE00000 { b.ram[(a68 & 0xFFFF) as usize] }
                 else { 0xFF }
@@ -467,6 +470,7 @@ impl Z80Bus for Z80View<'_> {
         match a {
             0x8000..=0xFFFF => {
                 let a68 = (b.zbank << 15) | (a as u32 & 0x7FFF);
+                if b.m32x.is_some() && a68 < 0xE00000 { return M68kBus::write_byte(b, a68, v); }
                 if a68 >= 0xE00000 { b.ram[(a68 & 0xFFFF) as usize] = v; }
             }
             _ => b.z80_space_write(a, v),

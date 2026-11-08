@@ -63,6 +63,9 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
             Err(e) => { println!("disc image: {e}"); Vec::new() }
         };
     }
+    if crate::nes::fds::is_fds(data) {
+        return vec![Guess { system: "nes", score: 100, why: "Famicom Disk System disk".into() }];
+    }
     if data.starts_with(b"NES\x1A") {
         return vec![Guess { system: "nes", score: 100, why: "iNES header".into() }];
     }
@@ -183,7 +186,7 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
 
     // ---- 3. hints ----
     let by_ext: &[&'static str] = match ext.as_str() {
-        "nes" => &["nes"], "gb" => &["gb"], "gbc" | "cgb" => &["gbc"], "sms" => &["sms"],
+        "nes" | "fds" => &["nes"], "gb" => &["gb"], "gbc" | "cgb" => &["gbc"], "sms" => &["sms"],
         "gg" => &["gg"], "col" | "cv" => &["coleco"], "pce" => &["pce"], "a26" => &["a2600"],
         "a78" => &["a7800"], "gba" | "agb" => &["gba"],
         "md" | "gen" | "smd" => &["md"], "32x" => &["32x"], "nds" | "srl" => &["nds"], "a52" => &["a5200"], "lnx" | "lyx" => &["lynx"], "sfc" | "smc" | "swc" | "fig" => &["snes"], _ => &[],

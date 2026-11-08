@@ -15,4 +15,5 @@ pub mod cheats;
 pub mod debug_log;
 pub mod disc;
 pub mod firmware;
+pub mod frame_blend;
 pub mod rom_detect;pub mod serde_cell;

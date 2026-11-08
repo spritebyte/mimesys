@@ -80,6 +80,15 @@ static func guess_system(data: PackedByteArray, path: String) -> Dictionary:
 static func create_system(system_id: String, data: PackedByteArray, name: String) -> Variant:
 	var bios := PackedByteArray()
 	match system_id:
+		"nes":
+			# a Famicom Disk System disk needs the FDS BIOS
+			var fds := data.size() > 16 and ((data[0] == 0x46 and data[1] == 0x44 and data[2] == 0x53 and data[3] == 0x1A) \
+				or data.slice(1, 15).get_string_from_ascii() == "*NINTENDO-HVC*")
+			if fds:
+				bios = load_bios(AppSettings.bios_path("nes", "user://BIOS/disksys.rom"))
+				if bios.is_empty():
+					OS.alert("Famicom Disk System games need the FDS BIOS: put disksys.rom (8 KB) in user://BIOS/, or pick it in System Options > NES.")
+					return null
 		"coleco":
 			bios = load_bios(AppSettings.bios_path("coleco", "user://BIOS/colecovision.rom"))
 			if bios.is_empty():

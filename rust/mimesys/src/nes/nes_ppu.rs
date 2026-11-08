@@ -79,6 +79,10 @@ pub struct NesPPU {
     // memory blocks
     pub vram: [u8; 4096],
     pub palette_ram: [u8; 32],
+    /// VS System RGB PPU: colour table (vs::PALETTES), PPUCTRL/PPUMASK swapped, PPUSTATUS ID
+    pub vs_palette: Option<usize>,
+    pub vs_swap_regs: bool,
+    pub vs_status_id: Option<u8>,
     pub oam: [u8; 256], // 64 sprites * 4 bytes each
     data_buffer: u8,    // Delayed reading cache buffer for PPUDATA ($2007)
     // --- Timing & Synchronization ---
@@ -232,6 +236,7 @@ impl NesPPU {
             bg_shift_low: 0, bg_shift_high: 0, attr_shift_low: 0, attr_shift_high: 0,
             v_addr: 0, t_addr: 0, data_buffer: 0,
             vram: [0;4096], palette_ram: [0;32], oam: [0;256],
+            vs_palette: None, vs_swap_regs: false, vs_status_id: None,
             scanline_bg: [(0, 0, 0); 33], scanline_sprites: vec![(0, 0xFF, 0, 0, 0, false); 8],
             back_buffer: vec![0; buffer_size],
             front_buffer: Arc::new(Mutex::new(vec![0; buffer_size])),
@@ -1189,7 +1194,10 @@ impl NesPPU {
 
         // ---- 4. WRITE PIXEL TO BACK BUFFER ----
         let color_idx = self.palette_ram[final_palette_offset] & 0x3F;
-        let (r, g, b) = NES_PALETTE[color_idx as usize];
+        let (r, g, b) = match self.vs_palette {
+            Some(p) => crate::nes::vs::PALETTES[p][color_idx as usize],
+            None => NES_PALETTE[color_idx as usize],
+        };
         let pixel_index = (self.scanline as usize * 256 + x) * 4;
         self.back_buffer[pixel_index] = r;
         self.back_buffer[pixel_index + 1] = g;
@@ -1444,6 +1452,7 @@ impl NesPPU {
     /// (value, mask of the bits this register drives)
     fn read_reg_raw(&mut self, mapper: &mut dyn Mapper, reg: u16, open_bus: u8) -> (u8, u8) {
         let defined = match reg {
+            2 if self.vs_status_id.is_some() => 0xFF,
             2 => 0xE0,
             4 => 0xFF,
             7 if (self.v_addr & 0x3FFF) >= 0x3F00 => 0x3F,
@@ -1454,6 +1463,7 @@ impl NesPPU {
             2 => { // $2002 - PPUSTATUS
                 let _is_currently_vblank = self.scanline >= 241 && self.scanline <= 260;
                 let mut res = (self.status & 0xE0) | (open_bus & 0x1F);
+                if let Some(id) = self.vs_status_id { res = (self.status & 0xE0) | id; }
                 // (the sprite-0/overflow bits are re-sampled ~2 dots later by NesBus::read_byte)
 
                 if self.scanline == 241 && self.cycle == 1 {
@@ -1542,7 +1552,16 @@ impl NesPPU {
             self.v_addr = self.v_addr.wrapping_add(self.vram_increment as u16) & 0x3FFF;
         }
     }
+    /// The VS System's 2C03 / 2C04 / 2C05 (None = the NES's own PPU).
+    pub fn set_vs_ppu(&mut self, ppu: Option<crate::nes::vs::VsPpu>) {
+        self.vs_palette = ppu.map(|p| p.palette());
+        self.vs_swap_regs = ppu.is_some_and(|p| p.swaps_ctrl_mask());
+        self.vs_status_id = ppu.and_then(|p| p.status_id());
+    }
+
     pub fn cpu_write_reg(&mut self, mapper: &mut dyn crate::nes::mappers::Mapper, reg: u16, value: u8) {
+        // 2C05: PPUCTRL and PPUMASK trade addresses
+        let reg = if self.vs_swap_regs && reg < 2 { reg ^ 1 } else { reg };
         self.io_refresh(value, 0xFF);   // any PPU register write sets the whole latch
         if self.scanline < 240 && self.cycle > 0 && self.cycle < 256 {
             if reg == 0 || reg == 1 || reg == 5 || reg == 6 {

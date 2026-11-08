@@ -35,6 +35,61 @@ pub struct Cart7800 {
     #[serde(skip)]
     rom: Vec<u8>,
     pub title: String,
+    /// Games whose handlers only work if WSYNC doesn't halt the CPU (see `NO_WSYNC`)
+    #[serde(skip)]
+    pub ignore_wsync: bool,
+    /// MD5 of the ROM without its header (shown in the load message)
+    #[serde(skip)]
+    pub md5: String,
+}
+
+/// MD5 (of the ROM without its header) of the games that need WSYNC ignored: Kung-Fu Master
+/// (NTSC) and two fan versions of it. Their display-list interrupt handlers set a two-byte
+/// vector after a WSYNC and expect to be done before the next interrupt; with WSYNC honoured
+/// and MARIA's DMA stealing cycles, an interrupt lands between the two stores and the
+/// nested handlers overflow the stack. The ProSystem emulator's game list has the same entry
+/// (and, like every game it doesn't flag otherwise, runs it without MARIA stealing CPU cycles
+/// for DMA; with stealing, the handlers start at a different point in the line each frame and
+/// the colors flicker).
+const NO_WSYNC: [[u8; 16]; 3] = [
+    [0xf5, 0x7d, 0x0a, 0xf3, 0x23, 0xd4, 0xe1, 0x73, 0xfb, 0x49, 0xed, 0x44, 0x7f, 0x05, 0x63, 0xd7],
+    [0x41, 0xb1, 0xdf, 0xe4, 0x17, 0x4a, 0xd5, 0x43, 0x4f, 0x1e, 0xf1, 0xae, 0xea, 0xc9, 0x05, 0x92],
+    [0x4f, 0xc0, 0xb1, 0x6e, 0x3a, 0x5c, 0x46, 0x37, 0x90, 0xa0, 0x4f, 0xb4, 0x2a, 0x1e, 0x4c, 0x40],
+];
+
+/// MD5, for the table above.
+pub fn md5(data: &[u8]) -> [u8; 16] {
+    const S: [u32; 64] = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+        5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21];
+    let k: Vec<u32> = (0..64).map(|i| ((i as f64 + 1.0).sin().abs() * 4294967296.0) as u32).collect();
+    let mut h: [u32; 4] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 { msg.push(0); }
+    msg.extend_from_slice(&((data.len() as u64) * 8).to_le_bytes());
+    for chunk in msg.chunks_exact(64) {
+        let m: Vec<u32> = chunk.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let [mut a, mut b, mut c, mut d] = h;
+        for i in 0..64 {
+            let (f, g) = match i / 16 {
+                0 => ((b & c) | (!b & d), i),
+                1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
+                2 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | !d), (7 * i) % 16),
+            };
+            let t = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(a.wrapping_add(f).wrapping_add(k[i]).wrapping_add(m[g]).rotate_left(S[i]));
+            a = t;
+        }
+        h = [h[0].wrapping_add(a), h[1].wrapping_add(b), h[2].wrapping_add(c), h[3].wrapping_add(d)];
+    }
+    let mut out = [0u8; 16];
+    for (i, v) in h.iter().enumerate() { out[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes()); }
+    out
 }
 
 impl Cart7800 {
@@ -69,8 +124,11 @@ impl Cart7800 {
             else if cart_type & 0x08 != 0 { Low::FirstBank }
             else if cart_type & 0x10 != 0 { Low::Bank6 }
             else { Low::Nothing };
+        let digest = md5(&rom);
+        let ignore_wsync = NO_WSYNC.contains(&digest);
+        let md5_hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
         Ok(Self {
-            supergame, low, pokey: cart_type & 0x01 != 0, bank: 0,
+            supergame, low, pokey: cart_type & 0x01 != 0, bank: 0, ignore_wsync, md5: md5_hex,
             ram: if low == Low::Ram { vec![0; BANK] } else { Vec::new() },
             rom, title,
         })
@@ -78,8 +136,11 @@ impl Cart7800 {
 
     pub fn load_state(&mut self, s: Cart7800) {
         let rom = std::mem::take(&mut self.rom);
+        let (ignore_wsync, md5) = (self.ignore_wsync, std::mem::take(&mut self.md5));
         *self = s;
         self.rom = rom;
+        self.ignore_wsync = ignore_wsync;
+        self.md5 = md5;
     }
 
     pub fn rom_len(&self) -> usize { self.rom.len() }

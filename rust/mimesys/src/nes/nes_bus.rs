@@ -65,6 +65,10 @@ pub struct NesBus {
     /// Zapper in port 2 ($4017): on/off, gun position in screen pixels (-1 = off
     /// screen), trigger held
     pub zapper_on: bool,
+    /// VS System: coins, service, DIP switches, stick wiring (None on a NES)
+    pub vs: Option<crate::nes::vs::VsInput>,
+    /// this frame's (coin, service) buttons, for VsInput::frame
+    pub vs_buttons: (bool, bool),
     pub zapper_x: i32,
     pub zapper_y: i32,
     pub zapper_trigger: bool,
@@ -169,7 +173,7 @@ impl NesBus {
             ppu_master: 0, cycle_start: 0, in_cycle: false, in_dmc_dma: false, dma_on_last_read: false,
             need_halt: false, need_dummy_read: false, dmc_dma_running: false, abort_dmc_dma: false,
             sprite_dma: false, out_latch: 0,
-            zapper_on: false, zapper_x: -1, zapper_y: -1, zapper_trigger: false,
+            zapper_on: false, zapper_x: -1, zapper_y: -1, zapper_trigger: false, vs: None, vs_buttons: (false, false),
             trace: EventTrace::from_env(),
         }
     }
@@ -199,6 +203,7 @@ impl NesBus {
             0x4016 => {
             // Samples the current shift register bit, but DOES NOT shift it!
                 let shift_reg = self.pad1_shift_reg.get();
+                if let Some(v) = &self.vs { return (shift_reg & 0x01) | v.bits_4016(); }
                 (shift_reg & 0x01) | (self.open_bus.get() & 0xE0)
             }
 
@@ -238,7 +243,10 @@ impl NesBus {
             }
             0x4016 => {
                 let shift_reg = self.pad1_shift_reg.get();
-                let val = (shift_reg & 0x01) | (self.open_bus.get() & 0xE0);
+                let val = match &self.vs {
+                    Some(v) => (shift_reg & 0x01) | v.bits_4016(),   // VS: every bit is driven
+                    None => (shift_reg & 0x01) | (self.open_bus.get() & 0xE0),
+                };
 
                 if !self.pad_strobe {
                     let next_shift = (shift_reg >> 1) | 0x80;
@@ -252,6 +260,7 @@ impl NesBus {
                 if !self.pad_strobe {
                     self.pad2_shift_reg.set((shift_reg >> 1) | 0x80);
                 }
+                if let Some(v) = &self.vs { return self.set_open_bus((shift_reg & 0x01) | v.bits_4017()); }
                 (shift_reg & 0x01) | (self.open_bus.get() & 0xE0)
            }
             0x4020..=0xFFFF => {
@@ -270,6 +279,9 @@ impl NesBus {
         }
         value
     }
+
+    /// A read's value also becomes the open-bus value (for early returns in `read`).
+    fn set_open_bus(&self, v: u8) -> u8 { self.open_bus.set(v); v }
 
     /// Zapper on $4017: bit 4 = trigger held, bit 3 = 0 when the photodiode sees light,
     /// bits 5-7 open bus.
@@ -407,8 +419,11 @@ impl AddressBus for NesBus {
         self.in_cycle = true;
         self.dot_in_cycle = 0;
         self.accesses_this_cycle = 0;
-        self.cartridge.mapper_mut().step_cycles(1);
+        let mapper = self.cartridge.mapper_mut();
+        mapper.step_cycles(1);
+        let expansion = mapper.audio_out();
         let apu_ptr = self.apu.get();
+        unsafe { (*apu_ptr).expansion = expansion; }
         unsafe { (*apu_ptr).step_one_cycle(); }
         self.total_cpu_cycles += 1;
         // the $4016 latch reaches the controllers' strobe pin on a get->put transition
@@ -681,6 +696,7 @@ impl NesBus {
             }
             0x4016 => {
                 self.out_latch = value;
+                self.cartridge.mapper_mut().notify_4016(value);
             }
             0x4000..=0x401F => { 
                 self.apu.get_mut().write_reg(addr, value);

@@ -41,10 +41,23 @@ fn display_list_160a_object() {
     let mut out = [0u8; OUT_W];
     ma.output_line(&mut out);
     assert_eq!((out[20], out[21], out[22], out[26], out[28]), (0x66, 0x66, 0x55, 0x11, 0x44));
-    assert!(clocks > 31, "DMA took {clocks} clocks");
+    assert_eq!(clocks, 16 + 8 + 2 * 3, "start-up + a 4-byte header + 2 graphics bytes");
     // second line of the zone reads 0x3000
     ma.dma_line(false, &read);
     assert_eq!(ma.line_cells()[13], (2 << 2) | 3);
+}
+
+#[test]
+fn dma_costs_of_zone_end_and_dli() {
+    // zone 0 is one line with an empty list; zone 1 raises a DLI
+    let mut m = mem();
+    m[0x2000..0x2006].copy_from_slice(&[0x00, 0x21, 0x00, 0x80, 0x21, 0x00]);
+    m[0x2100..0x2102].copy_from_slice(&[0x00, 0x00]);
+    let mut ma = maria_with(0x40);
+    let read = |a: u16| m[a as usize];
+    let c = ma.dma_line(true, &read);
+    assert_eq!(c, 16 + 6 + 17, "start-up, shutdown on the zone's last line, DLI overhead");
+    assert!(std::mem::take(&mut ma.nmi));
 }
 
 #[test]
@@ -133,4 +146,65 @@ fn run_7800() {
         }
     }
     println!("{frames} frames in {:?} ({}x{})", t.elapsed(), OUT_W, OUT_H);
+}
+
+#[test]
+fn md5_known_values() {
+    use crate::atari7800::cart::md5;
+    let hex = |d: [u8; 16]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    assert_eq!(hex(md5(b"")), "d41d8cd98f00b204e9800998ecf8427e");
+    assert_eq!(hex(md5(b"abc")), "900150983cd24fb0d6963f7d28e17f72");
+    let long = vec![b'a'; 1000];
+    assert_eq!(hex(md5(&long)), "cabe45dcc9ae5b66ba86600cca6b8ba8");
+}
+
+#[test]
+fn wsync_is_ignored_only_for_listed_games() {
+    use crate::atari7800::a7800_bus::A7800Bus;
+    use crate::common::cpu::m6502::AddressBus;
+    let mut cart = Cart7800::new(&vec![0u8; 0x8000]).unwrap();
+    assert!(!cart.ignore_wsync);
+    let mut bus = A7800Bus::new(cart.clone(), 44100);
+    bus.write_byte(0x0024, 0);
+    assert!(bus.wsync, "WSYNC halts the CPU");
+    cart.ignore_wsync = true;
+    let mut bus = A7800Bus::new(cart, 44100);
+    bus.write_byte(0x0024, 0);
+    assert!(!bus.wsync, "listed games: WSYNC does nothing");
+}
+
+#[test]
+fn listed_games_run_without_cycle_stealing() {
+    // a 32K ROM of NOPs with a one-line display list: DMA runs, and costs the CPU nothing
+    // only when the game is on the list
+    let mut rom = vec![0xEAu8; 0x8000];
+    rom[0x7FFC] = 0x00; rom[0x7FFD] = 0x80;
+    let run = |listed: bool| {
+        let mut sys = A7800System::from_rom(&rom, "t.bin", &[]).unwrap();
+        sys.bus.cart.ignore_wsync = listed;
+        sys.bus.maria.write(0x3C, 0x40);          // DMA on
+        sys.run_frame(0);
+        sys.bus.cycles
+    };
+    assert!(run(true) > run(false), "with stealing the CPU runs fewer cycles per frame");
+}
+
+#[test]
+fn dma_lines_and_dlis_per_frame() {
+    // every zone is one line and asks for a DLI. MARIA fetches on lines 16-257 (242 lines),
+    // the last picture line only shows: one DLI after each fetch (on line 16 the first zone's
+    // DLI and the second's arrive together) = 242. Fetching on line 258 too made it 243.
+    let mut rom = vec![0xEAu8; 0x8000];
+    rom[..4].copy_from_slice(&[0x4C, 0x00, 0x80, 0x40]); // 8000: JMP 8000; 8003: RTI
+    rom[0x7FFA] = 0x03; rom[0x7FFB] = 0x80;     // NMI -> RTI
+    rom[0x7FFC] = 0x00; rom[0x7FFD] = 0x80;
+    let mut sys = A7800System::from_rom(&rom, "t.bin", &[]).unwrap();
+    for z in 0..300usize {                       // DLL at 1800: DLI, 1 line, list at 2100
+        sys.bus.ram[z * 3..z * 3 + 3].copy_from_slice(&[0x80, 0x21, 0x00]);
+    }
+    sys.bus.maria.write(0x2C, 0x18);             // DPPH
+    sys.bus.maria.write(0x30, 0x00);             // DPPL
+    sys.bus.maria.write(0x3C, 0x40);             // DMA on
+    sys.run_frame(0);
+    assert_eq!(sys.dlis, 242);
 }

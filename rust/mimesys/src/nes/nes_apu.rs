@@ -153,6 +153,8 @@ pub struct NesAPU {
     tnd_table: [f32; 203],
     acc: f32,
     acc_n: u32,
+    /// the cartridge's sound this cycle (FDS...), added to the mix before the filters
+    pub expansion: f32,
     hp90: (f32, f32),
     hp440: (f32, f32),
     lp14k: f32,
@@ -362,7 +364,7 @@ impl NesAPU {
             even_cycle: true,
             pulse_table: std::array::from_fn(|i| if i == 0 { 0.0 } else { 95.52 / (8128.0 / i as f32 + 100.0) }),
             tnd_table: std::array::from_fn(|i| if i == 0 { 0.0 } else {163.67 / (24329.0 / i as f32 + 100.0) }),
-            acc: 0.0, acc_n: 0, hp90: (0.0, 0.0), hp440: (0.0, 0.0), lp14k: 0.0,
+            acc: 0.0, acc_n: 0, expansion: 0.0, hp90: (0.0, 0.0), hp440: (0.0, 0.0), lp14k: 0.0,
         }
     }
 
@@ -1196,7 +1198,7 @@ impl NesAPU {
 fn extract_sample(&mut self, tri_output: f32, n_output: f32) {
     let pulse = self.pulse_table[(self.p1_output + self.p2_output) as usize];
     let tnd_i = 3 * tri_output as usize + 2 * n_output as usize + self.dmc_output_level as usize;
-    self.acc += pulse + self.tnd_table[tnd_i];
+    self.acc += pulse + self.tnd_table[tnd_i] + self.expansion;
     self.acc_n += 1;
 
     self.sample_clock += 1.0;

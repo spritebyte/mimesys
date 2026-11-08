@@ -18,6 +18,10 @@ use serde::{Deserialize, Serialize};
 pub trait ExtBus {
     fn read(&mut self, a: u32) -> u16;
     fn write(&mut self, a: u32, v: u16, upper: bool, lower: bool);
+    /// A cache line fill: the 16 bytes at `a` (16-aligned), as 8 reads.
+    fn read_line(&mut self, a: u32, line: &mut [u8; 16]) {
+        for k in 0..8 { line[k * 2..k * 2 + 2].copy_from_slice(&self.read(a + k as u32 * 2).to_be_bytes()); }
+    }
 }
 
 const INVALID: u32 = 1 << 19;
@@ -27,8 +31,10 @@ pub struct Cache {
     pub lines: Vec<[u8; 16]>,
     pub tags: Vec<u32>,
     lrus: Vec<u8>,
-    lru_select: Vec<u8>,
-    lru_update: Vec<Vec<u8>>,
+    /// shortcut: the last line hit for code [0] and data [1]: (address & !15, index);
+    /// cleared whenever a tag changes
+    #[serde(skip, default = "no_last")]
+    last: [(u32, usize); 2],
     pub enable: bool,
     pub disable_code: bool,
     pub disable_data: bool,
@@ -37,59 +43,100 @@ pub struct Cache {
     pub way_select: u8,
 }
 
+fn no_last() -> [(u32, usize); 2] { [(u32::MAX, 0); 2] }
+
+/// LRU tables (ares): the way to replace for each LRU value, and the new LRU value after a
+/// hit or refill in each way.
+const fn lru_tables() -> ([u8; 64], [[u8; 64]; 4]) {
+    let mut select = [3u8; 64];
+    let mut update = [[0u8; 64]; 4];
+    let mut n = 0u8;
+    while n < 64 {
+        let b5 = n >> 5 & 1; let b4 = n >> 4 & 1; let b3 = n >> 3 & 1;
+        let b2 = n >> 2 & 1; let b1 = n >> 1 & 1; let b0 = n & 1;
+        select[n as usize] = if b5 == 1 && b4 == 1 && b3 == 1 { 0 }
+            else if b5 == 0 && b2 == 1 && b1 == 1 { 1 }
+            else if b4 == 0 && b2 == 0 && b0 == 1 { 2 }
+            else { 3 }; // includes the half of the values no rule matches
+        update[0][n as usize] = n & !0b111000;
+        update[1][n as usize] = (n | 0b100000) & !0b000110;
+        update[2][n as usize] = (n | 0b010100) & !0b000001;
+        update[3][n as usize] = n | 0b001011;
+        n += 1;
+    }
+    (select, update)
+}
+static LRU: ([u8; 64], [[u8; 64]; 4]) = lru_tables();
+
 impl Cache {
     fn new() -> Self {
-        let mut lru_select = vec![3u8; 64];
-        let mut lru_update = vec![vec![0u8; 64]; 4];
-        for n in 0..64u8 {
-            let b = |k: u8| n >> k & 1;
-            lru_select[n as usize] = if b(5) == 1 && b(4) == 1 && b(3) == 1 { 0 }
-                else if b(5) == 0 && b(2) == 1 && b(1) == 1 { 1 }
-                else if b(4) == 0 && b(2) == 0 && b(0) == 1 { 2 }
-                else { 3 }; // includes the half of the values no rule matches
-            lru_update[0][n as usize] = n & !0b111000;
-            lru_update[1][n as usize] = (n | 0b100000) & !0b000110;
-            lru_update[2][n as usize] = (n | 0b010100) & !0b000001;
-            lru_update[3][n as usize] = n | 0b001011;
-        }
-        Self { lines: vec![[0; 16]; 256], tags: vec![INVALID; 256], lrus: vec![0; 64], lru_select, lru_update,
+        Self { lines: vec![[0; 16]; 256], tags: vec![INVALID; 256], lrus: vec![0; 64], last: no_last(),
                enable: false, disable_code: false, disable_data: false, two_way: 0, way_select: 0 }
     }
 
+    /// Forget the shortcut (a tag changed).
+    pub fn retag(&mut self) { self.last = no_last(); }
+
     /// The way holding `address`, if any (and the LRU bookkeeping for the hit).
+    #[inline]
     fn hit(&mut self, address: u32) -> Option<usize> {
         let entry = (address >> 4 & 63) as usize;
         let tag = address >> 10 & 0x7FFFF;
-        let lru = self.lrus[entry] as usize;
+        let tags: &[u32; 256] = self.tags[..256].try_into().unwrap();
+        let lru = &mut self.lrus[entry];
         for way in (0..4).rev() {
-            if self.tags[way << 6 | entry] == tag {
-                self.lrus[entry] = self.lru_update[way][lru];
+            if tags[way << 6 | entry] == tag {
+                *lru = LRU.1[way][*lru as usize & 63];
                 return Some(way << 6 | entry);
             }
         }
         None
     }
 
+    /// `hit`, through the shortcut for slot `k` (0 code, 1 data).
+    #[inline]
+    fn hit_fast(&mut self, address: u32, k: usize) -> Option<usize> {
+        let (line, i) = self.last[k];
+        if address & !15 == line {
+            let entry = i & 63;
+            self.lrus[entry] = LRU.1[i >> 6 & 3][self.lrus[entry] as usize & 63];
+            return Some(i);
+        }
+        let h = self.hit(address);
+        if let Some(i) = h { self.last[k] = (address & !15, i); }
+        h
+    }
+
     fn purge_line(&mut self, address: u32) {
+        self.retag();
         let entry = (address >> 4 & 63) as usize;
         let tag = address >> 10 & 0x7FFFF;
         for way in 0..4 { if self.tags[way << 6 | entry] == tag { self.tags[way << 6 | entry] |= INVALID; } }
     }
 
     fn purge_all(&mut self, ways: usize) {
+        self.retag();
         self.lrus.fill(0);
         for t in &mut self.tags[..64 * ways] { *t |= INVALID; }
     }
 }
 
+#[inline]
 fn get(line: &[u8; 16], a: u32, size: u32) -> u32 {
-    let i = (a & 15 & !(size - 1)) as usize;
-    (0..size as usize).fold(0, |v, k| v << 8 | line[i + k] as u32)
+    match size {
+        1 => line[(a & 15) as usize] as u32,
+        2 => { let i = (a & 14) as usize; u16::from_be_bytes([line[i], line[i + 1]]) as u32 }
+        _ => { let i = (a & 12) as usize; u32::from_be_bytes([line[i], line[i + 1], line[i + 2], line[i + 3]]) }
+    }
 }
 
+#[inline]
 fn put(line: &mut [u8; 16], a: u32, size: u32, v: u32) {
-    let i = (a & 15 & !(size - 1)) as usize;
-    for k in 0..size as usize { line[i + k] = (v >> (8 * (size as usize - 1 - k))) as u8; }
+    match size {
+        1 => line[(a & 15) as usize] = v as u8,
+        2 => { let i = (a & 14) as usize; line[i..i + 2].copy_from_slice(&(v as u16).to_be_bytes()); }
+        _ => { let i = (a & 12) as usize; line[i..i + 4].copy_from_slice(&v.to_be_bytes()); }
+    }
 }
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]
@@ -128,6 +175,7 @@ impl Frt {
         const DIV: [u32; 4] = [8, 32, 128, 1];
         let f = DIV[self.cks as usize & 3];
         self.counter += cycles;
+        if self.counter < f { return; }
         let inc = self.counter / f;
         self.counter -= inc * f;
         if inc == 0 { return; }
@@ -157,6 +205,7 @@ impl Wdt {
         if !self.tme || self.wtit { return; } // (watchdog reset mode isn't emulated)
         let f = DIV[self.cks as usize & 7];
         self.counter += cycles;
+        if self.counter < f { return; }
         let inc = self.counter / f;
         self.counter %= f;
         if inc == 0 { return; }
@@ -187,6 +236,9 @@ pub struct Periph {
     /// sub-cycles to charge for the current instruction (cache refills)
     #[serde(skip)]
     pub waits: u32,
+    /// clocks the FRT and WDT haven't counted yet (they catch up every 16, or when read)
+    #[serde(default)]
+    lag: u32,
 }
 
 impl Periph {
@@ -196,12 +248,21 @@ impl Periph {
         regs[0x003] = 0xFF;          // TDR
         regs[0x004] = 0x84;          // SSR: TDRE, TEND
         Self { cache: Cache::new(), dmac: Dmac::default(), frt: Frt::default(), wdt: Wdt::default(), divu: Divu::default(),
-               divuip: 0, dmacip: 0, wdtip: 0, sciip: 0, frtip: 0, focv: 0, witv: 0, regs, waits: 0 }
+               divuip: 0, dmacip: 0, wdtip: 0, sciip: 0, frtip: 0, focv: 0, witv: 0, regs, waits: 0, lag: 0 }
     }
 
     // ---------------- on-chip registers ----------------
 
+    /// Bring the FRT and WDT up to date.
+    #[inline]
+    fn timers(&mut self) {
+        let n = std::mem::take(&mut self.lag);
+        self.frt.run(n);
+        self.wdt.run(n);
+    }
+
     fn io_read(&mut self, a: u32) -> u8 {
+        if matches!(a, 0xFFFF_FE10..=0xFFFF_FE1F | 0xFFFF_FE80..=0xFFFF_FE83) { self.timers(); }
         let d = &self.divu;
         let b = |v: u32, k: u32| (v >> (8 * k)) as u8;
         match a {
@@ -256,6 +317,7 @@ impl Periph {
     }
 
     fn io_write(&mut self, a: u32, v: u8) {
+        if matches!(a, 0xFFFF_FE10..=0xFFFF_FE1F | 0xFFFF_FE80..=0xFFFF_FE83) { self.timers(); }
         let set = |x: &mut u32, k: u32| { *x = (*x & !(0xFF << (8 * k))) | (v as u32) << (8 * k); };
         match a {
             0xFFFF_FE04 => {
@@ -380,14 +442,14 @@ impl Periph {
 }
 
 /// The chip's view of memory for the CPU core (and its DMA).
-pub struct ChipBus<'a> {
+pub struct ChipBus<'a, E: ExtBus + ?Sized> {
     pub p: &'a mut Periph,
-    pub ext: &'a mut dyn ExtBus,
+    pub ext: &'a mut E,
     /// the address of the instruction being executed (cache: code or data?)
     pub fetch: u32,
 }
 
-impl ChipBus<'_> {
+impl<E: ExtBus + ?Sized> ChipBus<'_, E> {
     fn ext_read(&mut self, a: u32, size: u32) -> u32 {
         match size {
             1 => { let w = self.ext.read(a & !1); if a & 1 != 0 { w as u32 & 0xFF } else { (w >> 8) as u32 } }
@@ -406,20 +468,21 @@ impl ChipBus<'_> {
 
     /// A read through the cache (cached area, cache on).
     fn cached_read(&mut self, a: u32, size: u32) -> u32 {
-        if let Some(i) = self.p.cache.hit(a) { return get(&self.p.cache.lines[i], a, size); }
-        let c = &self.p.cache;
         let code = a == self.fetch;
+        if let Some(i) = self.p.cache.hit_fast(a, !code as usize) { return get(&self.p.cache.lines[i & 255], a, size); }
+        let c = &self.p.cache;
         if (c.disable_code && code) || (c.disable_data && !code) { return self.ext_read(a & 0x1FFF_FFFF, size); }
         let entry = (a >> 4 & 63) as usize;
         let lru = c.lrus[entry] as usize;
-        let way = (c.lru_select[lru] | c.two_way) as usize & 3;
+        let way = (LRU.0[lru & 63] | c.two_way) as usize & 3;
         let index = way << 6 | entry;
         let c = &mut self.p.cache;
-        c.lrus[entry] = c.lru_update[way][lru];
+        c.lrus[entry] = LRU.1[way][lru & 63];
         c.tags[index] = a >> 10 & 0x7FFFF;
+        c.retag();
         let base = a & 0x1FFF_FFF0;
         let mut line = [0u8; 16];
-        for k in 0..4 { put(&mut line, k * 4, 4, self.ext_read(base + k * 4, 4)); }
+        self.ext.read_line(base, &mut line);
         self.p.cache.lines[index] = line;
         self.p.waits += 12;
         get(&line, a, size)
@@ -445,7 +508,7 @@ impl ChipBus<'_> {
         match a >> 29 {
             0 => {
                 if through_cache && self.p.cache.enable {
-                    if let Some(i) = self.p.cache.hit(a) { put(&mut self.p.cache.lines[i], a, size, v); } // write-through
+                    if let Some(i) = self.p.cache.hit_fast(a, 1) { put(&mut self.p.cache.lines[i & 255], a, size, v); } // write-through
                 }
                 self.ext_write(a & 0x1FFF_FFFF, size, v)
             }
@@ -455,6 +518,7 @@ impl ChipBus<'_> {
                 let c = &mut self.p.cache;
                 let entry = (a >> 4 & 63) as usize;
                 c.lrus[entry] = (v >> 6 & 63) as u8;
+                c.retag();
                 c.tags[(c.way_select as usize) << 6 | entry] = (a >> 10 & 0x7FFFF) | ((a >> 2 & 1) ^ 1) << 19;
             }
             6 => put(&mut self.p.cache.lines[(a >> 4 & 255) as usize], a, size, v),
@@ -464,13 +528,20 @@ impl ChipBus<'_> {
     }
 }
 
-impl Sh2Bus for ChipBus<'_> {
+impl<E: ExtBus + ?Sized> Sh2Bus for ChipBus<'_, E> {
     fn read8(&mut self, a: u32) -> u8 { self.read(a, 1, true) as u8 }
     fn read16(&mut self, a: u32) -> u16 { self.read(a & !1, 2, true) as u16 }
     fn read32(&mut self, a: u32) -> u32 { self.read(a & !3, 4, true) }
     fn write8(&mut self, a: u32, v: u8) { self.write(a, 1, v as u32, true) }
     fn write16(&mut self, a: u32, v: u16) { self.write(a & !1, 2, v as u32, true) }
     fn write32(&mut self, a: u32, v: u32) { self.write(a & !3, 4, v, true) }
+    #[inline]
+    fn fetch16(&mut self, a: u32) -> u16 {
+        if a >> 29 == 0 && self.p.cache.enable {
+            if let Some(i) = self.p.cache.hit_fast(a, 0) { return get(&self.p.cache.lines[i & 255], a & !1, 2) as u16; }
+        }
+        self.read(a & !1, 2, true) as u16
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -490,7 +561,7 @@ impl Sh7604 {
 
     /// One instruction, then the on-chip interrupts and one DMA transfer. Returns the
     /// clocks it took (1 + cache refills; the outside world adds its own waits).
-    pub fn step(&mut self, ext: &mut dyn ExtBus) -> u32 {
+    pub fn step<E: ExtBus + ?Sized>(&mut self, ext: &mut E) -> u32 {
         self.p.waits = 0;
         let fetch = self.cpu.instruction_pc();
         {
@@ -500,13 +571,13 @@ impl Sh7604 {
         self.intc(&mut *ext);
         self.dma(&mut *ext);
         let clocks = 1 + self.p.waits;
-        self.p.frt.run(clocks);
-        self.p.wdt.run(clocks);
+        self.p.lag += clocks;
+        if self.p.lag >= 16 { self.p.timers(); }
         clocks
     }
 
     /// Take an interrupt from outside the chip if the CPU accepts it now.
-    pub fn external_irq(&mut self, ext: &mut dyn ExtBus, level: u8, vector: u8) -> bool {
+    pub fn external_irq<E: ExtBus + ?Sized>(&mut self, ext: &mut E, level: u8, vector: u8) -> bool {
         if !self.cpu.accepts(level) { return false; }
         let fetch = self.cpu.instruction_pc();
         let mut bus = ChipBus { p: &mut self.p, ext, fetch };
@@ -515,7 +586,9 @@ impl Sh7604 {
     }
 
     /// The on-chip interrupt sources (ares INTC::run order: FRT, DMAC, WDT).
-    fn intc(&mut self, ext: &mut dyn ExtBus) {
+    fn intc<E: ExtBus + ?Sized>(&mut self, ext: &mut E) {
+        let p = &self.p;
+        if !p.frt.pending_irq && p.dmac.pending_irq == 0 && !p.wdt.pending_irq { return; }
         if self.cpu.in_delay_slot() { return; }
         let p = &self.p;
         let take = if p.frt.pending_irq && self.cpu.sr.i < p.frtip {
@@ -542,7 +615,9 @@ impl Sh7604 {
     }
 
     /// One DMA transfer on the first channel that can go (ares: no cycle steal).
-    fn dma(&mut self, ext: &mut dyn ExtBus) {
+    fn dma<E: ExtBus + ?Sized>(&mut self, ext: &mut E) {
+        let d = &self.p.dmac;
+        if !d.dme || !(d.chcr[0].de || d.chcr[1].de) { return; }
         for c in 0..2 {
             let d = &self.p.dmac;
             let h = d.chcr[c];
@@ -553,7 +628,7 @@ impl Sh7604 {
         }
     }
 
-    fn transfer(&mut self, c: usize, ext: &mut dyn ExtBus) {
+    fn transfer<E: ExtBus + ?Sized>(&mut self, c: usize, ext: &mut E) {
         let fetch = self.cpu.instruction_pc();
         let mut bus = ChipBus { p: &mut self.p, ext, fetch };
         let (sar, dar) = (bus.p.dmac.sar[c], bus.p.dmac.dar[c]);

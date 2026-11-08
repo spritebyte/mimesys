@@ -122,7 +122,7 @@ impl AddressBus for A7800Bus {
             // only the TIA's sound registers matter here (MARIA makes the picture)
             0x0015..=0x001A | 0x0115..=0x011A => self.tia.write(a as u8 & 0x1F, v),
             0x0020..=0x003F | 0x0120..=0x013F => {
-                if self.maria.write(a as u8, v) { self.wsync = true; }
+                if self.maria.write(a as u8, v) && !self.cart.ignore_wsync { self.wsync = true; }
             }
             0x0280..=0x02FF => self.riot.write(a, v),
             0x0480..=0x04FF => self.riot.ram[(a & 0x7F) as usize] = v,

@@ -17,11 +17,15 @@
 //!
 //! Still to come: drawing the 32X picture over the Genesis one (step 3), PWM sound (4).
 
+pub mod pwm;
 pub mod sh7604;
 
 use serde::{Deserialize, Serialize};
 use sh7604::{ExtBus, Sh7604};
 use std::collections::VecDeque;
+
+/// How far (SH-2 clocks) one SH-2 may run ahead of the other before they swap.
+const SLICE: i64 = 32;
 
 pub const BIOS_MAGIC: &[u8; 4] = b"MARB";
 
@@ -124,6 +128,41 @@ impl Vdp {
         (self.latch.0 != 0 && self.framebuffer_select != self.framebuffer_active) || self.framebuffer_wait > 0
     }
 
+    /// Draw display line `y` over the Genesis line `row` (RGBA, 320 wide). `backdrop[x]` is true
+    /// where the Genesis pixel is its backdrop colour. Port of ares's M32X::VDP::scanline/plot.
+    pub fn composite(&self, y: usize, row: &mut [u8], backdrop: &[bool]) {
+        let (mode, lines, priority, dotshift) = self.latch;
+        if mode == 0 || y >= if lines { 240 } else { 224 } { return; }
+        let fb = &self.dram[self.front()..self.front() + 0x10000];
+        let mut address = fb[y] as usize;
+        let mut plot = |x: usize, color: u16| {
+            let through = color & 0x8000 != 0;
+            let show = if priority { !through || backdrop[x] } else { through || backdrop[x] };
+            if show {
+                let ch = |v: u16| { let v = (v & 31) as u8; v << 3 | v >> 2 };
+                row[x * 4..x * 4 + 4].copy_from_slice(&[ch(color), ch(color >> 5), ch(color >> 10), 255]);
+            }
+        };
+        match mode {
+            1 => for x in 0..320 {
+                let p = x + dotshift as usize;
+                let w = fb[(address + (p >> 1)) & 0xFFFF];
+                let c = if p & 1 == 0 { w >> 8 } else { w & 0xFF };
+                plot(x, self.cram[c as usize]);
+            },
+            2 => for x in 0..320 { plot(x, fb[address & 0xFFFF]); address += 1; },
+            _ => {
+                let mut x = 0;
+                while x < 320 {
+                    let w = fb[address & 0xFFFF];
+                    address += 1;
+                    let c = self.cram[(w & 0xFF) as usize];
+                    for _ in 0..((w >> 8) as usize + 1).min(320 - x) { plot(x, c); x += 1; }
+                }
+            }
+        }
+    }
+
     pub fn palette_engaged(&self) -> bool { !self.vblank && !self.hblank && self.latch.0 & 1 != 0 }
 
     fn fill(&mut self) {
@@ -137,10 +176,6 @@ impl Vdp {
     }
 }
 
-/// PWM registers (the sound itself is step 4).
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct PwmRegs { pub lmode: u8, pub rmode: u8, pub mono: bool, pub dreq_irq: bool, pub timer: u8, pub cycle: u16,
-                     pub lfifo: u16, pub rfifo: u16, pub mfifo: u16 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct State {
@@ -155,7 +190,7 @@ pub struct State {
     pub dreq: Dreq,
     pub comm: [u16; 8],
     pub vdp: Vdp,
-    pub pwm: PwmRegs,
+    pub pwm: pwm::Pwm,
     /// [master, slave]
     pub irq: [Irqs; 2],
     /// a CPU asked for a reset (A15100 bit 1 written 0)
@@ -167,6 +202,8 @@ pub struct M32x {
     pub st: State,
     /// master-clock time owed to each SH-2, scaled (master * 3 - sh2 * 7)
     debt: [i64; 2],
+    /// the Genesis master clock (for the 44.1 kHz sound output)
+    pub master_hz: f64,
 }
 
 fn word(mem: &[u8], a: usize) -> u16 {
@@ -207,8 +244,8 @@ impl M32x {
             return Err(format!("32X: missing BIOS: {}; put 32X_G_BIOS.BIN, 32X_M_BIOS.BIN, 32X_S_BIOS.BIN in user://BIOS/", missing.join(", ")));
         }
         let st = State { vectors, mrom, srom, sdram: vec![0; 0x20000], io: Io::default(), dreq: Dreq::default(), comm: [0; 8],
-                         vdp: Vdp::default(), pwm: PwmRegs::default(), irq: [Irqs::default(); 2], restart: false };
-        Ok(Self { sh: [Sh7604::new(), Sh7604::new()], st, debt: [0; 2] })
+                         vdp: Vdp::default(), pwm: pwm::Pwm::default(), irq: [Irqs::default(); 2], restart: false };
+        Ok(Self { sh: [Sh7604::new(), Sh7604::new()], st, debt: [0; 2], master_hz: 53_693_175.0 })
     }
 
     /// The console's reset button.
@@ -216,7 +253,7 @@ impl M32x {
         let keep = (std::mem::take(&mut self.st.vectors), std::mem::take(&mut self.st.mrom), std::mem::take(&mut self.st.srom));
         let v4 = self.st.io.vector_level4;
         self.st = State { vectors: keep.0, mrom: keep.1, srom: keep.2, sdram: vec![0; 0x20000], io: Io { vector_level4: v4, ..Io::default() },
-                          dreq: Dreq::default(), comm: [0; 8], vdp: Vdp::default(), pwm: PwmRegs::default(),
+                          dreq: Dreq::default(), comm: [0; 8], vdp: Vdp::default(), pwm: pwm::Pwm::default(),
                           irq: [Irqs::default(); 2], restart: false };
         for s in &mut self.sh { s.reset(true); }
         self.debt = [0; 2];
@@ -231,44 +268,73 @@ impl M32x {
         }
         self.debt[0] += mclk * 3;
         self.debt[1] += mclk * 3;
+        self.st.pwm.debt += mclk * 3;
         while self.debt[0] > 0 || self.debt[1] > 0 {
+            // PWM periods up to where the CPUs are
+            let now = self.debt[0].max(self.debt[1]);
+            while self.st.pwm.debt > now { self.pwm_tick(); }
             let c = if self.debt[0] >= self.debt[1] { 0 } else { 1 };
             if !self.st.io.adapter_reset {
                 // held in reset
                 self.debt[c] = self.debt[c].min(0);
                 continue;
             }
-            let clocks = self.step_cpu(c, rom);
-            self.debt[c] -= clocks as i64 * 7;
-            self.st.vdp.framebuffer_wait = self.st.vdp.framebuffer_wait.saturating_sub(clocks);
+            // CPU c runs until it's SLICE clocks ahead of the other, its time is up, or the
+            // PWM is due
+            let stop = (self.debt[1 - c] - SLICE * 7).max(self.st.pwm.debt).max(0);
+            self.slice(c, rom, stop);
+        }
+        while self.st.pwm.debt > 0 { self.pwm_tick(); }
+    }
+
+    fn pwm_tick(&mut self) {
+        self.st.pwm.debt -= self.st.pwm.period() as i64 * 7;
+        let t = self.st.pwm.tick(self.master_hz);
+        if t.irq {
+            for q in &mut self.st.irq { q.pwm.active = true; }
+            for s in &mut self.sh { s.p.dmac.dreq[1] = t.dreq; }
         }
     }
 
-    /// One instruction (or an interrupt) on SH-2 `c`; returns the SH-2 clocks it took.
-    fn step_cpu(&mut self, c: usize, rom: &[u8]) -> u32 {
-        let mut ext = Ext { st: &mut self.st, rom, cpu: c, waits: 0 };
-        let sh = &mut self.sh[c];
-        if !sh.cpu.id && !sh.cpu.in_delay_slot() {
+    /// Run SH-2 `c` an instruction (or interrupt) at a time while its debt is above `stop`.
+    fn slice(&mut self, c: usize, rom: &[u8], stop: i64) {
+        let M32x { sh, st, debt, .. } = self;
+        let mut ext = Ext { st, rom, cpu: c, waits: 0 };
+        let any = |s: Source| s.active && s.enable;
+        loop {
+            ext.waits = 0;
             let q = ext.st.irq[c];
-            let i = sh.cpu.sr.i;
-            let pick = if q.vres.active && q.vres.enable { Some((14, 71, true)) }
-                else if q.vint.active && q.vint.enable && i < 12 { Some((12, 70, false)) }
-                else if q.hint.active && q.hint.enable && i < 10 { Some((10, 69, false)) }
-                else if q.cmd.active && q.cmd.enable && i < 8 { Some((8, 68, false)) }
-                else if q.pwm.active && q.pwm.enable && i < 6 { Some((6, 67, false)) }
-                else { None };
-            if let Some((level, vector, vres)) = pick {
-                if vres { ext.st.irq[c].vres.active = false; }
-                sh.cpu.interrupt(&mut sh7604::ChipBus { p: &mut sh.p, ext: &mut ext, fetch: 0 }, level, vector);
-                return 1 + ext.waits;
+            let me = &mut sh[c];
+            let mut clocks = 0;
+            if (any(q.vres) || any(q.vint) || any(q.hint) || any(q.cmd) || any(q.pwm)) && !me.cpu.id && !me.cpu.in_delay_slot() {
+                let i = me.cpu.sr.i;
+                let pick = if any(q.vres) { Some((14, 71, true)) }
+                    else if any(q.vint) && i < 12 { Some((12, 70, false)) }
+                    else if any(q.hint) && i < 10 { Some((10, 69, false)) }
+                    else if any(q.cmd) && i < 8 { Some((8, 68, false)) }
+                    else if any(q.pwm) && i < 6 { Some((6, 67, false)) }
+                    else { None };
+                if let Some((level, vector, vres)) = pick {
+                    if vres { ext.st.irq[c].vres.active = false; }
+                    me.cpu.interrupt(&mut sh7604::ChipBus { p: &mut me.p, ext: &mut ext, fetch: 0 }, level, vector);
+                    clocks = 1;
+                }
             }
+            if clocks == 0 {
+                clocks = me.step(&mut ext);
+                // DREQ 0 follows the FIFO
+                let fifo = !ext.st.dreq.fifo.is_empty();
+                for s in sh.iter_mut() { s.p.dmac.dreq[0] = fifo; }
+                // DREQ 1 (PWM) is a pulse: one chance per period for each CPU's DMA
+                // (and turning DREQ off in 4030 drops it on both)
+                sh[c].p.dmac.dreq[1] = false;
+                if !ext.st.pwm.dreq_irq { for s in sh.iter_mut() { s.p.dmac.dreq[1] = false; } }
+            }
+            let clocks = clocks + ext.waits;
+            debt[c] -= clocks as i64 * 7;
+            ext.st.vdp.framebuffer_wait = ext.st.vdp.framebuffer_wait.saturating_sub(clocks);
+            if debt[c] <= stop { break; }
         }
-        let clocks = sh.step(&mut ext);
-        // DREQ 0 follows the FIFO
-        let fifo = !ext.st.dreq.fifo.is_empty();
-        let waits = ext.waits;
-        for s in &mut self.sh { s.p.dmac.dreq[0] = fifo; }
-        clocks + waits
     }
 
     // ---------------- the Genesis side ----------------
@@ -374,7 +440,7 @@ impl M32x {
             0xA1511A => st.io.cartridge_mode as u16,
             0xA15112..=0xA1511E => 0,
             0xA15120..=0xA1512E => st.comm[(a >> 1 & 7) as usize],
-            0xA15130..=0xA15138 => pwm_read(&st.pwm, a & 0xF),
+            0xA15130..=0xA15138 => st.pwm.read(a & 0xF),
             0xA15180..=0xA1518A => vdp_read(&st.vdp, a & 0xF),
             0xA15200..=0xA153FE => if st.vdp.framebuffer_access { 0xFFFF } else { st.vdp.cram[(a as usize >> 1) & 0xFF] },
             _ => return None,
@@ -417,29 +483,13 @@ impl M32x {
             0xA1511A => if lower { st.io.cartridge_mode = v & 1 != 0; },
             0xA15120..=0xA1512E => set(&mut st.comm[(a >> 1 & 7) as usize], upper, lower, v),
             0xA15130 => if lower { st.pwm.lmode = v as u8 & 3; st.pwm.rmode = v as u8 >> 2 & 3; st.pwm.mono = v & 0x10 != 0; },
-            0xA15132..=0xA15138 => pwm_write(&mut st.pwm, a & 0xF, upper, lower, v),
+            0xA15132..=0xA15138 => st.pwm.write(a & 0xF, upper, lower, v),
             0xA15180..=0xA1518A => if !st.vdp.framebuffer_access { vdp_write(&mut st.vdp, a & 0xF, upper, lower, v) },
             0xA15200..=0xA153FE => if !st.vdp.framebuffer_access { set(&mut st.vdp.cram[(a as usize >> 1) & 0xFF], upper, lower, v) },
             _ => return false,
         }
         true
     }
-}
-
-fn pwm_read(p: &PwmRegs, r: u32) -> u16 {
-    match r {
-        0x0 => p.lmode as u16 | (p.rmode as u16) << 2 | (p.mono as u16) << 4 | (p.dreq_irq as u16) << 7 | (p.timer as u16) << 8,
-        0x2 => p.cycle,
-        // (no FIFO yet: always empty)
-        0x4 => p.lfifo & 0xFFF | 1 << 14,
-        0x6 => p.rfifo & 0xFFF | 1 << 14,
-        _ => p.mfifo & 0xFFF | 1 << 14,
-    }
-}
-
-fn pwm_write(p: &mut PwmRegs, r: u32, upper: bool, lower: bool, v: u16) {
-    let w = match r { 0x2 => &mut p.cycle, 0x4 => &mut p.lfifo, 0x6 => &mut p.rfifo, _ => &mut p.mfifo };
-    set(w, upper, lower, v & 0x0FFF);
 }
 
 fn vdp_read(v: &Vdp, r: u32) -> u16 {
@@ -491,6 +541,20 @@ impl ExtBus for Ext<'_> {
         }
     }
 
+    fn read_line(&mut self, a: u32, line: &mut [u8; 16]) {
+        match a {
+            0x0200_0000..=0x03FF_FFFF => {
+                self.waits += 6 * 8;
+                for k in 0..8 { line[k * 2..k * 2 + 2].copy_from_slice(&rom_word(self.rom, (a & 0x3FFFFF) + k as u32 * 2).to_be_bytes()); }
+            }
+            0x0600_0000..=0x0603_FFFF => {
+                let i = (a as usize >> 1) & 0x1FFF8;
+                for k in 0..8 { line[k * 2..k * 2 + 2].copy_from_slice(&self.st.sdram[i + k].to_be_bytes()); }
+            }
+            _ => for k in 0..8 { line[k * 2..k * 2 + 2].copy_from_slice(&self.read(a + k as u32 * 2).to_be_bytes()); },
+        }
+    }
+
     fn write(&mut self, a: u32, v: u16, upper: bool, lower: bool) {
         match a {
             0x0000_4000..=0x0000_43FF => { self.waits += 1; self.io_write(a, v, upper, lower) }
@@ -536,7 +600,7 @@ impl Ext<'_> {
             0x4010 => st.dreq.length,
             0x4012 => st.dreq.fifo.pop_front().unwrap_or(0),
             0x4020..=0x402E => st.comm[(a >> 1 & 7) as usize],
-            0x4030..=0x4038 => pwm_read(&st.pwm, a & 0xF),
+            0x4030..=0x4038 => st.pwm.read(a & 0xF),
             0x4100..=0x410A => vdp_read(&st.vdp, a & 0xF),
             0x4200..=0x43FE => if st.vdp.framebuffer_access { self.waits += 4; st.vdp.cram[(a as usize >> 1) & 0xFF] } else { 0xFFFF },
             _ => 0,
@@ -565,9 +629,9 @@ impl Ext<'_> {
             0x4020..=0x402E => set(&mut st.comm[(a >> 1 & 7) as usize], upper, lower, v),
             0x4030 => {
                 if lower { st.pwm.lmode = v as u8 & 3; st.pwm.rmode = v as u8 >> 2 & 3; st.pwm.mono = v & 0x10 != 0; st.pwm.dreq_irq = v & 0x80 != 0; }
-                if upper { st.pwm.timer = (v >> 8) as u8 & 15; }
+                if upper { st.pwm.timer = (v >> 8) as u8 & 15; st.pwm.periods = 0; }
             }
-            0x4032..=0x4038 => pwm_write(&mut st.pwm, a & 0xF, upper, lower, v),
+            0x4032..=0x4038 => st.pwm.write(a & 0xF, upper, lower, v),
             0x4100..=0x410A => if st.vdp.framebuffer_access { vdp_write(&mut st.vdp, a & 0xF, upper, lower, v) },
             0x4200..=0x43FE => if st.vdp.framebuffer_access { self.waits += 4; set(&mut st.vdp.cram[(a as usize >> 1) & 0xFF], upper, lower, v) },
             _ => {}

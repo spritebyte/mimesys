@@ -37,7 +37,7 @@ const Z80_DIV: i64 = 15;
 /// master clocks into the line before the VDP draws it (the hblank part)
 const HBLANK_MCLK: i64 = 560;
 const SAMPLE_RATE: u32 = 44_100;
-const STATE_VERSION: u32 = 9;
+const STATE_VERSION: u32 = 11;
 /// how long the Z80's vblank /INT stays asserted (about 64 us, as on the console)
 const Z80_INT_MCLK: i64 = 2565;
 const MCLK_NTSC: u64 = 53_693_175;
@@ -167,6 +167,9 @@ impl GenesisSystem {
     }
 
     /// Where the CPUs and the CD drive are (printed to the console).
+    #[cfg(test)]
+    pub fn debug_pc(&self) -> u32 { self.cpu.pc.wrapping_sub(4) }
+
     fn debug_report(&self) {
         let c = &self.cpu;
         crate::dlog!("=== Genesis debug, frame {} ===", self.current_frame);
@@ -180,6 +183,10 @@ impl GenesisSystem {
             crate::dlog!("32X  adapter {} run {} RV {} FM {}  comm {:04X?}  VDP mode {} bank {}  DREQ {} fifo {}",
                          st.io.adapter_enable as u8, st.io.adapter_reset as u8, st.dreq.vram as u8, st.vdp.framebuffer_access as u8,
                          st.comm, st.vdp.mode, st.vdp.framebuffer_active as u8, st.dreq.active as u8, st.dreq.fifo.len());
+            let p = &st.pwm;
+            crate::dlog!("PWM  cycle {} L/R mode {}/{} timer {} dreq {}  playing {:03X}/{:03X}  status {:04X}  irq M {} S {}",
+                         p.cycle, p.lmode, p.rmode, p.timer, p.dreq_irq as u8, p.playing().0, p.playing().1, p.read(0x8),
+                         st.irq[0].pwm.enable as u8, st.irq[1].pwm.enable as u8);
         }
         if let Some(m) = &self.bus.mcd {
             let (s, st) = (&m.cpu, &m.st);
@@ -203,10 +210,11 @@ impl GenesisSystem {
     /// A 32X game: the cartridge plus the 32X. `bios`: an "MARB" bundle with the three
     /// BIOS files and "mdop" (the Genesis load options).
     pub fn from_32x(rom: &[u8], filename: &str, bios: &[u8]) -> Result<Self, String> {
-        let x = crate::m32x::M32x::new(bios)?;
+        let mut x = crate::m32x::M32x::new(bios)?;
         let opts = crate::common::firmware::files(bios, crate::m32x::BIOS_MAGIC).into_iter()
             .find(|(n, _)| n == "mdop").map(|(_, d)| d).unwrap_or_default();
         let mut sys = Self::from_rom(rom, filename, &opts)?;
+        x.master_hz = sys.mclk as f64;
         sys.bus.m32x = Some(Box::new(x));
         sys.save_battery_path = "user://GD_EMU/32X/Save".to_string();
         sys.save_state_path = "user://GD_EMU/32X/State".to_string();
@@ -310,7 +318,13 @@ impl System for GenesisSystem {
             }
             self.run_until(HBLANK_MCLK);
             if let Some(x) = &mut self.bus.m32x { x.hblank(false); }
-            self.bus.vdp.render_line(line as usize);
+            if let Some(row) = self.bus.vdp.render_line(line as usize) {
+                if let Some(x) = &self.bus.m32x {
+                    let v = &mut self.bus.vdp;
+                    let w = crate::genesis::md_vdp::SCREEN_W * 4;
+                    x.st.vdp.composite(line as usize, &mut v.framebuffer[row * w..(row + 1) * w], &v.backdrop);
+                }
+            }
             self.run_until(MCLK_PER_LINE);
             self.t68 -= MCLK_PER_LINE;
             self.tz80 -= MCLK_PER_LINE;
@@ -360,7 +374,8 @@ impl System for GenesisSystem {
         let psg = &mut self.bus.psg.out;
         let mut n = self.fm_out.len().min(psg.len());
         // the Sega CD's sound (CD audio + PCM), also 44.1 kHz stereo
-        let mut cd = self.bus.mcd.as_mut().map(|m| &mut m.st.audio);
+        let mut cd = self.bus.mcd.as_mut().map(|m| &mut m.st.audio)
+            .or(self.bus.m32x.as_mut().map(|x| &mut x.st.pwm.out)); // or the 32X's PWM
         if let Some(c) = &cd { n = n.min(c.len()); }
         let mut mix: Vec<f32> = self.fm_out[..n].iter().zip(&psg[..n]).map(|(f, p)| f + p).collect();
         if let Some(c) = &mut cd {

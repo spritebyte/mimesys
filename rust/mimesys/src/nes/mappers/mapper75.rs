@@ -1,216 +1,66 @@
+//! Mapper 75: Konami VRC1 (VS Goonies, VS Gradius, a few Famicom games; old VS dumps
+//! call it 151). Three 8 KB PRG banks + the last one fixed, two 4 KB CHR banks (5 bits,
+//! the top bit in $9000), mirroring in $9000 bit 0.
+
 use crate::nes::mappers::{decode_state, encode_state, mirror_nt, Mapper, Mirroring};
 use serde::{Deserialize, Serialize};
 
-// iNES Mapper 75: Konami VRC1
-// PRG: Three switchable 8K banks at $8000, $A000, $C000; fixed last 8K bank at $E000
-// CHR: Two switchable 4K banks at $0000 and $1000 (high bits configured via $9000)
-// Mirroring: Controlled by bit 0 of $9000
-
 pub struct Mapper75 {
-    prg_rom: Vec<u8>,
-    chr_rom: Vec<u8>,
-    chr_ram: Vec<u8>,
-    s: State,
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    chr_ram: bool,
+    four_screen: bool,
+    st: State,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-struct State {
-    prg_regs: [u8; 3],
-    chr_low: [u8; 2],
-    reg9000: u8,
-    mirroring: u8,
-    prg_ram: Vec<u8>,
-    sram_dirty: bool,
-}
+#[derive(Serialize, Deserialize)]
+struct State { prg: [u8; 3], chr: [u8; 2], horizontal: bool }
 
 impl Mapper75 {
-    pub fn new(
-        _mapper: u16,
-        _submapper: u8,
-        prg_rom: Vec<u8>,
-        chr_rom: Vec<u8>,
-        mirroring: Mirroring,
-    ) -> Self {
-        let chr_ram = if chr_rom.is_empty() {
-            vec![0; 8192]
-        } else {
-            Vec::new()
-        };
-
-        Self {
-            prg_rom,
-            chr_rom,
-            chr_ram,
-            s: State {
-                prg_regs: [0, 0, 0],
-                chr_low: [0, 0],
-                reg9000: 0,
-                mirroring: match mirroring {
-                    Mirroring::Vertical => 0,
-                    Mirroring::Horizontal => 1,
-                    Mirroring::SingleLower => 2,
-                    Mirroring::SingleUpper => 3,
-                    Mirroring::FourScreen => 4,
-                },
-                prg_ram: vec![0; 8192],
-                sram_dirty: false,
-            },
-        }
+    pub fn new(prg: Vec<u8>, chr: Vec<u8>, mirroring: Mirroring, four_screen: bool) -> Self {
+        let chr_ram = chr.is_empty();
+        let chr = if chr_ram { vec![0; 0x2000] } else { chr };
+        Self { prg, chr, chr_ram, four_screen,
+               st: State { prg: [0, 1, 2], chr: [0, 1], horizontal: mirroring == Mirroring::Horizontal } }
     }
-
-    fn prg_bank_count(&self) -> usize {
-        self.prg_rom.len() / 0x2000 // 8 KiB banks
-    }
-
-    fn chr_bank_count(&self) -> usize {
-        let len = if self.chr_rom.is_empty() {
-            self.chr_ram.len()
-        } else {
-            self.chr_rom.len()
-        };
-        len / 0x1000 // 4 KiB banks
-    }
+    fn prg_banks(&self) -> usize { (self.prg.len() / 0x2000).max(1) }
 }
 
 impl Mapper for Mapper75 {
     fn cpu_read(&self, addr: u16) -> u8 {
-        match addr {
-            0x6000..=0x7FFF => self.s.prg_ram[(addr - 0x6000) as usize],
-            0x8000..=0xFFFF => {
-                let prg_count = self.prg_bank_count();
-                if prg_count == 0 {
-                    return 0;
-                }
-
-                let slot = (addr as usize - 0x8000) / 0x2000;
-                let bank = match slot {
-                    0 => self.s.prg_regs[0] as usize,
-                    1 => self.s.prg_regs[1] as usize,
-                    2 => self.s.prg_regs[2] as usize,
-                    _ => prg_count - 1, // Fixed last 8K bank at $E000-$FFFF
-                } % prg_count;
-
-                let offset = addr as usize & 0x1FFF;
-                let index = (bank * 0x2000) + offset;
-                self.prg_rom.get(index).copied().unwrap_or(0)
-            }
-            _ => 0,
-        }
+        if addr < 0x8000 { return 0; }
+        let slot = (addr as usize - 0x8000) >> 13;
+        let bank = if slot < 3 { self.st.prg[slot] as usize } else { self.prg_banks() - 1 };
+        self.prg[(bank % self.prg_banks()) * 0x2000 + (addr as usize & 0x1FFF)]
     }
-
     fn cpu_write(&mut self, addr: u16, value: u8) {
-        match addr {
-            0x6000..=0x7FFF => {
-                self.s.prg_ram[(addr - 0x6000) as usize] = value;
-                self.s.sram_dirty = true;
+        let s = &mut self.st;
+        match addr & 0xF000 {
+            0x8000 => s.prg[0] = value & 0x0F,
+            0x9000 => {
+                s.horizontal = value & 1 != 0;
+                s.chr[0] = s.chr[0] & 0x0F | (value << 3 & 0x10);
+                s.chr[1] = s.chr[1] & 0x0F | (value << 2 & 0x10);
             }
-            0x8000..=0x8FFF => {
-                self.s.prg_regs[0] = value & 0x0F;
-            }
-            0x9000..=0x9FFF => {
-                self.s.reg9000 = value;
-                self.s.mirroring = value & 0x01; // Bit 0: 0 = Vertical, 1 = Horizontal
-            }
-            0xA000..=0xAFFF => {
-                self.s.prg_regs[1] = value & 0x0F;
-            }
-            0xC000..=0xCFFF => {
-                self.s.prg_regs[2] = value & 0x0F;
-            }
-            0xE000..=0xEFFF => {
-                self.s.chr_low[0] = value & 0x0F;
-            }
-            0xF000..=0xFFFF => {
-                self.s.chr_low[1] = value & 0x0F;
-            }
+            0xA000 => s.prg[1] = value & 0x0F,
+            0xC000 => s.prg[2] = value & 0x0F,
+            0xE000 => s.chr[0] = s.chr[0] & 0x10 | value & 0x0F,
+            0xF000 => s.chr[1] = s.chr[1] & 0x10 | value & 0x0F,
             _ => {}
         }
     }
-
     fn ppu_read(&self, addr: u16) -> u8 {
-        let addr = addr as usize & 0x1FFF;
-        let chr_count = self.chr_bank_count();
-        if chr_count == 0 {
-            return 0;
-        }
-
-        let (bank, offset) = if addr < 0x1000 {
-            let high = ((self.s.reg9000 & 0x02) << 3) as usize;
-            let bank = (self.s.chr_low[0] as usize | high) % chr_count;
-            (bank, addr & 0x0FFF)
-        } else {
-            let high = ((self.s.reg9000 & 0x04) << 2) as usize;
-            let bank = (self.s.chr_low[1] as usize | high) % chr_count;
-            (bank, addr & 0x0FFF)
-        };
-
-        let index = (bank * 0x1000) + offset;
-        if self.chr_rom.is_empty() {
-            self.chr_ram.get(index % self.chr_ram.len()).copied().unwrap_or(0)
-        } else {
-            self.chr_rom.get(index % self.chr_rom.len()).copied().unwrap_or(0)
-        }
+        let bank = self.st.chr[(addr as usize >> 12) & 1] as usize;
+        self.chr[(bank * 0x1000 + (addr as usize & 0x0FFF)) % self.chr.len()]
     }
-
     fn ppu_write(&mut self, addr: u16, value: u8) {
-        if !self.chr_rom.is_empty() {
-            return;
-        }
-        let addr = addr as usize & 0x1FFF;
-        let chr_count = self.chr_bank_count();
-        if chr_count > 0 {
-            let (bank, offset) = if addr < 0x1000 {
-                let high = ((self.s.reg9000 & 0x02) << 3) as usize;
-                let bank = (self.s.chr_low[0] as usize | high) % chr_count;
-                (bank, addr & 0x0FFF)
-            } else {
-                let high = ((self.s.reg9000 & 0x04) << 2) as usize;
-                let bank = (self.s.chr_low[1] as usize | high) % chr_count;
-                (bank, addr & 0x0FFF)
-            };
-
-            let index = (bank * 0x1000) + offset;
-            let target = index % self.chr_ram.len();
-            self.chr_ram[target] = value;
-        }
+        if self.chr_ram { self.chr[addr as usize & 0x1FFF] = value; }
     }
-
     fn mirror_vram_address(&self, addr: u16) -> usize {
-        let mirroring = match self.s.mirroring {
-            0 => Mirroring::Vertical,
-            1 => Mirroring::Horizontal,
-            2 => Mirroring::SingleLower,
-            3 => Mirroring::SingleUpper,
-            4 => Mirroring::FourScreen,
-            _ => Mirroring::Horizontal,
-        };
-        mirror_nt(mirroring, addr)
+        let m = if self.four_screen { Mirroring::FourScreen }
+            else if self.st.horizontal { Mirroring::Horizontal } else { Mirroring::Vertical };
+        mirror_nt(m, addr)
     }
-
-    fn get_sram(&self) -> Option<&[u8]> {
-        Some(&self.s.prg_ram)
-    }
-
-    fn load_sram(&mut self, data: &[u8]) {
-        let n = data.len().min(self.s.prg_ram.len());
-        self.s.prg_ram[..n].copy_from_slice(&data[..n]);
-    }
-
-    fn is_sram_dirty(&self) -> bool {
-        self.s.sram_dirty
-    }
-
-    fn clear_sram_dirty(&mut self) {
-        self.s.sram_dirty = false;
-    }
-
-    fn save_state(&self) -> Vec<u8> {
-        encode_state(&self.s)
-    }
-
-    fn load_state(&mut self, data: &[u8]) {
-        if let Some(state) = decode_state::<State>(data) {
-            self.s = state;
-        }
-    }
+    fn save_state(&self) -> Vec<u8> { encode_state(&self.st) }
+    fn load_state(&mut self, data: &[u8]) { if let Some(s) = decode_state(data) { self.st = s; } }
 }

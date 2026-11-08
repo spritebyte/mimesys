@@ -1,9 +1,14 @@
 // Atari 7800 ProSystem (1986): 6502 "Sally" CPU, MARIA graphics, TIA sound, RIOT timer/ports.
 //
 // Frame (NTSC): 263 lines of 454 MARIA clocks (7.16 MHz). Lines 16-258 are the picture
-// (243 lines), the rest is vertical blank (MSTAT bit 7). On each picture line MARIA's DMA
-// runs early in the line (here at clock 28) and halts the CPU while it reads the display
-// list; the result is shown as that line. A DLI raises the CPU's NMI.
+// (243 lines); MSTAT bit 7 (vertical blank) is set from line 258 to 15. MARIA works a line
+// ahead: early in each line (here at clock 28) it shows the line buffer it filled on the
+// line before, then its DMA (which halts the CPU) fills the buffer for the next line from
+// the display list. Line 16 only fills (nothing to show yet), line 258 only shows, so a
+// frame has 242 DMA lines. A DLI raises the CPU's NMI after the DMA of the last line of the
+// zone before the DLI zone, so the handler's color changes take effect on the zone's first
+// line. (This is ProSystem's order. Doing DMA on line 258 too gave Kung-Fu Master one DLI
+// too many a frame: its chain of DLI handlers then ran one zone off each frame.)
 //
 // Controls (unified input mask, see common/input.rs):
 //   D-pad  joystick     A  left button (button 1)     B  right button (button 2)
@@ -40,6 +45,16 @@ pub struct A7800System {
     save_filename: String,
     save_battery_path: String,
     save_state_path: String,
+    /// debug trace (option "debug_report"): stack-pointer jumps, DLIs and switch changes
+    debug: bool,
+    dbg_sp: u8,
+    dbg_lines: u32,
+    dbg_swchb: u8,
+    dbg_dumped: bool,
+    /// DLIs raised this frame (tests)
+    pub dlis: u32,
+    /// the game is on the timing-workaround list (cart.rs NO_WSYNC)
+    listed: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,7 +75,8 @@ struct A7800State {
 impl A7800System {
     pub fn from_rom(rom: &[u8], filename: &str, _bios: &[u8]) -> Result<Self, String> {
         let cart = Cart7800::new(rom)?;
-        println!("Atari 7800: {} KB{}{}{}", cart.rom_len() / 1024,
+        println!("Atari 7800: {} KB, MD5 {}{}{}{}{}", cart.rom_len() / 1024, cart.md5,
+                 if cart.ignore_wsync { ", WSYNC ignored and no DMA cycle stealing (game list)" } else { "" },
                  if cart.supergame { ", SuperGame" } else { "" },
                  if cart.pokey { ", POKEY (no sound yet)" } else { "" },
                  if cart.title.is_empty() { String::new() } else { format!(", \"{}\"", cart.title) });
@@ -72,9 +88,11 @@ impl A7800System {
             current_frame: 0,
             framebuffer: vec![0; OUT_W * OUT_H * 4],
             save_filename: filename.to_string(),
-            save_battery_path: "user://A7800/Save".to_string(),
-            save_state_path: "user://A7800/State".to_string(),
+            save_battery_path: "user://GD_EMU/A7800/Save".to_string(),
+            save_state_path: "user://GD_EMU/A7800/State".to_string(),
+            debug: false, dbg_sp: 0, dbg_lines: 0, dbg_swchb: 0x0B, dbg_dumped: false, dlis: 0, listed: false,
         };
+        sys.listed = sys.bus.cart.ignore_wsync;
         sys.cpu.power_on(&mut sys.bus);
         sys.bus.clocks = 0;
         Ok(sys)
@@ -87,12 +105,54 @@ impl A7800System {
         self.cpu.step_one_cycle(&mut self.bus);
         self.cpu.sample_interrupt_lines(&mut self.bus);
         self.bus.nmi_line = false;             // an NMI is an edge: one sample is enough
+        if self.debug { self.trace_sp(); }
         self.bus.clocks.max(4)
+    }
+
+    /// Debug: log where the stack pointer jumps (TXS or a corrupted stack), not pushes/pulls.
+    fn trace_sp(&mut self) {
+        let sp = self.cpu.sp;
+        if sp < 0xE0 && !self.dbg_dumped {
+            self.dbg_dumped = true;
+            self.dump_state();
+        }
+        if sp != self.dbg_sp {
+            let d = sp.wrapping_sub(self.dbg_sp) as i8;
+            if (d > 3 || d < -3) && self.dbg_lines < 600 {
+                self.dbg_lines += 1;
+                crate::dlog!("7800 f{} SP {:02X} -> {:02X} at PC {:04X} op {:02X}",
+                    self.current_frame, self.dbg_sp, sp, self.cpu.pc, self.cpu.current_opcode);
+            }
+            self.dbg_sp = sp;
+        }
+    }
+
+    /// Debug: the stack is getting deep (nested NMIs?): what the CPU has been doing, the code
+    /// around the NMI handler (A300-A4FF), zero page and MARIA's registers.
+    fn dump_state(&self) {
+        crate::dlog!("7800 f{}: stack deep (SP {:02X}) at PC {:04X}", self.current_frame, self.cpu.sp, self.cpu.pc);
+        crate::dlog!("{}", self.cpu.history_dump());
+        let hex = |from: u16, to: u16, peek: &dyn Fn(u16) -> u8| {
+            let mut a = from;
+            while a <= to {
+                let row: Vec<String> = (0..16u16).map(|i| format!("{:02X}", peek(a.wrapping_add(i)))).collect();
+                crate::dlog!("  {:04X}: {}", a, row.join(" "));
+                a = a.wrapping_add(16);
+                if a == 0 { break; }
+            }
+        };
+        let (ram, cart) = (&self.bus.ram, &self.bus.cart);
+        let peek = |a: u16| A7800Bus::peek(ram, cart, a);
+        crate::dlog!("cartridge A300-A4FF:");
+        hex(0xA300, 0xA4F0, &peek);
+        crate::dlog!("zero page 40-FF:");
+        hex(0x0040, 0x00F0, &peek);
+        crate::dlog!("MARIA regs: {:02X?} vblank={}", self.bus.maria.regs, self.bus.maria.vblank);
     }
 
     fn run_line(&mut self, line: u32) {
         let visible = (FIRST_LINE..=LAST_LINE).contains(&line);
-        self.bus.maria.vblank = !visible;
+        self.bus.maria.vblank = !(FIRST_LINE..LAST_LINE).contains(&line);
         let mut dma_done = false;
         while self.line_clock < CLOCKS_PER_LINE {
             if !dma_done && self.line_clock >= DMA_AT {
@@ -126,29 +186,41 @@ impl A7800System {
         let mut row = [0u8; OUT_W];
         let bus = &mut self.bus;
         let clocks = if bus.maria.dma_on() {
-            let (ram, cart) = (&bus.ram, &bus.cart);
-            let c = bus.maria.dma_line(line == FIRST_LINE, &|a| A7800Bus::peek(ram, cart, a));
-            bus.maria.output_line(&mut row);
-            c
+            // show what the line before fetched (nothing yet on the first line)
+            if line == FIRST_LINE { bus.maria.background_line(&mut row); } else { bus.maria.output_line(&mut row); }
+            if line == LAST_LINE {
+                bus.maria.dma_idle()
+            } else {
+                let (ram, cart) = (&bus.ram, &bus.cart);
+                bus.maria.dma_line(line == FIRST_LINE, &|a| A7800Bus::peek(ram, cart, a))
+            }
         } else {
             bus.maria.background_line(&mut row);
             0
         };
         if std::mem::take(&mut bus.maria.nmi) {
             bus.nmi_line = true;
+            self.dlis += 1;
+            if self.debug && self.dbg_lines < 600 {
+                self.dbg_lines += 1;
+                crate::dlog!("7800 f{} line {} DLI: PC {:04X} SP {:02X}",
+                    self.current_frame, line, self.cpu.pc, self.cpu.sp);
+            }
         }
         let o = (line - FIRST_LINE) as usize * OUT_W * 4;
         for (px, &c) in self.framebuffer[o..o + OUT_W * 4].chunks_exact_mut(4).zip(row.iter()) {
             let [r, g, b] = rgb(c);
             px.copy_from_slice(&[r, g, b, 0xFF]);
         }
-        clocks
+        // listed games: MARIA doesn't steal cycles from the CPU (see cart.rs NO_WSYNC)
+        if bus.cart.ignore_wsync { 0 } else { clocks }
     }
 }
 
 impl System for A7800System {
     fn run_frame(&mut self, input: u32) {
         self.set_input(input);
+        self.dlis = 0;
         for line in 0..LINES {
             self.run_line(line);
         }
@@ -175,7 +247,20 @@ impl System for A7800System {
         if on(pad::START2) { swchb &= !0x01; }
         if on(pad::SELECT) { swchb &= !0x02; }
         if on(pad::START) { swchb &= !0x08; }
+        if self.debug && swchb != self.dbg_swchb {
+            crate::dlog!("7800 f{} console switches {:02X} -> {:02X}: PC {:04X} SP {:02X}",
+                self.current_frame, self.dbg_swchb, swchb, self.cpu.pc, self.cpu.sp);
+            self.dbg_swchb = swchb;
+            self.dbg_lines = 0;             // fresh budget around each press
+            self.dbg_dumped = false;
+        }
         self.bus.riot.swchb_in = swchb;
+    }
+
+    fn set_option(&mut self, key: &str, value: i64) {
+        if key == "debug_report" { self.debug = value != 0; }
+        // 0 = run listed games (Kung-Fu Master) without their timing workarounds
+        if key == "game_quirks" { self.bus.cart.ignore_wsync = self.listed && value != 0; }
     }
 
     fn drain_audio(&mut self) -> Vec<f32> { std::mem::take(&mut self.bus.tia.audio_out) }

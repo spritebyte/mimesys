@@ -60,9 +60,13 @@ pub struct Vdp {
     pub line_pos: f32,
     #[serde(skip, default = "blank_frame")]
     pub framebuffer: Vec<u8>,
+    /// for the 32X: which pixels of the last drawn line show the backdrop colour
+    #[serde(skip, default = "blank_mask")]
+    pub backdrop: Vec<bool>,
 }
 
 fn blank_frame() -> Vec<u8> { vec![0; SCREEN_W * BUFFER_H * 4] }
+fn blank_mask() -> Vec<bool> { vec![true; SCREEN_W] }
 
 /// 3-bit DAC levels for shadow (0-7), normal (0-14 even), highlight (7-14), as 0-255.
 fn level(l: u16) -> u8 { ((l as u32 * 255 + 7) / 14) as u8 }
@@ -79,7 +83,7 @@ impl Vdp {
             pending: false, code: 0, addr: 0, fill_pending: false, dma_68k: None,
             vint_pending: false, hint_pending: false, hint_counter: 0,
             vblank: true, odd_frame: false, sprite_overflow: false, sprite_collision: false,
-            line: 0, pal: false, sat_cache: vec![0; 80 * 4], line_pos: 0.0, framebuffer: blank_frame(),
+            line: 0, pal: false, sat_cache: vec![0; 80 * 4], line_pos: 0.0, framebuffer: blank_frame(), backdrop: blank_mask(),
         }
     }
 
@@ -448,8 +452,9 @@ impl Vdp {
     /// Draw display line `line` (0-223) into the frame buffer.
     /// `line` is the display line (0-223, or 0-239 in PAL V30). In PAL V28 frames the
     /// picture sits 8 rows down, with the border in the backdrop colour.
-    pub fn render_line(&mut self, line: usize) {
-        if line >= self.vblank_line() as usize { return; }
+    /// Returns the frame buffer row drawn (None in vblank).
+    pub fn render_line(&mut self, line: usize) -> Option<usize> {
+        if line >= self.vblank_line() as usize { return None; }
         let w = self.width();
         let backdrop = self.reg[7] & 0x3F;
         let top = if self.pal && !self.v30() { 8 } else { 0 };
@@ -460,6 +465,7 @@ impl Vdp {
             }
         }
         let mut row = [[0u8; 4]; 320];
+        let mut bd = [true; 320];
         if !self.display_on() {
             let c = self.rgb(backdrop, 1);
             row[..w].fill(c);
@@ -486,6 +492,7 @@ impl Vdp {
                     else { backdrop };
                 let plane_hi = (op(pa) && hi(pa)) || (op(pb) && hi(pb));
                 let sprite_wins = op(ps) && (hi(ps) || !plane_hi);
+                bd[x] = !sprite_wins && !op(pa) && !op(pb);
                 if !sh {
                     row[x] = self.rgb(if sprite_wins { ps } else { plane }, 1);
                     continue;
@@ -510,13 +517,17 @@ impl Vdp {
         for ox in 0..SCREEN_W {
             let sx = if w == 320 { ox } else { ox * 4 / 5 };
             fb[ox * 4..ox * 4 + 4].copy_from_slice(&row[sx]);
+            self.backdrop[ox] = bd[sx];
         }
+        Some(row_y)
     }
 
     /// Restore from a save state, keeping the frame buffer.
     pub fn load_state(&mut self, s: Vdp) {
         let fb = std::mem::take(&mut self.framebuffer);
+        let bd = std::mem::take(&mut self.backdrop);
         *self = s;
         self.framebuffer = fb;
+        self.backdrop = bd;
     }
 }

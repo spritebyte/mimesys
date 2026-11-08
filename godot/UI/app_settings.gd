@@ -23,7 +23,7 @@ const ALL_ACTIONS := [
 
 ## File extension -> system (controls profile) id, for extensions that only one system uses.
 const SYSTEM_BY_EXT := {
-	"nes": "nes", "gb": "gb", "gbc": "gb", "gba": "gba", "agb": "gba", "col": "coleco", "cv": "coleco",
+	"nes": "nes", "fds": "nes", "gb": "gb", "gbc": "gb", "gba": "gba", "agb": "gba", "col": "coleco", "cv": "coleco",
 	"sms": "sms", "gg": "gg", "pce": "pce", "a26": "a2600", "a78": "a7800", "a52": "a5200", "lnx": "lynx", "lyx": "lynx", "sfc": "snes", "smc": "snes",
 	"md": "md", "gen": "md", "smd": "md", "nds": "nds",
 	"cue": "md", "iso": "md",      # Sega CD discs (the Genesis pad profile)
@@ -52,11 +52,17 @@ var rom_systems := {}            # "path" or "path|file in zip" -> system id the
 ## Per-system options (frontend side). Missing keys fall back to these defaults.
 const OPTION_DEFAULTS := {
 	"aspect": "console",     # "console" = the system's TV shape, "square" = square pixels
-	"smooth": false,         # bilinear filtering instead of sharp pixels
+	"smooth": false,         # (old setting) bilinear filtering; "filter" replaces it
+	"filter": "",            # "sharp", "smooth", "sharp_smooth", "scanlines", "crt", "lcd" ("" = from "smooth")
+	"filter_strength": 60,   # scanlines / CRT / LCD effect strength, 0-100
+	"flicker": 0,            # flicker blend: 0 off, 1 blend (50/50 with the last frame), 2 phosphor fade
 	"crop_top": 0, "crop_bottom": 0, "crop_left": 0, "crop_right": 0,
 	"bios": "",              # "" = the default path below
 	"skip_bios": false,      # boot without the BIOS / boot ROM (where the system allows it)
 	"zapper": false,         # NES: Zapper light gun in port 2, aimed with the mouse
+	"vs_ppu": -1,            # NES VS System: -1 = from the cartridge, else the NES 2.0 PPU number (0-12)
+	"vs_swap": false,        # NES VS System: player 1 on the left stick
+	"vs_dip": 0,             # NES VS System: DIP switches 1-8 (bit 0 = switch 1)
 	"gb_model": "auto",      # Game Boy: "auto" (colour games on a GBC), "dmg", "cgb", "sgb"
 	"bios_dmg": "",          # Game Boy: original Game Boy boot ROM ("" = default path)
 	"bios_sgb": "",          # Game Boy: Super Game Boy boot ROM ("" = default path)
@@ -67,6 +73,9 @@ const OPTION_DEFAULTS := {
 	"nds_swap": false,       # DS: swap the screens' places
 	"lynx_debug": false,     # Lynx: print the sound registers every 10 s (for bug reports)
 	"snes_debug": false,     # SNES: print where the CPU and sound CPU are (for bug reports)
+	"a7800_quirks": true,    # Atari 7800: timing workarounds for listed games (Kung-Fu Master)
+	"a7800_debug": false,    # Atari 7800: trace stack jumps, DLIs and console switches to user://debug_a7800.log
+	"nes_debug": false,      # NES: write the mapper trace to user://debug_nes.log (for bug reports)
 	"md_debug": false,       # Genesis / Sega CD: print where the CPUs and the CD drive are (for bug reports)
 	"lynx_rotate": 0,        # Lynx: 0 from the cartridge, 1 none, 2 left, 3 right
 	"a5200_trackball": false, # 5200: controller 1 is a Trak-Ball rolled with the mouse
@@ -76,6 +85,7 @@ const GB_DMG_BIOS_DEFAULT := "user://BIOS/dmg_boot.bin"
 const GB_SGB_BIOS_DEFAULT := "user://BIOS/sgb_boot.bin"
 ## Systems that load a BIOS, and where it's looked for by default.
 const BIOS_DEFAULTS := {
+	"nes": "user://BIOS/disksys.rom",    # Famicom Disk System only (cartridges don't need it)
 	"coleco": "user://BIOS/colecovision.rom",
 	"gb": "user://BIOS/gbc_bios.bin",
 	"gba": "user://BIOS/gba_bios.bin",
@@ -225,6 +235,14 @@ func save_settings() -> void:
 
 func get_option(system_id: String, key: String) -> Variant:
 	return _options.get(system_id, {}).get(key, OPTION_DEFAULTS[key])
+
+
+## The picture filter for a system ("filter", or the old "smooth" switch if it was never set).
+func filter_of(system_id: String) -> String:
+	var f: String = get_option(system_id, "filter")
+	if f == "":
+		f = "smooth" if get_option(system_id, "smooth") else "sharp"
+	return f
 
 
 func set_option(system_id: String, key: String, value: Variant) -> void:
