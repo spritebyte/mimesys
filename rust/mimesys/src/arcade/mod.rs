@@ -12,6 +12,7 @@ pub mod simpsons;
 pub mod williams;
 pub mod jedi;
 pub mod rastan;
+pub mod tmnt;
 pub mod state;
 pub mod hiscore;
 
@@ -96,6 +97,8 @@ pub fn load_arcade(driver: &str, set_name: &str, mut regions: HashMap<String, Ve
             Ok(wrap(DdSystem::new(v, set_name, regions)?, hs, "Technos"))
         },
         // settings and high scores live in the board's EEPROM (battery save)
+        "tmnt" | "tmnt2p" => Ok(Box::new(tmnt::tmnt_system::TmntSystem::new(
+            set_name, regions, driver == "tmnt2p")?)),
         "simpsons" | "simpsons2p" => Ok(Box::new(simpsons::simpsons_system::SimpsonsSystem::new(
             set_name, regions, driver == "simpsons2p")?)),
         other => Err(format!("no arcade driver name '{other}'")),

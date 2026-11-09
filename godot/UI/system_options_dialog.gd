@@ -191,13 +191,16 @@ func _rebuild() -> void:
 		ldbg.toggled.connect(func(on): _put("lynx_debug", on))
 		_row("Debug", ldbg)
 
+	# Arcade: debug dump
+	if sys == "arcade":
+		var cdbg := CheckBox.new()
+		cdbg.text = "Write a video debug dump (user://debug_arcade.log; TMNT only; for bug reports; applies when a game loads)"
+		cdbg.button_pressed = _opt("arcade_debug")
+		cdbg.toggled.connect(func(on): _put("arcade_debug", on))
+		_row("Debug", cdbg)
+
 	# 7800: debug trace
 	if sys == "a7800":
-		var aq := CheckBox.new()
-		aq.text = "Timing workarounds for games that need them (Kung-Fu Master: WSYNC ignored, no DMA cycle stealing; applies when a game loads)"
-		aq.button_pressed = _opt("a7800_quirks")
-		aq.toggled.connect(func(on): _put("a7800_quirks", on))
-		_row("Compatibility", aq)
 		var adbg := CheckBox.new()
 		adbg.text = "Write a debug trace (user://debug_a7800.log; for bug reports; applies when a game loads)"
 		adbg.button_pressed = _opt("a7800_debug")

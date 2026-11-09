@@ -73,9 +73,9 @@ const OPTION_DEFAULTS := {
 	"nds_swap": false,       # DS: swap the screens' places
 	"lynx_debug": false,     # Lynx: print the sound registers every 10 s (for bug reports)
 	"snes_debug": false,     # SNES: print where the CPU and sound CPU are (for bug reports)
-	"a7800_quirks": true,    # Atari 7800: timing workarounds for listed games (Kung-Fu Master)
 	"a7800_debug": false,    # Atari 7800: trace stack jumps, DLIs and console switches to user://debug_a7800.log
 	"nes_debug": false,      # NES: write the mapper trace to user://debug_nes.log (for bug reports)
+	"arcade_debug": false,   # Arcade: write a video RAM / register dump to user://debug_arcade.log (TMNT; for bug reports)
 	"md_debug": false,       # Genesis / Sega CD: print where the CPUs and the CD drive are (for bug reports)
 	"lynx_rotate": 0,        # Lynx: 0 from the cartridge, 1 none, 2 left, 3 right
 	"a5200_trackball": false, # 5200: controller 1 is a Trak-Ball rolled with the mouse

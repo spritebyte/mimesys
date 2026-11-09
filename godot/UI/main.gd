@@ -501,11 +501,9 @@ func _apply_display_options() -> void:
 		emu_system.set_option("vs_dip", int(AppSettings.get_option(sys, "vs_dip")))
 		emu_system.set_option("vs_swap", 1 if AppSettings.get_option(sys, "vs_swap") else 0)
 		emu_system.set_option("vs_ppu", int(AppSettings.get_option(sys, "vs_ppu")))
-	if sys == "a7800":
-		emu_system.set_option("game_quirks", 1 if AppSettings.get_option(sys, "a7800_quirks") else 0)
 	# GBA cartridge clock (Pokemon etc.): local time = UTC + this many minutes
 	emu_system.set_option("rtc_utc_offset", Time.get_time_zone_from_system().bias)
-	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug", "md": "md_debug", "nes": "nes_debug", "a7800": "a7800_debug"}
+	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug", "md": "md_debug", "nes": "nes_debug", "a7800": "a7800_debug", "arcade": "arcade_debug"}
 	var dbg_key: String = dbg_keys.get(sys, "")
 	var dbg_on: bool = dbg_key != "" and AppSettings.get_option(sys, dbg_key)
 	# the report also goes to user://debug_<system>.log (the console loses its start)
