@@ -777,3 +777,14 @@ fn cheats_patch_rom_and_write_ram() {
     assert_eq!(s.bus.wram[0x0DBE], 0x09, "Pro Action Replay");
     assert_eq!(s.bus.wram[0x0100], 0x77, "low-RAM mirror");
 }
+
+#[test]
+fn pad_2_has_y_l_and_r() {
+    use crate::common::input as pad;
+    let mut s = SnesSystem::from_rom(TEST_ROM, "test", &[]).unwrap();
+    s.set_extra_input(pad::EXT_P2_Y | pad::EXT_P2_L | pad::EXT_P2_R);
+    s.set_input(pad::B << pad::P2_SHIFT | pad::P2_X);
+    // B Y Select Start U D L R | A X L R
+    assert_eq!(s.bus.pads[1], 1 << 15 | 1 << 14 | 1 << 6 | 1 << 5 | 1 << 4);
+    assert_eq!(s.bus.pads[0], 0);
+}

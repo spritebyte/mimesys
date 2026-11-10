@@ -543,3 +543,13 @@ fn cheats_patch_rom_and_write_ram() {
     b.cheats.set(&[]);
     assert_eq!(b.read_word(0x008010), 0x1011);
 }
+
+#[test]
+fn pad_2_has_six_buttons() {
+    use crate::common::input as pad;
+    let mut s = GenesisSystem::from_rom(&test_rom(), "test", &[]).unwrap();
+    s.set_extra_input(pad::EXT_P2_Y | pad::EXT_P2_L | pad::EXT_P2_R | pad::EXT_P2_Z);
+    s.set_input(pad::B << pad::P2_SHIFT);
+    assert_eq!(s.bus.io.pads[1].buttons, PAD_B | PAD_X | PAD_Y | PAD_Z | PAD_MODE);
+    assert_eq!(s.bus.io.pads[0].buttons, 0);
+}

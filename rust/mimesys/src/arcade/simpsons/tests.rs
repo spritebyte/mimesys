@@ -273,4 +273,9 @@ fn simpsons_player_slots() {
     // pad 2 drives the next slot (Lisa)
     m.set_input(pad::A << pad::P2_SHIFT);
     assert_eq!(m.board.read(0x1F93), 0xDF);
+    // pads 3 / 4: the slots after that (Homer, Marge)
+    m.set_extra_input(pad::B << pad::EXT_P3_SHIFT | pad::EXT_P4_START);
+    m.set_input(0);
+    assert_eq!(m.board.read(0x1F90), 0xEF, "pad 3 = Marge (slot 1)");
+    assert_eq!(m.board.read(0x1F91), 0x7F, "pad 4 start = Homer (slot 2)");
 }

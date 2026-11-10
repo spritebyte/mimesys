@@ -266,6 +266,7 @@ impl M68000 {
     // ================================================================ operand fetch / store
 
     fn fetch_operand(&mut self, bus: &mut dyn M68kBus, i: &Inst, n: usize) -> R<()> {
+        self.program_read = matches!(i.m[n], Mode::PcDisp | Mode::PcIndex);
         let long = i.size == Size::Long;
         let reg = i.reg[n] as usize;
         let an = 8 + reg;
@@ -367,6 +368,7 @@ impl M68000 {
 
     /// CalcEffectiveAddress (no data access), for operand `n`.
     fn calc_ea(&mut self, bus: &mut dyn M68kBus, i: &Inst, n: usize) -> R<()> {
+        self.program_read = matches!(i.m[n], Mode::PcDisp | Mode::PcIndex);
         let reg = i.reg[n] as usize;
         let an = 8 + reg;
         match i.m[n] {
@@ -398,6 +400,7 @@ impl M68000 {
 
     /// ..._n_np form of (d8, An/PC, Xn) used by MOVEM and TAS.
     fn calc_ea_index_n_np(&mut self, bus: &mut dyn M68kBus, i: &Inst, n: usize) -> R<()> {
+        self.program_read = matches!(i.m[n], Mode::PcDisp | Mode::PcIndex);
         let base = if i.m[n] == Mode::PcIndex { self.pc.wrapping_sub(2) } else { self.r[8 + i.reg[n] as usize] };
         self.ea[n] = self.d8xn(base);
         self.idle(1);

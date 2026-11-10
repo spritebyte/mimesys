@@ -67,6 +67,8 @@ pub struct GenesisSystem {
     ym_mclk: i64,
     /// FM resampled to 44.1 kHz (interleaved stereo), waiting to be mixed with the PSG
     fm_out: Vec<f32>,
+    /// extra input word (player 2's X / Y / Z / Mode) for the next frame
+    ext: u32,
     fm_acc: (f32, f32, u32),
     fm_phase: u64,
     /// master clock rate (NTSC or PAL)
@@ -142,7 +144,7 @@ impl GenesisSystem {
             z80: Z80Cpu::new(),
             bus,
             t68: 0, tz80: 0, tmcd: 0, t32x: 0, z80_int_end: 0,
-            ym_mclk: 0, fm_out: Vec::new(), fm_acc: (0.0, 0.0, 0), fm_phase: 0, mclk, current_frame: 0, debug: false,
+            ym_mclk: 0, fm_out: Vec::new(), ext: 0, fm_acc: (0.0, 0.0, 0), fm_phase: 0, mclk, current_frame: 0, debug: false,
             title: header.title,
             save_filename: filename.to_string(),
             save_battery_path: "user://GD_EMU/Genesis/Save".to_string(),
@@ -365,8 +367,15 @@ impl System for GenesisSystem {
         }
         self.bus.io.pads[0].buttons = p1;
         let p2 = pad::player2(m);
-        self.bus.io.pads[1].buttons = pad_bits(p2, pad::SELECT, pad::B, pad::A, m & pad::START2 != 0);
+        let mut p2b = pad_bits(p2, pad::SELECT, pad::B, pad::A, m & pad::START2 != 0);
+        // 6-button pad 2: P2 Y / L / R = X / Y / Z (like pad 1), P2 Z = Mode
+        for (bit, b) in [(pad::EXT_P2_Y, PAD_X), (pad::EXT_P2_L, PAD_Y), (pad::EXT_P2_R, PAD_Z), (pad::EXT_P2_Z, PAD_MODE)] {
+            if self.ext & bit != 0 { p2b |= b; }
+        }
+        self.bus.io.pads[1].buttons = p2b;
     }
+
+    fn set_extra_input(&mut self, ext: u32) { self.ext = ext; }
 
     /// FM + PSG. Both run at 44.1 kHz of emulated time; whatever one has beyond the other
     /// waits for the next frame.

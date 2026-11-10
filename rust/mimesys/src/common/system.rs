@@ -22,6 +22,9 @@ pub trait System: Send {
     fn drain_audio(&mut self) -> Vec<f32>;
     fn sample_rate(&self) -> u32;
     fn set_input(&mut self, input: u32);
+    /// Extra input word for the next run_frame (common::input EXT_*: player 2 buttons 4-6,
+    /// players 3 / 4). Systems that don't use it ignore it.
+    fn set_extra_input(&mut self, _ext: u32) {}
     fn save_state(&self) -> Vec<u8>;
     fn load_state(&mut self, data: &[u8]) -> Result<(), String>;
     fn load_sram(&mut self, data: &[u8]);

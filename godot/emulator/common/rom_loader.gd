@@ -485,8 +485,16 @@ static func _build_regions(db: Dictionary, set_id: String, pool: Array) -> Dicti
 			var nibble: String = rom.get("nibble", "")
 			# "step": 2 = every other byte (MAME ROM_LOAD16_BYTE)
 			var step: int = rom.get("step", "0x1").hex_to_int()
+			# "group": 2 = 16-bit words, `step` apart (MAME ROM_LOAD64_WORD: group 2, step 8)
+			# "swap": true = bytes of each word swapped (MAME ROM_LOAD16_WORD_SWAP)
+			var group: int = int(rom.get("group", 1))
+			var swap: bool = rom.get("swap", false)
 			for off in [rom["offset"]] + rom.get("reload", []):
-				_copy_into(buf, off.hex_to_int(), chunk, nibble, step)
+				if nibble == "":
+					# done in Rust: a byte loop here is slow for multi-megabyte ROMs
+					buf = EmuSystem.place_rom(buf, off.hex_to_int(), chunk, step, group, swap)
+				else:
+					_copy_into(buf, off.hex_to_int(), chunk, nibble, step)
 		if optional and not found_any:
 			continue
 		out[region_name] = buf

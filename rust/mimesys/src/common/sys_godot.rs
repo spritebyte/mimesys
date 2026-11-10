@@ -67,6 +67,15 @@ impl EmuSystem {
         })
     }
  
+    /// ROM loader helper (rom_loader.gd): `src` placed into `dst` like a MAME ROM_LOAD macro,
+    /// see arcade::place_rom. Returns the new region.
+    #[func]
+    fn place_rom(dst: PackedByteArray, offset: i64, src: PackedByteArray, step: i64, group: i64, swap: bool) -> PackedByteArray {
+        let mut d = dst.to_vec();
+        crate::arcade::place_rom(&mut d, offset.max(0) as usize, src.as_slice(), step.max(1) as usize, group.max(1) as usize, swap);
+        PackedByteArray::from(d.as_slice())
+    }
+
     fn finish_load(&mut self, req: LoadRequest) -> bool {
         match load_system(req) {
             Ok(sys) => { self.system = Some(sys); true }
@@ -81,6 +90,13 @@ impl EmuSystem {
 //            sys.bus.joypad.set_button_state(input_mask as u8, &mut sys.bus.iflags);
             sys.run_frame(input);
         }
+    }
+
+    /// Extra input for the next run_slice: player 2 buttons 4-6 and players 3 / 4
+    /// (common::input EXT_*).
+    #[func]
+    pub fn set_extra_input(&mut self, ext: u32) {
+        if let Some(sys) = &mut self.system { sys.set_extra_input(ext); }
     }
 
     /// Microseconds per frame for the loaded game (0 = the frontend's default).

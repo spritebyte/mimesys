@@ -6,11 +6,14 @@ extends Node
 ## Each system keeps its own binding table; apply_input_profile(system_id) rewrites those
 ## actions when a game loads. Every action has one keyboard and one controller slot.
 ## Defaults are whatever the project's Input Map has at startup; controller defaults are
-## tied to pad 1 for player 1 actions and pad 2 for player 2 (c2_*) actions.
+## tied to pad 1 for player 1 actions, pad 2 for player 2 (c2_*), pads 3 / 4 for c3_* / c4_*.
 ## Controller bindings remember which pad they came from ("dev"), so two pads can drive
 ## two players; bindings saved before that ("dev" missing) still match any pad.
 
 const PATH := "user://settings.cfg"
+
+## Default controller (0-based) for each player's actions.
+const PAD_OF_PREFIX := {"c2_": 1, "c3_": 2, "c4_": 3}
 
 const ALL_ACTIONS := [
 	"c1_up", "c1_down", "c1_left", "c1_right", "c1_b", "c1_a", "c1_select", "c1_start",
@@ -19,6 +22,9 @@ const ALL_ACTIONS := [
 	"c2_up", "c2_down", "c2_left", "c2_right", "c2_b", "c2_a", "c2_select",
 	"c1_0", "c1_1", "c1_2", "c1_3", "c1_4", "c1_5", "c1_6", "c1_7", "c1_8", "c1_9",
 	"c1_star", "c1_hash",
+	"c2_y", "c2_z", "c2_l1", "c2_r1",
+	"c3_up", "c3_down", "c3_left", "c3_right", "c3_b", "c3_a", "c3_x", "c3_y", "c3_start", "c3_coin",
+	"c4_up", "c4_down", "c4_left", "c4_right", "c4_b", "c4_a", "c4_x", "c4_y", "c4_start", "c4_coin",
 ]
 
 ## File extension -> system (controls profile) id, for extensions that only one system uses.
@@ -122,7 +128,8 @@ func _init() -> void:
 		"md": {"name": "Genesis / Mega Drive", "actions": dpad + [
 			["c1_x", "A [X]"], ["c1_b", "B [B]"], ["c1_a", "C [A]"], ["c1_start", "Start"],
 			["c1_y", "X [Y]"], ["c1_l1", "Y [L]"], ["c1_r1", "Z [R]"], ["c1_select", "Mode [Select]"]] + dpad2 + [
-			["c2_select", "P2 A [P2 Select]"], ["c2_b", "P2 B [B]"], ["c2_a", "P2 C [A]"], ["c2_start", "P2 Start"]]},
+			["c2_select", "P2 A [P2 Select]"], ["c2_b", "P2 B [B]"], ["c2_a", "P2 C [A]"], ["c2_start", "P2 Start"],
+			["c2_y", "P2 X [Y]"], ["c2_l1", "P2 Y [L]"], ["c2_r1", "P2 Z [R]"], ["c2_z", "P2 Mode [Z]"]]},
 		"nds": {"name": "Nintendo DS (stylus = mouse on the bottom screen)", "actions": dpad + [
 			["c1_a", "A"], ["c1_b", "B"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_l1", "L"], ["c1_r1", "R"],
 			["c1_select", "Select"], ["c1_start", "Start"], ["c1_z", "Microphone (blow) [Z]"]]},
@@ -139,7 +146,8 @@ func _init() -> void:
 		"snes": {"name": "Super Nintendo", "actions": dpad + [
 			["c1_a", "A"], ["c1_b", "B"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_l1", "L"], ["c1_r1", "R"],
 			["c1_select", "Select"], ["c1_start", "Start"]] + dpad2 + [
-			["c2_a", "P2 A"], ["c2_b", "P2 B"], ["c2_x", "P2 X"], ["c2_select", "P2 Select"], ["c2_start", "P2 Start"]]},
+			["c2_a", "P2 A"], ["c2_b", "P2 B"], ["c2_x", "P2 X"], ["c2_y", "P2 Y"], ["c2_l1", "P2 L"], ["c2_r1", "P2 R"],
+			["c2_select", "P2 Select"], ["c2_start", "P2 Start"]]},
 		"lynx": {"name": "Atari Lynx", "actions": dpad + [
 			["c1_a", "A (outer) [A]"], ["c1_b", "B (inner) [B]"], ["c1_l1", "Option 1 [L]"],
 			["c1_r1", "Option 2 [R]"], ["c1_start", "Pause [Start]"]]},
@@ -159,8 +167,20 @@ func _init() -> void:
 			["c1_start", "P1 Start"], ["c2_start", "P2 Start"], ["coin", "Coin"],
 			["c1_l1", "Service / Test [L]"], ["c1_r1", "Switch Player [R]"]] + dpad2 + [
 			["c2_a", "P2 Button 1 [A]"], ["c2_b", "P2 Button 2 [B]"], ["c2_x", "P2 Button 3 [X]"],
-			["c2_select", "P2 Coin [P2 Select]"]]},
+			["c2_y", "P2 Button 4 [Y]"], ["c2_z", "P2 Button 5 [Z]"],
+			["c2_l1", "P2 Shoulder L [L]"], ["c2_r1", "P2 Shoulder R [R]"],
+			["c2_select", "P2 Coin [P2 Select]"]] + _arcade_pad(3) + _arcade_pad(4)},
 	}
+
+
+## Arcade player 3 / 4 actions (4-player games: Captain Commando, TMNT, The Simpsons, ...).
+## Controller only by default, on pads 3 / 4.
+func _arcade_pad(n: int) -> Array:
+	var c := "c%d_" % n
+	var p := "P%d " % n
+	return [[c + "up", p + "Up"], [c + "down", p + "Down"], [c + "left", p + "Left"], [c + "right", p + "Right"],
+		[c + "a", p + "Button 1 [A]"], [c + "b", p + "Button 2 [B]"], [c + "x", p + "Button 3 [X]"],
+		[c + "y", p + "Button 4 [Y]"], [c + "start", p + "Start"], [c + "coin", p + "Coin"]]
 
 
 func _ready() -> void:
@@ -170,7 +190,7 @@ func _ready() -> void:
 		_defaults[action] = _split(InputMap.action_get_events(action))
 		var pad = _defaults[action]["pad"]
 		if pad != null and int(pad.get("dev", -1)) < 0:
-			pad["dev"] = 1 if action.begins_with("c2_") else 0
+			pad["dev"] = PAD_OF_PREFIX.get(action.substr(0, 3), 0)
 	load_settings()
 
 

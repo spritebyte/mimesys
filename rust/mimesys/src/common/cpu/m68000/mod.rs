@@ -38,6 +38,10 @@ pub trait M68kBus {
     fn interrupt_ack(&mut self, _level: u8) -> Option<u8> { None }
     /// The RESET instruction pulsed the reset line.
     fn reset_devices(&mut self) {}
+    /// A read in program space (function code 2 / 6): opcode and extension word fetches
+    /// and PC-relative operands. Boards that decrypt or remap program fetches (CPS2)
+    /// override this; everything else sees an ordinary read.
+    fn read_program_word(&mut self, addr: u32) -> u16 { self.read_word(addr) }
 }
 
 pub const SR_C: u16 = 0x0001;
@@ -101,6 +105,9 @@ pub struct M68000 {
     ea: [u32; 2],
     dynamic_length: u32,
     cycles: u32,
+    /// the current operand is PC-relative: its reads go to program space
+    #[serde(skip)]
+    program_read: bool,
 }
 
 impl Default for M68000 {
@@ -113,7 +120,7 @@ impl M68000 {
             r: [0; 16], other_sp: 0, sr: 0x2700, pc: 0, prefetch: [0; 2],
             stopped: false, halted: false, ipl: 0, nmi_seen: false, should_trace: false,
             opcode: 0, instruction_address: 0, operand: [0; 2], ea: [0; 2],
-            dynamic_length: 0, cycles: 0,
+            dynamic_length: 0, cycles: 0, program_read: false,
         }
     }
 
@@ -156,10 +163,15 @@ impl M68000 {
     fn read_w(&mut self, bus: &mut dyn M68kBus, addr: u32) -> R<u16> {
         if addr & 1 != 0 { return Err(Fault { addr, read: true, program: false }); }
         self.cycles += 4;
+        if self.program_read { return Ok(bus.read_program_word(addr & 0xFF_FFFF)); }
         Ok(bus.read_word(addr & 0xFF_FFFF))
     }
     fn read_b(&mut self, bus: &mut dyn M68kBus, addr: u32) -> u8 {
         self.cycles += 4;
+        if self.program_read {
+            let w = bus.read_program_word(addr & 0xFF_FFFE);
+            return if addr & 1 == 0 { (w >> 8) as u8 } else { w as u8 };
+        }
         bus.read_byte(addr & 0xFF_FFFF)
     }
     fn write_w(&mut self, bus: &mut dyn M68kBus, addr: u32, v: u16) -> R<()> {
@@ -186,7 +198,7 @@ impl M68000 {
         self.prefetch[0] = self.prefetch[1];
         if self.pc & 1 != 0 { return Err(Fault { addr: self.pc, read: true, program: true }); }
         self.cycles += 4;
-        self.prefetch[1] = bus.read_word(self.pc & 0xFF_FFFF);
+        self.prefetch[1] = bus.read_program_word(self.pc & 0xFF_FFFF);
         self.pc = self.pc.wrapping_add(2);
         Ok(())
     }
@@ -205,6 +217,8 @@ impl M68000 {
         if !self.supervisor() { std::mem::swap(&mut self.r[15], &mut self.other_sp); }
         self.sr = (self.sr & !SR_T) | SR_S | 0x0700;
         self.should_trace = false;
+        // the reset vectors are read in program space (MAME: m_opcodes)
+        self.program_read = true;
         let res: R<()> = (|| {
             let hi = self.read_w(bus, 0)? as u32;
             let lo = self.read_w(bus, 2)? as u32;
@@ -212,10 +226,12 @@ impl M68000 {
             let hi = self.read_w(bus, 4)? as u32;
             let lo = self.read_w(bus, 6)? as u32;
             self.pc = hi << 16 | lo;
+            self.program_read = false;
             self.prefetch(bus)?;
             self.idle(1);
             self.prefetch(bus)
         })();
+        self.program_read = false;
         if res.is_err() { self.halted = true; }
         self.cycles
     }
@@ -223,6 +239,7 @@ impl M68000 {
     /// Run one instruction, exception or interrupt. Returns clocks used.
     pub fn step(&mut self, bus: &mut dyn M68kBus) -> u32 {
         self.cycles = 0;
+        self.program_read = false;
         if self.halted { return 4; }
 
         // interrupts: level 7 is edge triggered (non-maskable)
@@ -279,6 +296,7 @@ impl M68000 {
 
     /// Group 1 / 2 exception: push PC (instruction_address) and SR, jump through the vector.
     pub(crate) fn exception(&mut self, bus: &mut dyn M68kBus, vector: u32) -> R<()> {
+        self.program_read = false;
         let old_sr = self.begin_exception(None);
         let pc = self.instruction_address;
         self.r[15] = self.r[15].wrapping_sub(2);
@@ -302,6 +320,7 @@ impl M68000 {
 
     /// Address error: the 7-word group 0 frame.
     fn address_error(&mut self, bus: &mut dyn M68kBus, f: Fault) -> R<()> {
+        self.program_read = false;
         self.idle(2);
         let old_sr = self.begin_exception(None);
         let pc = self.pc.wrapping_sub(4);

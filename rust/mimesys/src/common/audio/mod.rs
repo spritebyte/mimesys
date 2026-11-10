@@ -8,3 +8,4 @@ pub mod tms5220;
 pub mod okim6295;pub mod hc55516;
 pub mod k007232;
 pub mod upd7759;
+pub mod qsound;

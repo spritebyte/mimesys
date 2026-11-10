@@ -28,6 +28,8 @@ pub struct SnesSystem {
     audio: Vec<f32>,
     /// resampler: position between the last two DSP frames (0..1) and those frames
     rs_pos: f64,
+    /// extra input word (player 2's Y / L / R) for the next frame
+    ext: u32,
     rs_prev: [f32; 2],
     rs_cur: [f32; 2],
     /// option "debug_report": print where both CPUs are (each second for 10 s, then
@@ -105,7 +107,7 @@ impl SnesSystem {
         let mut s = Self {
             cpu: W65816::new(),
             bus,
-            audio: Vec::new(), rs_pos: 0.0, rs_prev: [0.0; 2], rs_cur: [0.0; 2], debug: false, samples: Vec::new(),
+            audio: Vec::new(), ext: 0, rs_pos: 0.0, rs_prev: [0.0; 2], rs_cur: [0.0; 2], debug: false, samples: Vec::new(),
             save_filename: filename.to_string(),
             save_battery_path: "user://GD_EMU/SNES/Save".to_string(),
             save_state_path: "user://GD_EMU/SNES/State".to_string(),
@@ -227,8 +229,15 @@ impl System for SnesSystem {
 
     fn set_input(&mut self, m: u32) {
         self.bus.pads[0] = pad_bits(m);
-        self.bus.pads[1] = pad_bits(pad::player2(m) | if m & pad::P2_X != 0 { pad::X } else { 0 });
+        let e = self.ext;
+        let mut p2 = pad::player2(m);
+        for (from, on, to) in [(m, pad::P2_X, pad::X), (e, pad::EXT_P2_Y, pad::Y), (e, pad::EXT_P2_L, pad::L), (e, pad::EXT_P2_R, pad::R)] {
+            if from & on != 0 { p2 |= to; }
+        }
+        self.bus.pads[1] = pad_bits(p2);
     }
+
+    fn set_extra_input(&mut self, ext: u32) { self.ext = ext; }
 
     fn framebuffer(&self) -> &[u8] { &self.bus.framebuffer }
 

@@ -644,6 +644,25 @@ const INPUT_BITS := {
 	"c2_b": 28, "c2_a": 29, "c2_select": 30,
 }
 
+## Extra input word (EmuSystem.set_extra_input, Rust common::input EXT_*): player 2's
+## buttons 4-6 / shoulders, then players 3 and 4 (one byte each: up down left right b a x y)
+## and their start / coin.
+const EXT_BITS := {
+	"c2_y": 0, "c2_z": 1, "c2_l1": 2, "c2_r1": 3,
+	"c3_up": 8, "c3_down": 9, "c3_left": 10, "c3_right": 11,
+	"c3_b": 12, "c3_a": 13, "c3_x": 14, "c3_y": 15,
+	"c4_up": 16, "c4_down": 17, "c4_left": 18, "c4_right": 19,
+	"c4_b": 20, "c4_a": 21, "c4_x": 22, "c4_y": 23,
+	"c3_start": 24, "c3_coin": 25, "c4_start": 26, "c4_coin": 27,
+}
+
+func _get_extra_input() -> int:
+	var ext := 0
+	for action in EXT_BITS:
+		if Input.is_action_pressed(action):
+			ext |= 1 << EXT_BITS[action]
+	return ext
+
 const KEYPAD_ACTIONS := ["c1_0", "c1_1", "c1_2", "c1_3", "c1_4", "c1_5",
 	"c1_6", "c1_7", "c1_8", "c1_9", "c1_star", "c1_hash"]
 
@@ -682,10 +701,12 @@ func _thread_loop():
 			continue
 
 		var input_mask = _get_serialized_input()
+		var extra_input := _get_extra_input()
 		var pointer := _pointer
 		emu_mutex.lock()
 		if _zapper_on:
 			emu_system.set_pointer(pointer.x, pointer.y, pointer.z)
+		emu_system.set_extra_input(extra_input)
 		emu_system.run_slice(input_mask)
 		emu_system.update_audio_buffer();
 		emu_mutex.unlock()

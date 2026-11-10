@@ -13,3 +13,4 @@ pub mod konami;
 pub mod arm;
 pub mod m68000;
 pub mod sh2;
+pub mod sh4;

@@ -209,6 +209,8 @@ pub struct TmntSystem {
     owed: i64,
     current_frame: u64,
     debug: bool,
+    /// extra input word (players 3 / 4) for the next frame
+    ext: u32,
     save_filename: String,
     save_path: String,
     state_path: String,
@@ -245,6 +247,7 @@ impl TmntSystem {
         cpu.reset(&mut bus);
         Ok(Self {
             cpu, bus, main_phase: 0, owed: 0, current_frame: 0, debug: false,
+            ext: 0,
             save_filename: set_name.to_string(),
             save_path: "user://GD_EMU/Arcade/Konami/Save".to_string(),
             state_path: "user://GD_EMU/Arcade/Konami/State".to_string(),
@@ -293,36 +296,35 @@ impl System for TmntSystem {
     /// (2-player sets only). Coin = the pad's coin slot (pad 2: P2 Select). L = service
     /// switch (test menu).
     fn set_input(&mut self, mask: u32) {
-        let on = |m: u32, b: u32| m & b != 0;
-        let joy = |m: u32| -> u8 {
+        let joy = |p: &pad::Pad| -> u8 {
             let mut v = 0xFF;
-            if on(m, pad::LEFT) { v &= !0x01; }
-            if on(m, pad::RIGHT) { v &= !0x02; }
-            if on(m, pad::UP) { v &= !0x04; }
-            if on(m, pad::DOWN) { v &= !0x08; }
-            if on(m, pad::B) { v &= !0x10; }
-            if on(m, pad::A) { v &= !0x20; }
-            if on(m, pad::START) { v &= !0x80; }
+            if p.left { v &= !0x01; }
+            if p.right { v &= !0x02; }
+            if p.up { v &= !0x04; }
+            if p.down { v &= !0x08; }
+            if p.b { v &= !0x10; }
+            if p.a { v &= !0x20; }
+            if p.start { v &= !0x80; }
             v
         };
-        let p2 = pad::player2(mask);
+        let pads = pad::pads(mask, self.ext);
         let b = &mut self.bus;
         let slots = if b.two_player { 2 } else { 4 };
-        let r = on(mask, pad::R);
-        if r && !b.r_prev { b.slot = (b.slot + 1) % slots; }
-        b.r_prev = r;
-        let s1 = b.slot as usize % slots as usize;
-        let s2 = (s1 + 1) % slots as usize;
+        if pads[0].r && !b.r_prev { b.slot = (b.slot + 1) % slots; }
+        b.r_prev = pads[0].r;
+        // pad n drives the slot n-1 places after pad 1's (pads 3 / 4 only on 4-player sets)
         b.players = [0xFF; 4];
-        b.players[s1] = joy(mask);
-        b.players[s2] = joy(p2);
-        if on(mask, pad::START2) { b.players[s2] &= !0x80; }
         let mut coins = 0xFF;
-        if on(mask, pad::COIN) || on(mask, pad::SELECT) { coins &= !(1 << s1); }
-        if on(p2, pad::SELECT) { coins &= !(1 << s2); }
+        for (n, p) in pads.iter().take(slots as usize).enumerate() {
+            let s = (b.slot as usize + n) % slots as usize;
+            b.players[s] = joy(p);
+            if p.coin { coins &= !(1 << s); }
+        }
         b.coins = coins;
-        b.dsw[2] = if on(mask, pad::L) { 0xFF & !0x04 } else { 0xFF };
+        b.dsw[2] = if pads[0].l { 0xFF & !0x04 } else { 0xFF };
     }
+
+    fn set_extra_input(&mut self, ext: u32) { self.ext = ext; }
 
     fn drain_audio(&mut self) -> Vec<f32> { std::mem::take(&mut self.bus.sound.out) }
     fn sample_rate(&self) -> u32 { 44100 }

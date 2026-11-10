@@ -13,6 +13,8 @@ pub mod williams;
 pub mod jedi;
 pub mod rastan;
 pub mod tmnt;
+pub mod cps1;
+pub mod cps2;
 pub mod state;
 pub mod hiscore;
 
@@ -48,6 +50,8 @@ pub fn load_arcade(driver: &str, set_name: &str, mut regions: HashMap<String, Ve
             let game = Game::from_driver(driver).unwrap();
             Ok(Box::new(WilliamsSystem::new(game, set_name, regions)?))
         }
+        "cps2" => Ok(Box::new(cps2::cps2_system::Cps2System::new(set_name, regions)?)),
+        "cps1" => Ok(Box::new(cps1::cps1_system::Cps1System::new(set_name, regions)?)),
         "jedi" => Ok(Box::new(jedi::jedi_system::JediSystem::new(set_name, regions)?)),
         "rastan" => Ok(Box::new(rastan::rastan_system::RastanSystem::new(set_name, regions)?)),
         "pacman" => Ok(wrap(pacman::pacman_system::PacmanSystem::new(
@@ -102,6 +106,28 @@ pub fn load_arcade(driver: &str, set_name: &str, mut regions: HashMap<String, Ve
         "simpsons" | "simpsons2p" => Ok(Box::new(simpsons::simpsons_system::SimpsonsSystem::new(
             set_name, regions, driver == "simpsons2p")?)),
         other => Err(format!("no arcade driver name '{other}'")),
+    }
+}
+
+/// Copies one ROM file into a region the way MAME's ROM_LOAD macros do. The file goes in
+/// groups of `group` bytes, `step` bytes apart, starting at `offset`; `swap` swaps the bytes
+/// of each 16-bit word. ROM_LOAD = (1, 1), ROM_LOAD16_BYTE = (step 2), ROM_LOAD64_BYTE =
+/// (step 8), ROM_LOAD64_WORD = (group 2, step 8), ROM_LOAD16_WORD_SWAP = (group 2, step 2,
+/// swap). Bytes that fall outside the region are dropped.
+pub fn place_rom(dst: &mut [u8], offset: usize, src: &[u8], step: usize, group: usize, swap: bool) {
+    let group = group.max(1);
+    let step = step.max(group);
+    if step == group && !swap {
+        // one contiguous run
+        let end = (offset + src.len()).min(dst.len());
+        if offset < end { dst[offset..end].copy_from_slice(&src[..end - offset]); }
+        return;
+    }
+    for (i, &b) in src.iter().enumerate() {
+        let mut k = i % group;
+        if swap { k ^= 1; }
+        let d = offset + (i / group) * step + k;
+        if d < dst.len() { dst[d] = b; }
     }
 }
 

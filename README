@@ -11,6 +11,7 @@ NDS
 TG-16
 Some Arcade - list below
 
+Arcade games need a json file installed in $USERDATA/mimesys folder. File named arcade_games.json
 Arcade Games currently supported:
 Donkey Kong, Donkey Kong Jr.
 Pacman, Ms Pacman, Pengo
@@ -21,6 +22,7 @@ Paperboy
 Green Beret/Rush N' Attack
 Simpsons
 Rastan
+TMNT
 
 Fullscreen Mode - use F11
 
@@ -60,11 +62,14 @@ NES Mapper Support:
 Total: 49
 
 Planned for future:
+Dreamcast and Naomi arcade boards work in progress.
+Other classic arcade games such as Bubble Bobble and Bagman.
 Allow custom palette for Gameboy games
 Wheel controls for Colecovision
-Cheats for systems besides NES and Gameboy
+Cheats for all systems.
 Zapper (mouse) support for SMS
 Add debugging tools for all systems
 Video recording
 Rewind
+Cleanup userdata folder
 

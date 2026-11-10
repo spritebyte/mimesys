@@ -342,6 +342,13 @@ fn inputs_dips_and_slots() {
     assert_eq!(s.bus.read_word(0x0A0018), 0xFF);
     s.set_input(pad::L);
     assert_eq!(s.bus.read_word(0x0A0018), 0xFB, "service switch");
+    // pads 3 / 4 take the two slots after pad 2's (pad 1 is on slot 2 now)
+    s.set_extra_input(pad::UP << pad::EXT_P3_SHIFT | pad::EXT_P3_COIN | pad::A << pad::EXT_P4_SHIFT);
+    s.set_input(0);
+    assert_eq!(s.bus.read_word(0x0A0014), (0xFF & !0x04) as u16, "pad 3 = slot 4");
+    assert_eq!(s.bus.read_word(0x0A0002), (0xFF & !0x20) as u16, "pad 4 = slot 1");
+    assert_eq!(s.bus.read_word(0x0A0000), 0xF7, "coin 4");
+    s.set_extra_input(0);
     // byte reads: the value is on the odd address
     assert_eq!(s.bus.read_byte(0x0A0012), 0);
     assert_eq!(s.bus.read_byte(0x0A0013), 0x5E);
