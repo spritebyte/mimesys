@@ -34,6 +34,7 @@ const SYSTEM_BY_EXT := {
 	"md": "md", "gen": "md", "smd": "md", "nds": "nds",
 	"cue": "md", "iso": "md",      # Sega CD discs (the Genesis pad profile)
 	"32x": "md",                   # 32X cartridges
+	"gdi": "dc", "chd": "dc", "cdi": "dc",   # Dreamcast discs
 }
 ## Extensions several systems use: the ROM detector looks inside these files.
 const AMBIGUOUS_EXT := ["bin", "rom"]
@@ -85,6 +86,12 @@ const OPTION_DEFAULTS := {
 	"md_debug": false,       # Genesis / Sega CD: print where the CPUs and the CD drive are (for bug reports)
 	"lynx_rotate": 0,        # Lynx: 0 from the cartridge, 1 none, 2 left, 3 right
 	"a5200_trackball": false, # 5200: controller 1 is a Trak-Ball rolled with the mouse
+	"dc_cable": "composite", # Dreamcast: video cable the BIOS sees: "composite", "rgb", "vga" (next load)
+	"dc_broadcast": "flash", # Dreamcast: TV standard: "flash" (as dc_flash.bin says), "ntsc", "pal" (next load)
+	"dc_debug": false,       # Dreamcast: print where the CPU is and what the chips do (for bug reports)
+	"dc_speed_log": false,   # Dreamcast: print a speed line every 5 seconds (light, unlike dc_debug)
+	"dc_cpu_ratio": "2",     # Dreamcast: SH-4 cycles each instruction counts ("1" exact clock, slowest)
+	"dc_idle_skip": true,    # Dreamcast: skip loops that only wait for memory to change
 }
 ## Game Boy boot ROMs: "bios" (above) is the Game Boy Color one, this is the original's.
 const GB_DMG_BIOS_DEFAULT := "user://BIOS/dmg_boot.bin"
@@ -130,6 +137,11 @@ func _init() -> void:
 			["c1_y", "X [Y]"], ["c1_l1", "Y [L]"], ["c1_r1", "Z [R]"], ["c1_select", "Mode [Select]"]] + dpad2 + [
 			["c2_select", "P2 A [P2 Select]"], ["c2_b", "P2 B [B]"], ["c2_a", "P2 C [A]"], ["c2_start", "P2 Start"],
 			["c2_y", "P2 X [Y]"], ["c2_l1", "P2 Y [L]"], ["c2_r1", "P2 Z [R]"], ["c2_z", "P2 Mode [Z]"]]},
+		"dc": {"name": "Sega Dreamcast", "actions": dpad + [
+			["c1_b", "A [B]"], ["c1_a", "B [A]"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_start", "Start"],
+			["c1_l1", "L trigger [L]"], ["c1_r1", "R trigger [R]"]] + dpad2 + [
+			["c2_b", "P2 A [B]"], ["c2_a", "P2 B [A]"], ["c2_x", "P2 X"], ["c2_y", "P2 Y"], ["c2_start", "P2 Start"],
+			["c2_l1", "P2 L trigger [L]"], ["c2_r1", "P2 R trigger [R]"]] + _arcade_pad(3) + _arcade_pad(4)},
 		"nds": {"name": "Nintendo DS (stylus = mouse on the bottom screen)", "actions": dpad + [
 			["c1_a", "A"], ["c1_b", "B"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_l1", "L"], ["c1_r1", "R"],
 			["c1_select", "Select"], ["c1_start", "Start"], ["c1_z", "Microphone (blow) [Z]"]]},

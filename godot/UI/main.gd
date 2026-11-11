@@ -503,12 +503,17 @@ func _apply_display_options() -> void:
 		emu_system.set_option("vs_ppu", int(AppSettings.get_option(sys, "vs_ppu")))
 	# GBA cartridge clock (Pokemon etc.): local time = UTC + this many minutes
 	emu_system.set_option("rtc_utc_offset", Time.get_time_zone_from_system().bias)
-	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug", "md": "md_debug", "nes": "nes_debug", "a7800": "a7800_debug", "arcade": "arcade_debug"}
+	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug", "md": "md_debug", "nes": "nes_debug", "a7800": "a7800_debug", "arcade": "arcade_debug", "dc": "dc_debug"}
 	var dbg_key: String = dbg_keys.get(sys, "")
 	var dbg_on: bool = dbg_key != "" and AppSettings.get_option(sys, dbg_key)
+	var speed_log: bool = sys == "dc" and AppSettings.get_option(sys, "dc_speed_log")
 	# the report also goes to user://debug_<system>.log (the console loses its start)
-	emu_system.set_debug_log(ProjectSettings.globalize_path("user://debug_%s.log" % sys) if dbg_on else "")
+	emu_system.set_debug_log(ProjectSettings.globalize_path("user://debug_%s.log" % sys) if dbg_on or speed_log else "")
 	emu_system.set_option("debug_report", 1 if dbg_on else 0)
+	if sys == "dc":
+		emu_system.set_option("speed_log", 1 if speed_log else 0)
+		emu_system.set_option("dc_cpu_ratio", int(str(AppSettings.get_option(sys, "dc_cpu_ratio"))))
+		emu_system.set_option("dc_idle_skip", 1 if AppSettings.get_option(sys, "dc_idle_skip") else 0)
 	emu_mutex.unlock()
 	EmulatorScreen.mouse_default_cursor_shape = Control.CURSOR_CROSS \
 		if _zapper_on else Control.CURSOR_ARROW

@@ -246,6 +246,45 @@ func _rebuild() -> void:
 		pad.item_selected.connect(func(i): _put("md_pad", "3" if i == 1 else "6"))
 		_row("Controller (next load)", pad)
 
+	# Dreamcast: the video cable the BIOS sees, and the debug log
+	if sys == "dc":
+		var cable := OptionButton.new()
+		var cables := [["composite", "Composite (most compatible)"], ["rgb", "RGB (SCART)"], ["vga", "VGA (progressive; some games refuse it)"]]
+		for c in cables:
+			cable.add_item(c[1])
+		cable.select(max(0, cables.map(func(c): return c[0]).find(_opt("dc_cable"))))
+		cable.item_selected.connect(func(i): _put("dc_cable", cables[i][0]))
+		_row("Video cable (next load)", cable)
+		var bcast := OptionButton.new()
+		var bcasts := [["flash", "As dc_flash.bin says"], ["ntsc", "NTSC (60 Hz)"], ["pal", "PAL (50 Hz)"]]
+		for b in bcasts:
+			bcast.add_item(b[1])
+		bcast.select(max(0, bcasts.map(func(b): return b[0]).find(_opt("dc_broadcast"))))
+		bcast.item_selected.connect(func(i): _put("dc_broadcast", bcasts[i][0]))
+		_row("TV standard (next load)", bcast)
+		var ratio := OptionButton.new()
+		var ratios := [["1", "1 cycle an instruction (exact clock, slowest)"], ["2", "2 cycles an instruction (default)"], ["3", "3 cycles an instruction (fastest)"]]
+		for r in ratios:
+			ratio.add_item(r[1])
+		ratio.select(max(0, ratios.map(func(r): return r[0]).find(str(_opt("dc_cpu_ratio")))))
+		ratio.item_selected.connect(func(i): _put("dc_cpu_ratio", ratios[i][0]))
+		_row("CPU timing", ratio)
+		var idle := CheckBox.new()
+		idle.text = "Skip waiting loops (faster)"
+		idle.button_pressed = _opt("dc_idle_skip")
+		idle.toggled.connect(func(on): _put("dc_idle_skip", on))
+		_row("Speed", idle)
+		var slog := CheckBox.new()
+		slog.text = "Print a speed line every 5 seconds to debug_dc.log"
+		slog.button_pressed = _opt("dc_speed_log")
+		slog.toggled.connect(func(on): _put("dc_speed_log", on))
+		_row("Speed log", slog)
+		var ddbg := CheckBox.new()
+		ddbg.text = "Print a debug log every 10 seconds (for bug reports; slows the game)"
+		ddbg.button_pressed = _opt("dc_debug")
+		ddbg.toggled.connect(func(on): _put("dc_debug", on))
+		_row("Debug", ddbg)
+
 	# DS: screen layout, and the 10-second debug log in the Output panel
 	if sys == "nds":
 		var layout := OptionButton.new()

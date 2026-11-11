@@ -106,6 +106,9 @@ pub struct Arm7tdmi {
     /// ARMv5TE (ARM946E-S) instead of ARMv4T
     #[serde(default)]
     pub v5: bool,
+    /// the FIQ line (taken between instructions while CPSR.F is clear)
+    #[serde(default)]
+    pub fiq_line: bool,
 }
 
 impl Default for Arm7tdmi { fn default() -> Self { Self::new() } }
@@ -128,6 +131,7 @@ impl Arm7tdmi {
             irq_line: false,
             irq_latch: true,
             v5: false,
+            fiq_line: false,
         }
     }
 
@@ -250,7 +254,11 @@ impl Arm7tdmi {
 
     /// Runs one instruction, entering the IRQ handler first if an IRQ is pending.
     pub fn step(&mut self, bus: &mut dyn ArmBus) {
-        if self.irq_line && !self.irq_latch {
+        if self.fiq_line && self.cpsr & FLAG_F == 0 {
+            let lr = if self.thumb() { self.r[15] } else { self.r[15].wrapping_sub(4) };
+            self.exception(bus, 0x1C, MODE_FIQ, lr);
+            self.cpsr |= FLAG_F;
+        } else if self.irq_line && !self.irq_latch {
             // the next fetch happens (and is thrown away) before the jump
             let acc = self.next_fetch;
             if self.thumb() { bus.read16(self.r[15] & !1, acc); } else { bus.read32(self.r[15] & !3, acc); }

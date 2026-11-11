@@ -7,7 +7,16 @@
 //!
 //! CUE support: FILE "name" BINARY | WAVE; TRACK n MODE1/2048 | MODE1/2352 | MODE2/2352 |
 //! AUDIO; INDEX 00 / 01; PREGAP (silence that isn't in the file). Not supported yet: MP3 /
-//! OGG / FLAC audio files, and CHD images.
+//! OGG / FLAC audio files.
+//!
+//! GDI (Dreamcast GD-ROM): "count" then "track lba type(0 audio, 4 data) size file offset"
+//! lines; LBAs are absolute (the high-density area starts at 45000).
+//!
+//! CHD (MAME compressed hunks, via the `chd` crate, BSD-3): CD frames of 2352 + 96 bytes;
+//! tracks from the CHT2 / CHTR / CHGD metadata, each padded to 4 frames in the file; audio
+//! is stored big-endian (swapped back here; old "CHGT" GD-ROMs are little-endian). Track
+//! layout after MAME src/lib/util/cdrom.cpp (BSD-3); for a GD-ROM the third track is put at
+//! LBA 45000.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -36,8 +45,10 @@ pub struct Track {
     /// sectors from `start` to the next track's pregap (or the lead-out)
     pub length: u32,
     file: usize,
-    /// byte offset in the file of the track's INDEX 01
+    /// byte offset in the file of the track's INDEX 01 (CHD: the frame number)
     offset: u64,
+    /// audio samples are big-endian in the file (CHD)
+    swap: bool,
     /// LBAs before this one in the pregap are silence that isn't in the file
     silent_until: u32,
     sector_size: u32,
@@ -47,12 +58,48 @@ impl Track {
     pub fn is_audio(&self) -> bool { self.kind == TrackKind::Audio }
 }
 
-#[derive(Debug)]
 pub struct Disc {
     files: Vec<File>,
+    chd: Option<Box<ChdSource>>,
     pub tracks: Vec<Track>,
     /// LBA of the lead-out (the disc's length)
     pub leadout: u32,
+    /// a GD-ROM (GDI, or a CHD with GD-ROM track metadata)
+    pub gd: bool,
+}
+
+impl std::fmt::Debug for Disc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Disc").field("tracks", &self.tracks).field("leadout", &self.leadout).field("gd", &self.gd)
+            .field("chd", &self.chd.is_some()).finish()
+    }
+}
+
+/// An open CHD and its last decompressed hunk.
+struct ChdSource {
+    chd: chd::Chd<File>,
+    hunk: Vec<u8>,
+    cmp: Vec<u8>,
+    cached: Option<u32>,
+    frames_per_hunk: u32,
+}
+
+/// CHD frame: 2352 bytes of sector + 96 of subcode.
+const CHD_FRAME: usize = 2448;
+
+impl ChdSource {
+    fn frame(&mut self, n: u32, out: &mut [u8; SECTOR]) -> bool {
+        let h = n / self.frames_per_hunk;
+        if self.cached != Some(h) {
+            self.cached = None;
+            let Ok(mut hk) = self.chd.hunk(h) else { return false };
+            if hk.read_hunk_in(&mut self.cmp, &mut self.hunk).is_err() { return false; }
+            self.cached = Some(h);
+        }
+        let at = (n % self.frames_per_hunk) as usize * CHD_FRAME;
+        out.copy_from_slice(&self.hunk[at..at + SECTOR]);
+        true
+    }
 }
 
 /// LBA to (minutes, seconds, frames), counting the 2-second lead-in.
@@ -84,7 +131,7 @@ fn wave_data(f: &mut File) -> Result<(u64, u64), String> {
 }
 
 /// One FILE line of a cue sheet and the tracks under it.
-struct CueFile { name: String, wave: bool, tracks: Vec<CueTrack> }
+struct CueFile { name: String, wave: bool, hd: bool, tracks: Vec<CueTrack> }
 struct CueTrack { number: u8, kind: TrackKind, size: u32, pregap: u32, index0: Option<u32>, index1: Option<u32> }
 
 impl Disc {
@@ -94,7 +141,9 @@ impl Disc {
         match ext.as_str() {
             "cue" => Self::open_cue(path),
             "iso" => Self::open_iso(path),
-            _ => Err(format!("{}: only .cue and .iso disc images are supported", path.display())),
+            "gdi" => Self::open_gdi(path),
+            "chd" => Self::open_chd(path),
+            _ => Err(format!("{}: only .cue, .iso, .gdi and .chd disc images are supported", path.display())),
         }
     }
 
@@ -102,8 +151,129 @@ impl Disc {
         let f = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let len = f.metadata().map_err(|e| e.to_string())?.len();
         let sectors = (len / 2048) as u32;
-        let t = Track { number: 1, kind: TrackKind::Mode1Cooked, start: 0, pregap: 0, length: sectors, file: 0, offset: 0, silent_until: 0, sector_size: 2048 };
-        Ok(Self { files: vec![f], tracks: vec![t], leadout: sectors })
+        let t = Track { number: 1, kind: TrackKind::Mode1Cooked, start: 0, pregap: 0, length: sectors, file: 0, offset: 0, swap: false, silent_until: 0, sector_size: 2048 };
+        Ok(Self { files: vec![f], chd: None, tracks: vec![t], leadout: sectors, gd: false })
+    }
+
+    /// A Dreamcast .gdi: track files next to it.
+    pub fn open_gdi(path: &Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        Self::from_gdi(&text, &dir)
+    }
+
+    pub fn from_gdi(text: &str, dir: &Path) -> Result<Self, String> {
+        let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+        let count: usize = lines.next().and_then(|l| l.parse().ok()).ok_or("gdi: the first line should be the track count")?;
+        let mut files = Vec::new();
+        let mut tracks: Vec<Track> = Vec::new();
+        for line in lines {
+            // number lba type size "file name" offset (the name may be quoted)
+            let err = || format!("gdi: bad line '{line}'");
+            let mut rest = line;
+            let mut field = || -> Result<u32, String> {
+                rest = rest.trim_start();
+                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                let v = rest[..end].parse().map_err(|_| err());
+                rest = &rest[end..];
+                v
+            };
+            let (number, lba, ty, size) = (field()? as u8, field()?, field()?, field()?);
+            let rest = rest.trim();
+            let name = if let Some(q) = rest.strip_prefix('"') {
+                q[..q.find('"').ok_or_else(err)?].to_string()
+            } else {
+                // the name, then the (unused) offset
+                rest.rsplit_once(char::is_whitespace).map_or(rest, |(a, _)| a).trim().to_string()
+            };
+            let (kind, ss) = match (ty, size) {
+                (0, _) => (TrackKind::Audio, 2352),
+                (4, 2048) => (TrackKind::Mode1Cooked, 2048),
+                (4, 2352) => (TrackKind::DataRaw, 2352),
+                _ => return Err(err()),
+            };
+            let p = dir.join(&name);
+            let f = File::open(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let len = f.metadata().map_err(|e| e.to_string())?.len();
+            files.push(f);
+            tracks.push(Track {
+                number, kind, start: lba, pregap: lba, length: (len / ss as u64) as u32, file: files.len() - 1,
+                offset: 0, swap: false, silent_until: 0, sector_size: ss,
+            });
+        }
+        if tracks.len() != count || tracks.is_empty() { return Err(format!("gdi: {count} tracks announced, {} found", tracks.len())); }
+        tracks.sort_by_key(|t| t.start);
+        let leadout = tracks.last().map_or(0, |t| t.start + t.length);
+        // a track runs to the next one (the gap before the high-density area reads as empty)
+        for i in 0..tracks.len() - 1 {
+            let next = tracks[i + 1].start;
+            tracks[i].length = tracks[i].length.min(next - tracks[i].start);
+        }
+        Ok(Self { files, chd: None, tracks, leadout, gd: true })
+    }
+
+    /// A CHD image (CD or GD-ROM).
+    pub fn open_chd(path: &Path) -> Result<Self, String> {
+        let f = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut chd = chd::Chd::open(f, None).map_err(|e| format!("{}: {e} (a CHD that needs a parent isn't supported)", path.display()))?;
+        let hunk_bytes = chd.header().hunk_size();
+        if chd.header().unit_bytes() != CHD_FRAME as u32 || hunk_bytes % CHD_FRAME as u32 != 0 {
+            return Err(format!("{}: not a CD / GD-ROM CHD", path.display()));
+        }
+        // track metadata: "TRACK:1 TYPE:MODE1_RAW SUBTYPE:NONE FRAMES:1135 [PAD:0] PREGAP:0 PGTYPE:MODE1 PGSUB:RW POSTGAP:0"
+        let mut meta: Vec<(u32, String)> = Vec::new();
+        let all: Vec<chd::metadata::Metadata> = chd.metadata_refs().try_into().map_err(|e| format!("{}: {e}", path.display()))?;
+        for m in all {
+            let tag = &m.metatag.to_be_bytes();
+            if matches!(tag, b"CHT2" | b"CHTR" | b"CHGD" | b"CHGT") {
+                meta.push((m.metatag, String::from_utf8_lossy(&m.value).trim_end_matches('\0').to_string()));
+            }
+        }
+        if meta.is_empty() { return Err(format!("{}: no CD track list in the CHD", path.display())); }
+        let gd = meta.iter().any(|(t, _)| matches!(&t.to_be_bytes(), b"CHGD" | b"CHGT"));
+        let legacy_le = meta.iter().any(|(t, _)| &t.to_be_bytes() == b"CHGT");
+        let get = |text: &str, key: &str| -> Option<String> {
+            text.split_whitespace().find_map(|w| w.strip_prefix(key).and_then(|r| r.strip_prefix(':')).map(str::to_string))
+        };
+        let mut parsed: Vec<(u8, String, u32, u32, String, u32)> = Vec::new();
+        for (_, text) in &meta {
+            let num = |k: &str| get(text, k).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+            let number = num("TRACK") as u8;
+            parsed.push((number, get(text, "TYPE").unwrap_or_default(), num("FRAMES"), num("PREGAP"), get(text, "PGTYPE").unwrap_or_default(), num("POSTGAP")));
+        }
+        parsed.sort_by_key(|t| t.0);
+        let mut tracks = Vec::new();
+        let (mut cursor, mut chdofs) = (0u32, 0u32);
+        for (i, (number, ty, frames, pregap, pgtype, postgap)) in parsed.into_iter().enumerate() {
+            let (kind, ss) = match ty.as_str() {
+                "AUDIO" => (TrackKind::Audio, 2352),
+                "MODE1" | "MODE2_FORM1" => (TrackKind::Mode1Cooked, 2048),
+                "MODE1_RAW" | "MODE2_RAW" => (TrackKind::DataRaw, 2352),
+                other => return Err(format!("{}: track type {other} isn't supported", path.display())),
+            };
+            let in_file = pgtype.starts_with('V');
+            let mut start = cursor + pregap;
+            if gd && i == 2 { start = 45000; }
+            let data_frames = if in_file { frames.saturating_sub(pregap) } else { frames };
+            tracks.push(Track {
+                number, kind, start, pregap: start - pregap.min(start), length: data_frames, file: 0,
+                offset: (chdofs + if in_file { pregap } else { 0 }) as u64,
+                swap: kind == TrackKind::Audio && !legacy_le,
+                silent_until: if in_file { 0 } else { start }, sector_size: ss,
+            });
+            cursor = start + data_frames + postgap;
+            chdofs += frames.div_ceil(4) * 4;
+        }
+        for i in 0..tracks.len().saturating_sub(1) {
+            let next = tracks[i + 1].pregap;
+            tracks[i].length = tracks[i].length.min(next.saturating_sub(tracks[i].start));
+        }
+        let leadout = tracks.last().map_or(0, |t| t.start + t.length);
+        let src = ChdSource {
+            hunk: vec![0; hunk_bytes as usize], cmp: Vec::new(), cached: None,
+            frames_per_hunk: hunk_bytes / CHD_FRAME as u32, chd,
+        };
+        Ok(Self { files: Vec::new(), chd: Some(Box::new(src)), tracks, leadout, gd })
     }
 
     pub fn open_cue(path: &Path) -> Result<Self, String> {
@@ -115,6 +285,8 @@ impl Disc {
     /// A cue sheet's text; file names are relative to `dir`.
     pub fn from_cue(text: &str, dir: &Path) -> Result<Self, String> {
         let mut cue: Vec<CueFile> = Vec::new();
+        // Redump GD-ROM cues: "REM HIGH-DENSITY AREA" before the files at LBA 45000
+        let mut hd = false;
         for (n, raw) in text.lines().enumerate() {
             let line = raw.trim();
             let err = |m: &str| format!("cue line {}: {m}", n + 1);
@@ -135,7 +307,7 @@ impl Disc {
                         "WAVE" => true,
                         other => return Err(err(&format!("{other} audio files aren't supported yet (convert to BIN or WAV)"))),
                     };
-                    cue.push(CueFile { name, wave, tracks: Vec::new() });
+                    cue.push(CueFile { name, wave, hd, tracks: Vec::new() });
                 }
                 "TRACK" => {
                     let f = cue.last_mut().ok_or_else(|| err("TRACK before FILE"))?;
@@ -163,6 +335,7 @@ impl Disc {
                         }
                     }
                 }
+                "REM" if rest.to_ascii_uppercase().starts_with("HIGH-DENSITY AREA") => hd = true,
                 _ => {} // REM, TITLE, PERFORMER, CATALOG, FLAGS, POSTGAP, ...
             }
         }
@@ -172,6 +345,7 @@ impl Disc {
         let mut tracks: Vec<Track> = Vec::new();
         let mut base = 0u32; // LBA of the current file's first byte
         for cf in &cue {
+            if cf.hd && base < 45000 { base = 45000; }
             let path: PathBuf = dir.join(&cf.name);
             let mut f = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             let (data_at, data_len) = if cf.wave { wave_data(&mut f)? } else { (0, f.metadata().map_err(|e| e.to_string())?.len()) };
@@ -186,7 +360,7 @@ impl Disc {
                 let pregap = silent_until - ct.pregap;
                 tracks.push(Track {
                     number: ct.number, kind: ct.kind, start, pregap, length: 0, file: fi,
-                    offset: data_at + index1 as u64 * ct.size as u64, silent_until, sector_size: ct.size,
+                    offset: data_at + index1 as u64 * ct.size as u64, swap: false, silent_until, sector_size: ct.size,
                 });
             }
             let size = cf.tracks.last().map_or(SECTOR as u32, |t| t.size);
@@ -196,7 +370,8 @@ impl Disc {
             let end = tracks.get(i + 1).map_or(base, |n| n.pregap);
             tracks[i].length = end.saturating_sub(tracks[i].start);
         }
-        Ok(Self { files, tracks, leadout: base })
+        let gd = cue.iter().any(|f| f.hd);
+        Ok(Self { files, chd: None, tracks, leadout: base, gd })
     }
 
     /// The track a sector belongs to (its pregap counts as part of it).
@@ -214,6 +389,19 @@ impl Disc {
             return true;
         }
         let rel = lba as i64 - t.start as i64; // negative inside an INDEX 00 pregap
+        if let Some(c) = self.chd.as_mut() {
+            let frame = t.offset as i64 + rel;
+            if frame < 0 || !c.frame(frame as u32, out) { out.fill(0); return false; }
+            if t.kind == TrackKind::Mode1Cooked {
+                let mut d = [0u8; 2048];
+                d.copy_from_slice(&out[..2048]);
+                out.fill(0);
+                make_header(lba, out);
+                out[16..16 + 2048].copy_from_slice(&d);
+            }
+            if t.swap { for p in out.chunks_exact_mut(2) { p.swap(0, 1); } }
+            return true;
+        }
         let at = t.offset as i64 + rel * t.sector_size as i64;
         let f = &mut self.files[t.file];
         let ok = |r: std::io::Result<()>| r.is_ok();

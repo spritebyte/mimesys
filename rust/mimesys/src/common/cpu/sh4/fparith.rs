@@ -60,7 +60,7 @@ pub enum Op { Add, Sub, Mul, Div }
 
 impl Mode {
     /// RM 1 = round to zero; 0 and the reserved 2 / 3 round to nearest.
-    pub fn from_fpscr(fpscr: u32) -> Self { Self { rz: fpscr & 3 == 1, dn: fpscr & (1 << 18) != 0 } }
+    pub fn from_fpscr(fpscr: u32) -> Self { Self { rz: fpscr & 3 == 1, dn: fpscr & super::FPSCR_DN != 0 } }
 
     pub fn input<T: Fp>(self, x: T) -> T { if self.dn && x.is_subnormal() { x.signed_zero() } else { x } }
 

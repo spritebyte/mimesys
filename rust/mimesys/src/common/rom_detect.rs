@@ -16,6 +16,7 @@
 // when it's clear (score >= 80, or 30+ ahead of the next) and asks otherwise.
 // System ids are the ones the system factory takes: nes gb gbc gba sms gg md coleco pce a2600 a7800 a5200 lynx snes mcd.
 //      Sega CD: a .cue / .iso path ("MCDP" + path) whose sector 0 starts SEGADISCSYSTEM
+//      Dreamcast: a .gdi / .chd / .cdi path, or the 2 MB BIOS (dc_boot.bin) to start with no disc
 //      Genesis "SEGA" at 0x100 (or an interleaved .smd dump)
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,7 +28,7 @@ pub struct Guess {
 
 const GB_LOGO: [u8; 16] = [0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D];
 
-pub const SYSTEMS: [&str; 17] = ["nes", "gb", "gbc", "gba", "nds", "sms", "gg", "md", "coleco", "pce", "a2600", "a7800", "a5200", "lynx", "snes", "mcd", "32x"];
+pub const SYSTEMS: [&str; 18] = ["nes", "gb", "gbc", "gba", "nds", "sms", "gg", "md", "coleco", "pce", "a2600", "a7800", "a5200", "lynx", "snes", "mcd", "32x", "dc"];
 
 fn count(data: &[u8], pattern: &[u8]) -> usize {
     data.windows(pattern.len()).filter(|w| *w == pattern).count()
@@ -58,10 +59,19 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
     // ---- 1. headers ----
     // a disc image: the frontend sends its path ("MCDP" + path), the disc is read here
     if data.starts_with(crate::segacd::PATH_MAGIC) {
+        // Dreamcast discs: by extension (stage 2 boots the BIOS with the tray empty)
+        if matches!(ext.as_str(), "gdi" | "chd" | "cdi") {
+            return vec![Guess { system: "dc", score: 100, why: format!("Dreamcast disc image (.{ext})") }];
+        }
         return match crate::segacd::open_disc(data) {
             Ok((_, h)) => vec![Guess { system: "mcd", score: 100, why: format!("Sega CD disc \"{}\"", h.title) }],
             Err(e) => { println!("disc image: {e}"); Vec::new() }
         };
+    }
+    // the Dreamcast BIOS itself: start the console with no disc
+    let file = path.rsplit(['/', '\\']).next().unwrap_or("").to_ascii_lowercase();
+    if data.len() == crate::dreamcast::bus::BIOS_SIZE && (file.starts_with("dc_boot") || file.starts_with("dc_bios") || file.contains("dreamcast")) {
+        return vec![Guess { system: "dc", score: 100, why: "Dreamcast BIOS (no disc)".into() }];
     }
     if crate::nes::fds::is_fds(data) {
         return vec![Guess { system: "nes", score: 100, why: "Famicom Disk System disk".into() }];

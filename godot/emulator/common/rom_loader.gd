@@ -7,7 +7,7 @@ const HISCORE_DAT_PATH := "user://hiscore.dat"
 const SKIP_EXT := ["txt", "nfo", "htm", "html", "jpg", "png", "pdf"]
 ## Disc images (Sega CD): read from disk by the core, not loaded here. Zipped discs aren't
 ## supported: unzip them first.
-const DISC_EXT := ["cue", "iso"]
+const DISC_EXT := ["cue", "iso", "gdi", "chd", "cdi"]
 
 # Loading a game is three steps (main.gd's execute_load does them in order):
 #   1. read_rom(path, inner)       the bytes (from a file, or a zip), or "this is an arcade set"
@@ -101,6 +101,11 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 			bios = mcd_bios_blob()
 		"32x":
 			bios = m32x_bios_blob()
+		"dc":
+			bios = dc_bios_blob()
+			if bios.size() <= 4:
+				OS.alert("Dreamcast needs its BIOS: put dc_boot.bin (2 MB) and dc_flash.bin (128 KB) in the BIOS folder.")
+				return null
 		"nds":
 			bios = nds_bios_blob()
 		"a5200":
@@ -257,6 +262,34 @@ static func nds_bios_blob() -> PackedByteArray:
 		out.append_array(PackedByteArray([n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF]))
 		out.append_array(data)
 		print("DS: using %s" % path)
+	return out
+
+
+## Dreamcast BIOS files for the core: "DCBB", then entries of a 4-byte tag, a u32
+## little-endian length and the data: BOOT = dc_boot.bin (2 MB), FLSH = dc_flash.bin
+## (128 KB), CABL = the video cable (0 VGA, 2 RGB, 3 composite), BCST = broadcast override
+## (0 NTSC, 1 PAL; left out for "as the flash says"). Returns just "DCBB" when
+## the BIOS is missing.
+static func dc_bios_blob() -> PackedByteArray:
+	var out := PackedByteArray("DCBB".to_ascii_buffer())
+	var boot := ""
+	for name in ["dc_boot.bin", "dc_bios.bin", "dc/dc_boot.bin"]:
+		if FileAccess.file_exists(BIOS_DIR.path_join(name)):
+			boot = BIOS_DIR.path_join(name)
+			break
+	if boot == "":
+		print("Dreamcast: no dc_boot.bin in %s" % BIOS_DIR)
+		return out
+	_gb_entry(out, "BOOT", load_bios(boot))
+	for name in ["dc_flash.bin", "dc_nvmem.bin", "dc/dc_flash.bin"]:
+		if FileAccess.file_exists(BIOS_DIR.path_join(name)):
+			_gb_entry(out, "FLSH", load_bios(BIOS_DIR.path_join(name)))
+			break
+	var cable: int = {"vga": 0, "rgb": 2}.get(AppSettings.get_option("dc", "dc_cable"), 3)
+	_gb_entry(out, "CABL", PackedByteArray([cable]))
+	var bc = {"ntsc": 0, "pal": 1}.get(AppSettings.get_option("dc", "dc_broadcast"), -1)
+	if bc >= 0:
+		_gb_entry(out, "BCST", PackedByteArray([bc]))
 	return out
 
 

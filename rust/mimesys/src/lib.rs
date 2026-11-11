@@ -22,4 +22,5 @@ mod genesis;
 mod segacd;
 mod m32x;
 mod nds;
+mod dreamcast;
 
