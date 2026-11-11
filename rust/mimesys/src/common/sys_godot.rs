@@ -25,6 +25,10 @@ pub struct EmuSystem {
     cached_texture: Option<Gd<ImageTexture>>,
     last_sample: Vector2,
     audio_fifo: VecDeque<f32>,
+    /// the output buffer's size in frames (the most free space seen)
+    audio_cap: i32,
+    /// waiting for a cushion of sound before pushing again (after the buffer ran dry)
+    audio_priming: bool,
     /// flicker blend (set_option "frame_blend": 0 off, 1 blend, 2 phosphor)
     blend: crate::common::frame_blend::FrameBlend,
 }
@@ -35,7 +39,7 @@ impl IRefCounted for EmuSystem {
         EmuSystem { system: None, base, playback: None,
              sys_display: Gd::from_object(SystemDisplayInfo::new_gameboy()),
              cached_image: None, cached_texture: None, last_sample: Vector2::ZERO,
-             audio_fifo: VecDeque::new(), blend: Default::default(),
+             audio_fifo: VecDeque::new(), audio_cap: 0, audio_priming: true, blend: Default::default(),
         }
     }
 }
@@ -286,6 +290,12 @@ impl EmuSystem {
         let Some(playback) = &mut self.playback else { return };
 
         let avail = playback.get_frames_available();
+        // the buffer's size: the most free space seen; all of it free = it ran dry
+        self.audio_cap = self.audio_cap.max(avail);
+        if avail >= self.audio_cap - 16 && self.audio_cap > 0 {
+            crate::common::debug_log::AUDIO_DRY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.audio_priming = true;
+        }
         if avail <= 0 { return; }
 
         if let Some(sys) = &mut self.system {
@@ -297,6 +307,13 @@ impl EmuSystem {
 //        let available_frames = raw_samples.len() / 2;
 
         let queued_frames = self.audio_fifo.len() / 2;
+        // after running dry, build up 40 ms before playing again, so the next late frame
+        // finds sound still queued instead of a gap
+        if self.audio_priming {
+            let rate = self.system.as_ref().map_or(44_100, |s| s.sample_rate()) as usize;
+            if queued_frames < rate / 25 { return; }
+            self.audio_priming = false;
+        }
         let to_write = queued_frames.min(avail as usize);
 
         let mut frames = PackedVector2Array::new();
@@ -325,10 +342,14 @@ impl EmuSystem {
             playback.push_buffer(&frames);
         }
 
-        let max_queued = (avail as usize) * 4 * 2;
+        // keep at least 0.1 s queued: a burst of frames after a slow one must not be thrown
+        // away (heard as a skip)
+        let rate = self.system.as_ref().map_or(44_100, |s| s.sample_rate()) as usize;
+        let max_queued = ((avail as usize) * 4 * 2).max(rate / 10 * 2);
         while self.audio_fifo.len() > max_queued {
             self.audio_fifo.pop_front();
         }
+        crate::common::debug_log::AUDIO_QUEUED.store(self.audio_fifo.len() as u64 / 2, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[func]

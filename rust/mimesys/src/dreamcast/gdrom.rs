@@ -54,6 +54,11 @@ enum Phase {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Gdrom {
+    /// packet commands by opcode since the last speed line, and the unhandled ones seen
+    #[serde(skip)]
+    pub cmd_counts: std::collections::BTreeMap<u8, u64>,
+    #[serde(skip)]
+    unknown: std::collections::BTreeSet<u8>,
     pub status: u8,
     pub error: u8,
     pub ireason: u8,
@@ -190,7 +195,7 @@ impl Gdrom {
             status: DRDY | DSC, error: 0, ireason: 3, state: ST_STANDBY, features: 0, byte_count: 0,
             drive_select: 0, devctl: 0, irq: false, phase: Phase::Idle, packet: Vec::new(), data: Vec::new(),
             pos: 0, chunk_end: 0, limit: 0, dma: false, sense: 0, asc: 0, mode: MODE_DEFAULT.to_vec(), fad: 150,
-            sectors: 0, log: Vec::new(), disc: DiscSlot::default(),
+            sectors: 0, log: Vec::new(), disc: DiscSlot::default(), cmd_counts: Default::default(), unknown: Default::default(),
             play_end: 0, play_start: 0, repeat: 0, audio_status: 0x15, cd_buf: Vec::new(), cd_pos: 0,
         }
     }
@@ -390,6 +395,7 @@ impl Gdrom {
 
     fn exec_packet(&mut self, p: &[u8]) {
         self.note(format!("packet {:02X?}", &p[..12]));
+        *self.cmd_counts.entry(p[0]).or_insert(0) += 1;
         let len = p[4] as usize;
         let disc = self.disc.0.clone();
         // commands that need a disc
@@ -522,7 +528,10 @@ impl Gdrom {
                 if self.is_gd() { r[10] = 0x1F; }
                 self.send(r, false);
             }
-            _ => self.illegal(),
+            c => {
+                if self.unknown.insert(c) { crate::dlog!("Dreamcast: GD-ROM packet command {c:02X} not handled: {:02X?}", &p[..12]); }
+                self.illegal()
+            }
         }
     }
 }

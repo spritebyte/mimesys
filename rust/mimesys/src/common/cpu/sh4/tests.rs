@@ -341,8 +341,8 @@ fn pref_and_ccn_ops_reach_the_bus() {
 #[test]
 fn round_to_zero_corners() {
     use super::fparith::{Mode, Op};
-    let rz = Mode { rz: true, dn: true };
-    let rn = Mode { rz: false, dn: true };
+    let rz = Mode { rz: true, dn: true, fast: false };
+    let rn = Mode { rz: false, dn: true, fast: false };
     let tiny = f32::from_bits(0x3300_0000); // 2^-25: below half an ulp of 1.0
     assert_eq!(rn.arith(Op::Sub, 1.0f32, tiny), 1.0);
     assert_eq!(rz.arith(Op::Sub, 1.0f32, tiny).to_bits(), 0x3F7F_FFFF, "0.99999994");

@@ -92,6 +92,9 @@ const OPTION_DEFAULTS := {
 	"dc_speed_log": false,   # Dreamcast: print a speed line every 5 seconds (light, unlike dc_debug)
 	"dc_cpu_ratio": "2",     # Dreamcast: SH-4 cycles each instruction counts ("1" exact clock, slowest)
 	"dc_idle_skip": true,    # Dreamcast: skip loops that only wait for memory to change
+	"dc_render_thread": true,  # Dreamcast: draw 3D on other threads while the CPU runs
+	"dc_fpu_exact": false,   # Dreamcast: SH-4 round-to-zero / denormal modes done exactly
+	"dc_record_sound": false,  # Dreamcast: write the first minute of sound to dc_sound.wav
 }
 ## Game Boy boot ROMs: "bios" (above) is the Game Boy Color one, this is the original's.
 const GB_DMG_BIOS_DEFAULT := "user://BIOS/dmg_boot.bin"

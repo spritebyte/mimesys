@@ -40,6 +40,21 @@ pub trait Sh4Bus {
     /// An exception or interrupt was taken: the value for the CCN register (TRA, EXPEVT or
     /// INTEVT).
     fn event(&mut self, _reg: Event, _value: u32) {}
+    /// For `Sh4::run`: the interrupt asking (level, INTEVT code), and the cycle clock.
+    fn irq(&self) -> Option<(u32, u32)> { None }
+    fn now(&self) -> u64 { 0 }
+    fn tick(&mut self, _cycles: u64) {}
+}
+
+/// Why `Sh4::run` stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunExit {
+    /// reached the target cycle
+    Done,
+    /// SLEEP
+    Sleep,
+    /// a short backward jump (to `to`, from `last`) was taken the 4th time in a row
+    Loop { to: u32, last: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +121,10 @@ pub struct Sh4 {
     /// doesn't model it)
     #[serde(skip, default = "yes")]
     pub check_fd: bool,
+    /// host floating point as it comes (round to nearest, denormals kept) instead of the
+    /// FPSCR rounding / denormal modes: much cheaper, rarely visible
+    #[serde(skip)]
+    pub fast_fpu: bool,
     /// set while the instruction running is a delay slot
     #[serde(skip)]
     in_slot: bool,
@@ -129,7 +148,7 @@ impl Sh4 {
             r: [0; 16], r_bank: [0; 8], pc: 0, t: false, s: false, q: false, m: false, sr_hi: 0,
             ssr: 0, spc: 0, sgr: 0, dbr: 0, gbr: 0, vbr: 0, mach: 0, macl: 0, pr: 0,
             fr: [0; 16], xf: [0; 16], fpscr: 0, fpul: 0, pending: None, pending_sr: None, branch_pc: 0, sleeping: false,
-            check_fd: true, in_slot: false, cur: 0, trapped: false,
+            check_fd: true, fast_fpu: false, in_slot: false, cur: 0, trapped: false,
         };
         s.reset();
         s
@@ -156,6 +175,7 @@ impl Sh4 {
     fn bank1(sr: u32) -> bool { sr & (SR_MD | SR_RB) == SR_MD | SR_RB }
 
     /// Writes SR (RB reads as 0 outside privileged mode, as on the reference).
+    #[inline(never)]
     pub fn set_sr(&mut self, v: u32) {
         let mut v = v & SR_MASK;
         if v & SR_MD == 0 { v &= !SR_RB; }
@@ -178,6 +198,7 @@ impl Sh4 {
         self.sr_hi & SR_BL == 0 && level > self.imask() && self.pending.is_none()
     }
 
+    #[inline(never)]
     fn enter(&mut self, spc: u32, offset: u32) {
         self.spc = spc;
         self.ssr = self.sr();
@@ -207,6 +228,7 @@ impl Sh4 {
         self.enter(ret, 0x100);
     }
 
+    #[inline(never)]
     fn illegal<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B) {
         let code = if self.in_slot { EXP_ILLEGAL_SLOT } else { EXP_ILLEGAL };
         self.exception(bus, code);
@@ -231,7 +253,33 @@ impl Sh4 {
         }
     }
 
+    /// Run until the bus clock reaches `target`, `cpi` cycles an instruction, taking
+    /// interrupts as the bus asks. With `loops` (the last backward jump target and how many
+    /// times in a row), stops at the 4th pass of a loop of up to 64 bytes so the caller
+    /// can look at it. One call runs many instructions, so the per-instruction cost stays
+    /// in one loop.
+    pub fn run<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, target: u64, cpi: u64, mut loops: Option<&mut (u32, u32)>) -> RunExit {
+        while bus.now() < target {
+            if let Some((level, code)) = bus.irq() {
+                if self.accepts(level) { self.interrupt(bus, code); }
+            }
+            if self.sleeping { return RunExit::Sleep; }
+            let pc = self.pc;
+            self.step(bus);
+            bus.tick(cpi);
+            let to = self.pc;
+            if to < pc && pc - to <= 64 {
+                if let Some(l) = loops.as_deref_mut() {
+                    if to == l.0 { l.1 += 1; } else { *l = (to, 1); }
+                    if l.1 == 4 { return RunExit::Loop { to, last: pc }; }
+                }
+            }
+        }
+        RunExit::Done
+    }
+
     /// Run one instruction.
+    #[inline(always)]
     pub fn step<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B) {
         if self.sleeping { return; }
         let pending = self.pending.take();
@@ -249,6 +297,7 @@ impl Sh4 {
         }
     }
 
+    #[inline(always)]
     fn execute<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, op: u16, slot_target: Option<u32>) {
         let n = (op >> 8 & 15) as usize;
         let m = (op >> 4 & 15) as usize;
@@ -603,6 +652,7 @@ impl Sh4 {
     fn set_mac(&mut self, v: u64) { self.mach = (v >> 32) as u32; self.macl = v as u32; }
     fn mac(&self) -> u64 { (self.mach as u64) << 32 | self.macl as u64 }
 
+    #[inline(never)]
     fn div1(&mut self, m: usize, n: usize) {
         let q = self.q;
         self.q = self.r[n] >> 31 != 0;
@@ -614,6 +664,7 @@ impl Sh4 {
     }
 
     /// MAC.W @Rm+,@Rn+ (S: 32-bit saturating, overflow sets MACH bit 0)
+    #[inline(never)]
     fn mac_w<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, m: usize, n: usize) {
         let a = bus.read16(self.r[n]) as i16 as i64;
         self.r[n] = self.r[n].wrapping_add(2);
@@ -631,6 +682,7 @@ impl Sh4 {
     }
 
     /// MAC.L @Rm+,@Rn+ (S: the result saturates to 48 bits)
+    #[inline(never)]
     fn mac_l<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, m: usize, n: usize) {
         let a = bus.read32(self.r[n]) as i32 as i64;
         self.r[n] = self.r[n].wrapping_add(4);

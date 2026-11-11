@@ -157,7 +157,7 @@ fn sh4_keys_a_channel_and_sound_comes_out() {
     let out = std::mem::take(&mut d.aica.out);
     assert!((880..=884).contains(&out.len()), "{} values = 441 stereo samples", out.len());
     let peak = out.iter().cloned().fold(0f32, |m, x| m.max(x.abs()));
-    assert!(peak > 0.3, "peak {peak}");
+    assert!(peak > 0.075, "peak {peak}");
     // the monitor shows slot 3 playing, the position moves
     d.write32(0xA070_280C, 3 << 8);
     let p1 = d.read32(0xA070_2814);

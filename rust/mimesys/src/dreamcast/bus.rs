@@ -88,6 +88,26 @@ pub struct Dc {
     pub t_sound: std::time::Duration,
     #[serde(skip)]
     pub t_arm: std::time::Duration,
+    #[serde(skip)]
+    pub t_render_wait: std::time::Duration,
+    /// render on another thread while the CPU runs (DcSystem turns this on)
+    #[serde(skip)]
+    pub render_async: bool,
+    #[serde(skip)]
+    pub render_job: render::RenderJob,
+    /// textures and the render thread's copy of video RAM, kept between renders
+    #[serde(skip)]
+    pub rcache: render::RenderCache,
+    /// sound traffic since the last speed line: SH-4 bytes written to sound RAM, AICA DMAs,
+    /// their bytes, DMA starts without SB_ADEN; the last DMA's G2 address, system address,
+    /// length, direction | trigger select << 8
+    #[serde(skip)]
+    pub snd_io: [u64; 4],
+    #[serde(skip)]
+    pub g2_last: [u32; 4],
+    /// renders, polygons, pixels, translucent fragments since the last speed line
+    #[serde(skip)]
+    pub r_sum: (u64, u64, u64, u64),
     /// when the running GD-ROM DMA ends
     #[serde(default)]
     gd_dma_end: Option<u64>,
@@ -125,7 +145,7 @@ impl Dc {
         let mut d = Self {
             bios, flash: Flash::new(flash), ram: vec![0; RAM_SIZE], vram: vec![0; VRAM_SIZE],
             aica: Aica::new(unix_now), holly: Holly::new(), pvr: Pvr::new(), gd: Gdrom::new(), chip: OnChip::new(),
-            now: 0, next_line: 0, events: Vec::new(), t_render: Default::default(), t_sound: Default::default(), t_arm: Default::default(), gd_dma_end: None, yuv: Yuv::default(), arm: Arm7tdmi::new(), arm_now: 0, arm_acc: 0, arm_running: false, arm_steps: 0, arm_pcs: Default::default(), ta_buf: [0; 8], ta_fill: 0, vblank: false, irq: None,
+            now: 0, next_line: 0, events: Vec::new(), t_render: Default::default(), t_sound: Default::default(), t_arm: Default::default(), t_render_wait: Default::default(), render_async: false, render_job: Default::default(), rcache: Default::default(), snd_io: [0; 4], g2_last: [0; 4], r_sum: (0, 0, 0, 0), gd_dma_end: None, yuv: Yuv::default(), arm: Arm7tdmi::new(), arm_now: 0, arm_acc: 0, arm_running: false, arm_steps: 0, arm_pcs: Default::default(), ta_buf: [0; 8], ta_fill: 0, vblank: false, irq: None,
             pads: [Some(DcPad::default()), Some(DcPad::default()), None, None], soft_reset: false,
             unknown: BTreeMap::new(), maple_dmas: 0, trace_regs: false, reg_log: Vec::new(), cur_pc: 0,
         };
@@ -212,6 +232,27 @@ impl Dc {
     }
 
     // ------------------------------------------------------------ DMA
+
+    /// Wait for a render running on its own thread and write its picture to video RAM
+    /// (before the next render, the picture output, a save state).
+    pub fn finish_render(&mut self) {
+        if let Some(h) = self.render_job.0.take() {
+            let t = std::time::Instant::now();
+            let (d, snap) = h.join().expect("render thread");
+            self.rcache.snap = Some(snap);
+            if let Some((lo, hi)) = d.write(&mut self.vram) { self.rcache.mark(lo, hi); }
+            self.pvr.last_render = d.stats;
+            self.count_render();
+            self.t_render += d.took;
+            self.t_render_wait += t.elapsed();
+        }
+    }
+
+    /// Add the last render to the speed line's totals.
+    fn count_render(&mut self) {
+        let st = self.pvr.last_render;
+        self.r_sum = (self.r_sum.0 + 1, self.r_sum.1 + st.polys as u64, self.r_sum.2 + st.pixels, self.r_sum.3 + st.trans);
+    }
 
     /// Bring the AICA up to `now`: its timers, and its ARM7 (when out of reset) at
     /// ARM_CLOCK with ARM_CPI cycles an instruction; then its interrupt to the SH-4.
@@ -333,6 +374,9 @@ impl Dc {
     fn aica_dma(&mut self) {
         let r = &self.holly.g2;
         let (g2_a, sys_a, len, to_sys) = (r[0], r[1], r[2] & 0x7FFF_FFFF, r[3] & 1 != 0);
+        self.snd_io[1] += 1;
+        self.snd_io[2] += len as u64;
+        self.g2_last = [g2_a, sys_a, r[2], r[3] | r[4] << 8];
         for k in (0..len).step_by(4) {
             if to_sys {
                 let v = self.read(g2_a.wrapping_add(k), 4);
@@ -490,7 +534,7 @@ impl Dc {
         match p >> 26 {
             3 => Self::put(&mut self.ram, (p & 0xFF_FFFF) as usize, v, size),
             0 => self.area0_write(p, v, size),
-            1 => { let i = Self::vram_index(p); Self::put(&mut self.vram, i, v, size) }
+            1 => { let i = Self::vram_index(p); self.rcache.mark(i, i + size as usize - 1); Self::put(&mut self.vram, i, v, size) }
             4 => self.ta_write(p, v, size),
             _ => self.note(a, true),
         }
@@ -528,7 +572,9 @@ impl Dc {
                 let i = ((r - 0x5F_7800) / 4) as usize;
                 self.holly.g2[i] = v;
                 // SB_ADST with SB_ADEN
-                if i == 6 && v & 1 != 0 && self.holly.g2[5] & 1 != 0 { self.aica_dma(); }
+                if i == 6 && v & 1 != 0 {
+                    if self.holly.g2[5] & 1 != 0 { self.aica_dma(); } else { self.snd_io[3] += 1; }
+                }
             }
             0x5F_7C00..=0x5F_7CFF => {
                 let i = ((r - 0x5F_7C00) / 4) as usize;
@@ -539,11 +585,25 @@ impl Dc {
             0x5F_8000..=0x5F_9FFF => {
                 if r - 0x5F_8000 == yuv::TA_YUV_TEX_BASE { self.yuv.reset(); }
                 if self.pvr.write(r - 0x5F_8000, v) {
+                    self.finish_render();
                     let base = self.pvr.reg(render::PARAM_BASE);
-                    let scene = self.pvr.ta.scene(base);
                     let t = std::time::Instant::now();
-                    self.pvr.last_render = render::render(&self.pvr.regs, scene, &mut self.vram);
-                    self.t_render += t.elapsed();
+                    if self.render_async {
+                        // copies, so the CPU can change video RAM / start the next scene
+                        let scene = self.pvr.ta.scene(base).cloned();
+                        let snap = self.rcache.prepare(&self.vram);
+                        self.render_job = render::RenderJob::start(self.pvr.regs.clone(), scene, snap, self.rcache.tex.clone());
+                        self.t_render_wait += t.elapsed();
+                    } else {
+                        let scene = self.pvr.ta.scene(base);
+                        self.rcache.tex.invalidate(&self.rcache.tex_dirty);
+                        self.rcache.tex_dirty = Default::default();
+                        let d = render::draw(&self.pvr.regs, scene, &self.vram, &self.rcache.tex);
+                        if let Some((lo, hi)) = d.write(&mut self.vram) { self.rcache.mark(lo, hi); }
+                        self.pvr.last_render = d.stats;
+                        self.count_render();
+                        self.t_render += t.elapsed();
+                    }
                     // the render "finishes" after about 1 ms
                     self.raise_later(200_000, pvr::IST_EOR_ISP | pvr::IST_EOR_TSP | pvr::IST_EOR_VIDEO);
                 }
@@ -551,7 +611,7 @@ impl Dc {
             0x60_0000..=0x60_07FF => {}
             0x70_0000..=0x70_7FFF => self.aica.reg_write(q - 0x70_0000, v, size),
             0x71_0000..=0x71_000F => self.aica.rtc_write(r, v, self.now),
-            0x80_0000..=0x9F_FFFF => Self::put(&mut self.aica.wave, (q - 0x80_0000) as usize, v, size),
+            0x80_0000..=0x9F_FFFF => { self.snd_io[0] += size as u64; Self::put(&mut self.aica.wave, (q - 0x80_0000) as usize, v, size) }
             _ => self.note(p, true),
         }
     }
@@ -563,11 +623,15 @@ impl Dc {
             // direct path to video RAM: 64-bit view, or 32-bit with SB_LMMODE
             let mode = self.holly.r(if p & 0x0200_0000 != 0 { holly::SB_LMMODE1 } else { holly::SB_LMMODE0 }) & 1;
             let i = if mode == 0 { (o & 0x7F_FFFF) as usize } else { pvr::map32(o & 0x7F_FFFF) };
+            self.rcache.mark(i, i + size as usize - 1);
             return Self::put(&mut self.vram, i, v, size);
         }
         if o >= 0x80_0000 {
             let bytes = v.to_le_bytes();
             let (base, ctrl) = (self.pvr.reg(yuv::TA_YUV_TEX_BASE) & 0x7F_FFFF, self.pvr.reg(yuv::TA_YUV_TEX_CTRL));
+            // the whole picture's bytes
+            let (wb, hb) = ((ctrl & 0x3F) + 1, (ctrl >> 8 & 0x3F) + 1);
+            self.rcache.mark(base as usize, base as usize + (wb * hb * 512) as usize);
             if self.yuv.push(&bytes[..size as usize], base, ctrl, &mut self.vram) { self.raise_later(2000, yuv::IST_YUV); }
             return;
         }
@@ -582,11 +646,38 @@ impl Dc {
     }
 }
 
+/// Main RAM (area 3, any mirror, not the P4 region): the CPU's fast path.
+#[inline]
+fn is_ram(a: u32) -> bool { a & 0xE000_0000 != 0xE000_0000 && (a >> 26) & 7 == 3 }
+
 impl Sh4Bus for Dc {
     #[inline]
-    fn read8(&mut self, a: u32) -> u8 { self.read(a, 1) as u8 }
+    fn read8(&mut self, a: u32) -> u8 {
+        if is_ram(a) { return self.ram[(a & 0xFF_FFFF) as usize]; }
+        self.read(a, 1) as u8
+    }
     #[inline]
-    fn read16(&mut self, a: u32) -> u16 { self.read(a, 2) as u16 }
+    fn read16(&mut self, a: u32) -> u16 {
+        if is_ram(a) { let i = (a & 0xFF_FFFE) as usize; return u16::from_le_bytes([self.ram[i], self.ram[i + 1]]); }
+        self.read(a, 2) as u16
+    }
+    #[inline]
+    fn read64(&mut self, a: u32) -> u64 {
+        if is_ram(a) && a & 0xFF_FFF8 != 0xFF_FFF8 {
+            let i = (a & 0xFF_FFFC) as usize;
+            return u64::from_le_bytes(self.ram[i..i + 8].try_into().unwrap());
+        }
+        self.read32(a) as u64 | (self.read32(a.wrapping_add(4)) as u64) << 32
+    }
+    #[inline]
+    fn write64(&mut self, a: u32, v: u64) {
+        if is_ram(a) && a & 0xFF_FFF8 != 0xFF_FFF8 {
+            let i = (a & 0xFF_FFFC) as usize;
+            return self.ram[i..i + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        self.write32(a, v as u32);
+        self.write32(a.wrapping_add(4), (v >> 32) as u32);
+    }
     #[inline]
     fn read32(&mut self, a: u32) -> u32 {
         if a & 0xE000_0000 != 0xE000_0000 && (a >> 26) & 7 == 3 {
@@ -595,8 +686,16 @@ impl Sh4Bus for Dc {
         }
         self.read(a, 4)
     }
-    fn write8(&mut self, a: u32, v: u8) { self.write(a, v as u32, 1) }
-    fn write16(&mut self, a: u32, v: u16) { self.write(a, v as u32, 2) }
+    #[inline]
+    fn write8(&mut self, a: u32, v: u8) {
+        if is_ram(a) { self.ram[(a & 0xFF_FFFF) as usize] = v; return; }
+        self.write(a, v as u32, 1)
+    }
+    #[inline]
+    fn write16(&mut self, a: u32, v: u16) {
+        if is_ram(a) { let i = (a & 0xFF_FFFE) as usize; return self.ram[i..i + 2].copy_from_slice(&v.to_le_bytes()); }
+        self.write(a, v as u32, 2)
+    }
     #[inline]
     fn write32(&mut self, a: u32, v: u32) {
         if a & 0xE000_0000 != 0xE000_0000 && (a >> 26) & 7 == 3 {
@@ -605,7 +704,7 @@ impl Sh4Bus for Dc {
         }
         self.write(a, v, 4)
     }
-    #[inline]
+    #[inline(always)]
     fn fetch16(&mut self, a: u32) -> u16 {
         if a & 0xE000_0000 != 0xE000_0000 {
             let p = a & 0x1FFF_FFFF;
@@ -619,6 +718,12 @@ impl Sh4Bus for Dc {
         let (dest, data) = self.chip.sq_flush(a);
         for (k, w) in data.iter().enumerate() { self.write(dest + 4 * k as u32, *w, 4); }
     }
+    #[inline]
+    fn irq(&self) -> Option<(u32, u32)> { self.irq }
+    #[inline]
+    fn now(&self) -> u64 { self.now }
+    #[inline]
+    fn tick(&mut self, cycles: u64) { self.now += cycles; }
     fn event(&mut self, reg: Event, v: u32) {
         match reg {
             Event::Tra => self.chip.tra = v,

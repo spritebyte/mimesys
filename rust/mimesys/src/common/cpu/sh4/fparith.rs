@@ -53,6 +53,8 @@ fp!(f64, 0x7FF8_0000_0000_0000, 4.149515568880993e180); // 2^600
 pub struct Mode {
     pub rz: bool,
     pub dn: bool,
+    /// plain host arithmetic (`Sh4::fast_fpu`)
+    pub fast: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -60,9 +62,10 @@ pub enum Op { Add, Sub, Mul, Div }
 
 impl Mode {
     /// RM 1 = round to zero; 0 and the reserved 2 / 3 round to nearest.
-    pub fn from_fpscr(fpscr: u32) -> Self { Self { rz: fpscr & 3 == 1, dn: fpscr & super::FPSCR_DN != 0 } }
+    pub fn from_fpscr(fpscr: u32) -> Self { Self { rz: fpscr & 3 == 1, dn: fpscr & super::FPSCR_DN != 0, fast: false } }
 
-    pub fn input<T: Fp>(self, x: T) -> T { if self.dn && x.is_subnormal() { x.signed_zero() } else { x } }
+    #[inline]
+    pub fn input<T: Fp>(self, x: T) -> T { if !self.fast && self.dn && x.is_subnormal() { x.signed_zero() } else { x } }
 
     /// Finish a result: `d` has the sign of (exact - r) (zero when exact).
     fn finish<T: Fp>(self, r: T, d: T, inputs_nan: bool, inputs_finite: bool) -> T {
@@ -81,7 +84,11 @@ impl Mode {
 
     pub fn output<T: Fp>(self, r: T) -> T { if self.dn && r.is_subnormal() { r.signed_zero() } else { r } }
 
+    #[inline]
     pub fn arith<T: Fp>(self, op: Op, a: T, b: T) -> T {
+        if self.fast {
+            return match op { Op::Add => a + b, Op::Sub => a - b, Op::Mul => a * b, Op::Div => a / b };
+        }
         let (a, b) = (self.input(a), self.input(b));
         let nan = a.is_nan() || b.is_nan();
         let fin = a.is_finite() && b.is_finite();
@@ -119,6 +126,7 @@ impl Mode {
     }
 
     pub fn sqrt<T: Fp>(self, x: T) -> T {
+        if self.fast { return x.sqrt(); }
         let x = self.input(x);
         let r = x.sqrt();
         let d = if r.is_finite() { (-r).fma(r, x) } else { T::ZERO };
@@ -126,8 +134,10 @@ impl Mode {
     }
 
     /// An f64 value rounded to f32 with this mode.
+    #[inline]
     pub fn narrow(self, x: f64) -> f32 {
         let r = x as f32;
+        if self.fast { return r; }
         let d = if r.is_finite() && x.is_finite() { x - r as f64 } else { 0.0 };
         if r.is_finite() || !x.is_finite() {
             let d = if d == 0.0 { 0.0f32 } else if d < 0.0 { -1.0 } else { 1.0 };
@@ -140,6 +150,7 @@ impl Mode {
     /// An integer to f32 / f64 (FLOAT).
     pub fn from_int_f32(self, v: i32) -> f32 {
         let r = v as f32;
+        if self.fast { return r; }
         let d = (v as i64 - r as i64) as f32;
         self.finish(r, d, false, true)
     }

@@ -38,9 +38,10 @@ impl Sh4 {
     }
 
     fn pr(&self) -> bool { self.fpscr & FPSCR_PR != 0 }
-    fn mode(&self) -> Mode { Mode::from_fpscr(self.fpscr) }
+    fn mode(&self) -> Mode { let mut m = Mode::from_fpscr(self.fpscr); m.fast = self.fast_fpu; m }
     fn sz(&self) -> bool { self.fpscr & FPSCR_SZ != 0 }
 
+    #[inline(always)]
     pub(super) fn fpu<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, op: u16) {
         if self.check_fd && self.sr_hi & SR_FD != 0 {
             let code = if self.in_slot { EXP_FPU_DISABLED_SLOT } else { EXP_FPU_DISABLED };
@@ -131,6 +132,7 @@ impl Sh4 {
     }
 
     // (FPU encodings that don't exist for the current FPSCR.PR do nothing, as on the reference)
+    #[inline(never)]
     fn fpu_d<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, op: u16, n: usize, m: usize) {
         let pr = self.pr();
         match m {

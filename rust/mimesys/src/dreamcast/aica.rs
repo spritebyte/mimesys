@@ -80,6 +80,9 @@ pub struct Aica {
     /// the ARM's register reads by address (debug)
     #[serde(skip)]
     pub arm_reads: std::collections::BTreeMap<u32, u64>,
+    /// interrupts asked for through MCIPD (to the SH-4) and SCIPD (to the ARM) bit 5
+    #[serde(skip)]
+    pub cpu_ints: [u64; 2],
 }
 
 impl Default for Aica {
@@ -92,7 +95,7 @@ impl Aica {
         Self {
             wave: vec![0; WAVE_SIZE], regs: vec![0; 0x8000], arm_reset: true,
             rtc_base: unix_now + EPOCH_1950, rtc_cycle: 0, rtc_we: false, rtc_hi: 0,
-            timers: [Timer::default(); 3], scipd: 0, mcipd: 0, samples: 0, snd: Sound::default(), out: Vec::new(), arm_reads: Default::default(),
+            timers: [Timer::default(); 3], scipd: 0, mcipd: 0, samples: 0, snd: Sound::default(), out: Vec::new(), arm_reads: Default::default(), cpu_ints: [0; 2],
         }
     }
 
@@ -171,12 +174,12 @@ impl Aica {
             }
             SCIPD => {
                 // only the CPU interrupt can be set by writing
-                if v & INT_CPU != 0 { self.scipd |= INT_CPU; }
+                if v & INT_CPU != 0 { self.scipd |= INT_CPU; self.cpu_ints[1] += 1; }
                 self.put16(o, old);
             }
             SCIRE => { self.scipd &= !v; self.put16(o, 0); }
             MCIPD => {
-                if v & INT_CPU != 0 { self.mcipd |= INT_CPU; }
+                if v & INT_CPU != 0 { self.mcipd |= INT_CPU; self.cpu_ints[0] += 1; }
                 self.put16(o, old);
             }
             MCIRE => { self.mcipd &= !v; self.put16(o, 0); }

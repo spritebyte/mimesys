@@ -18,6 +18,14 @@ pub fn set_path(path: &str) {
     }
 }
 
+/// The log file's path, if any.
+pub fn path() -> Option<String> { LOG.lock().ok()?.as_ref().map(|(p, _)| p.clone()) }
+
+/// The frontend's audio: times its output buffer had run dry, and frames queued (for the
+/// systems' speed logs).
+pub static AUDIO_DRY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static AUDIO_QUEUED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn write(line: &str) {
     println!("{line}");
     if let Ok(mut g) = LOG.lock() {

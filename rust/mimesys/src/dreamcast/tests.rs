@@ -348,9 +348,26 @@ fn dc_speed() {
     a.li(1, 0x8C00_1000).label("l").mov_l_load(1, 2).add_i(2, 1).mov_l_store(2, 1).jump(0xA0, "l").nop();
     let mut s = system_with(&a.build(0xA000_0000), &[]);
     let t = std::time::Instant::now();
-    for _ in 0..60 { s.run_frame(0); }
+    let n = std::env::var("DC_N").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    for _ in 0..n { s.run_frame(0); }
     let el = t.elapsed().as_secs_f64();
-    println!("60 fields in {el:.2} s ({:.0}% of real time)", 100.0 / el);
+    println!("{n} fields in {el:.2} s ({:.0}% of real time)", 100.0 * n as f64 / 60.0 / el);
+}
+
+/// Like `dc_speed`, a geometry-style loop: FMOV loads, FTRV, FMUL / FADD, stores, DT / BF.
+#[test]
+#[ignore]
+fn dc_speed_fpu() {
+    let mut a = Asm::new();
+    a.label("s").li(1, 0x8C00_1000).li(2, 0x8C00_4000).li(3, 256).label("l");
+    for op in [0xF019, 0xF119, 0xF219, 0xF319, 0xF1FD, 0xF102, 0xF320, 0xF20A, 0x7204, 0xF21A, 0x7204, 0xF23A, 0x7204, 0x4310] { a.op(op); }
+    a.jump(0x8B, "l").nop().jump(0xA0, "s").nop();
+    let mut s = system_with(&a.build(0xA000_0000), &[]);
+    let t = std::time::Instant::now();
+    let n = std::env::var("DC_N").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    for _ in 0..n { s.run_frame(0); }
+    let el = t.elapsed().as_secs_f64();
+    println!("{n} fields in {el:.2} s ({:.0}% of real time)", 100.0 * n as f64 / 60.0 / el);
 }
 
 #[test]

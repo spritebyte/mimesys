@@ -239,6 +239,21 @@ fn depth_test_keeps_the_nearer_surface() {
 }
 
 #[test]
+fn hidden_opaque_pixels_are_not_shaded() {
+    let px = |both: bool| {
+        let mut r = Rig::new(0xFF00_0000);
+        r.send(&[hdr(0, 0), ISP_GEQ, 0, 0, 0, 0, 0, 0]);
+        rect(&mut r, 0.0, 0.0, 100.0, 100.0, 2.0, 0xFFFF_0000);
+        if both { rect(&mut r, 0.0, 0.0, 100.0, 100.0, 1.0, 0xFF00_FF00); }
+        r.end_list();
+        let st = r.render();
+        assert_eq!(px565(&r.vram, 50, 50), 0xF800);
+        st.pixels
+    };
+    assert_eq!(px(true), px(false), "the far rectangle is shaded nowhere");
+}
+
+#[test]
 fn translucent_blends_and_sorts_back_to_front() {
     let mut r = Rig::new(0xFF00_0000);
     // src alpha / inverse src alpha, use alpha
@@ -505,11 +520,11 @@ fn background_plane_is_gouraud_shaded() {
     assert!(a <= 2 && b >= 28, "{a} {b}");
 }
 
-#[test]
-fn render_through_the_bus_draws_and_ends() {
+fn bus_render(async_: bool) -> super::bus::Dc {
     use crate::common::cpu::sh4::Sh4Bus;
-    let mut r = Rig::new(0xFF00_FF00);
+    let r = Rig::new(0xFF00_FF00);
     let mut d = super::bus::Dc::new(vec![0; super::BIOS_SIZE], &[], 0);
+    d.render_async = async_;
     d.vram.copy_from_slice(&r.vram);
     for (k, v) in r.pvr.regs.iter().enumerate() {
         if (0x020..0x200).contains(&(k * 4)) && k * 4 != 0x014 && k * 4 != 0x144 { d.write32(0xA05F_8000 + k as u32 * 4, *v); }
@@ -523,9 +538,28 @@ fn render_through_the_bus_draws_and_ends() {
     send(&mut d, &v0(0.0, 64.0, 1.0, 0xFFFF_0000, true));
     send(&mut d, &[0; 8]);
     d.write32(0xA05F_8014, 1);
+    d
+}
+
+#[test]
+fn render_through_the_bus_draws_and_ends() {
+    let d = bus_render(false);
     assert_eq!(px565(&d.vram, 5, 5), 0xF800);
     assert_eq!(px565(&d.vram, 600, 5), 0x07E0);
     assert!(d.pvr.last_render.polys == 1 && d.pvr.last_render.pixels > 2000);
+}
+
+#[test]
+fn render_on_a_thread_lands_at_the_join() {
+    let mut d = bus_render(true);
+    assert!(d.render_job.0.is_some());
+    d.finish_render();
+    assert!(d.render_job.0.is_none());
+    assert_eq!(px565(&d.vram, 5, 5), 0xF800);
+    assert_eq!(px565(&d.vram, 600, 5), 0x07E0);
+    assert!(d.pvr.last_render.polys == 1 && d.pvr.last_render.pixels > 2000);
+    let s = bus_render(false);
+    assert_eq!(&d.vram[..0x10_0000], &s.vram[..0x10_0000]);
 }
 
 // ---- stage 5 ----
@@ -699,6 +733,25 @@ fn table_fog_and_colour_clamp() {
 }
 
 #[test]
+fn table_fog_varies_over_a_flat_coloured_slope() {
+    // one flat colour but z from near (left) to far (right): fog must follow z per pixel
+    let mut r = Rig::new(0xFF00_0000);
+    r.set(render::FOG_COL_RAM, 0x0000_FF00);
+    r.set(render::FOG_DENSITY, 0x8000);
+    for k in 0..128u32 { r.set(render::FOG_TABLE + 4 * k, (2 * k) * 0x101); }
+    // translucent ONE / ZERO (drawn directly, not deferred)
+    r.send(&[hdr(2, 0), 7 << 29, 1 << 29, 0, 0, 0, 0, 0]);
+    for (k, (x, y, z)) in [(0.0, 0.0, 1.0), (256.0, 0.0, 0.002), (0.0, 64.0, 1.0), (256.0, 64.0, 0.002)].into_iter().enumerate() {
+        r.send(&v0(x, y, z, 0xFFFF_0000, k == 3));
+    }
+    r.end_list();
+    r.render();
+    let (a, b) = (px565(&r.vram, 4, 10), px565(&r.vram, 180, 10)); // both in the first triangle
+    assert_ne!(a, b, "{a:04X} {b:04X}");
+    assert_eq!(a & 0x07E0, 0, "near: no fog");
+}
+
+#[test]
 fn secondary_accumulation_buffer_takes_the_write() {
     let mut r = Rig::new(0xFF00_0000);
     // ONE / ZERO into the secondary buffer: the primary stays black
@@ -755,4 +808,57 @@ fn render_speed() {
     let mut st = Default::default();
     for _ in 0..n { st = r.render(); }
     println!("render: {:.1} ms each ({} pixels)", t.elapsed().as_secs_f64() * 1000.0 / n as f64, st.pixels);
+}
+
+#[test]
+fn textures_stay_cached_until_their_video_ram_is_written() {
+    use super::render::{RenderCache, TexCache};
+    use super::texture::Tex;
+    // 8 x 8 RGB565 stride texture at 0x1000
+    let t = Tex::new(0, 1 << 27 | 0x0400_0000 | 0x1000 >> 3, 0, 0);
+    let mut vram = vec![0u8; 8 << 20];
+    let mut rc = RenderCache::default();
+    let pal = vec![0u32; 1024];
+    let get = |c: &TexCache, v: &[u8]| c.get(&t, (1, 2, 0, 0), v, &pal)[0];
+    let _ = rc.prepare(&vram);
+    assert_eq!(get(&rc.tex, &vram), 0xFF00_0000);
+    vram[0x1000..0x1002].copy_from_slice(&0xF800u16.to_le_bytes());
+    // not marked: the cached (old) texels
+    let _ = rc.prepare(&vram);
+    assert_eq!(get(&rc.tex, &vram), 0xFF00_0000);
+    // a write elsewhere leaves it
+    rc.mark(0x8000, 0x8003);
+    let _ = rc.prepare(&vram);
+    assert_eq!(get(&rc.tex, &vram), 0xFF00_0000);
+    rc.mark(0x1000, 0x1001);
+    let _ = rc.prepare(&vram);
+    assert_eq!(get(&rc.tex, &vram), 0xFFFF_0000);
+}
+
+#[test]
+fn the_render_copy_of_video_ram_follows_marked_writes() {
+    let mut rc = super::render::RenderCache::default();
+    let mut vram = vec![0u8; 8 << 20];
+    let s = rc.prepare(&vram);
+    rc.snap = Some(s);
+    vram[0x2_3456] = 7;
+    vram[0x40_0000] = 9;
+    rc.mark(0x2_3456, 0x2_3456);
+    let s = rc.prepare(&vram);
+    assert_eq!(s[0x2_3456], 7, "the written page is copied");
+    assert_eq!(s[0x40_0000], 0, "an unmarked page is not (only marked pages are copied)");
+}
+
+#[test]
+fn cpu_and_direct_path_writes_mark_video_ram() {
+    use crate::common::cpu::sh4::Sh4Bus;
+    let mut d = super::bus::Dc::new(vec![0; super::BIOS_SIZE], &[], 0);
+    let s = d.rcache.prepare(&d.vram);
+    d.rcache.snap = Some(s);
+    d.write32(0xA500_1000, 0x1234_5678);     // 32-bit area
+    d.write16(0x1100_8000, 0xBEEF);          // direct texture path (64-bit)
+    let s = d.rcache.prepare(&d.vram);
+    assert_eq!(s, d.vram);
+    assert!(d.vram.iter().any(|&b| b == 0x78), "32-bit write landed");
+    assert!(d.vram.iter().any(|&b| b == 0xEF), "direct write landed");
 }

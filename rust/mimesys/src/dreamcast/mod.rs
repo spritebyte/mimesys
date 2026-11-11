@@ -64,10 +64,14 @@ struct Prof {
     since: std::time::Instant,
     cycles: u64,
     idle_cycles: u64,
+    /// fields that showed the previous picture because the render was still running
+    late_frames: u64,
+    /// ARM7 instructions at the start
+    arm_steps: u64,
 }
 
 impl Default for Prof {
-    fn default() -> Self { Self { since: std::time::Instant::now(), cycles: 0, idle_cycles: 0 } }
+    fn default() -> Self { Self { since: std::time::Instant::now(), cycles: 0, idle_cycles: 0, late_frames: 0, arm_steps: 0 } }
 }
 
 #[derive(Serialize)]
@@ -76,7 +80,55 @@ struct StateRef<'a> { version: u32, cpu: &'a Sh4, dc: &'a Dc, frame: u64 }
 #[derive(Deserialize)]
 struct State { version: u32, cpu: Sh4, dc: Dc, frame: u64 }
 
+/// The sound output recorded to `dc_sound.wav` next to the debug log (option
+/// dc_record_sound): the first minute after it is turned on, the file rewritten every few
+/// seconds so it is usable while the game runs.
+#[derive(Default)]
+struct WavRec {
+    on: bool,
+    data: Vec<i16>,
+    saved: usize,
+}
+
+impl WavRec {
+    const SECONDS: usize = 60;
+
+    fn push(&mut self, s: &[f32]) {
+        if !self.on { return; }
+        let max = Self::SECONDS * aica::SAMPLE_RATE as usize * 2;
+        let room = max.saturating_sub(self.data.len());
+        self.data.extend(s.iter().take(room).map(|&x| (x.clamp(-1.0, 1.0) * 32767.0) as i16));
+        let every = 5 * aica::SAMPLE_RATE as usize * 2;
+        if self.data.len() >= self.saved + every || (self.data.len() == max && self.saved < max) { self.save(); }
+    }
+
+    fn save(&mut self) {
+        let Some(log) = crate::common::debug_log::path() else { return };
+        let path = std::path::Path::new(&log).with_file_name("dc_sound.wav");
+        let bytes = self.data.len() as u32 * 2;
+        let mut f = Vec::with_capacity(44 + bytes as usize);
+        f.extend(b"RIFF");
+        f.extend((36 + bytes).to_le_bytes());
+        f.extend(b"WAVEfmt ");
+        f.extend(16u32.to_le_bytes());
+        f.extend(1u16.to_le_bytes());
+        f.extend(2u16.to_le_bytes());
+        f.extend((aica::SAMPLE_RATE as u32).to_le_bytes());
+        f.extend((aica::SAMPLE_RATE as u32 * 4).to_le_bytes());
+        f.extend(4u16.to_le_bytes());
+        f.extend(16u16.to_le_bytes());
+        f.extend(b"data");
+        f.extend(bytes.to_le_bytes());
+        for v in &self.data { f.extend(v.to_le_bytes()); }
+        if self.saved == 0 { crate::dlog!("Dreamcast: recording the sound to {}", path.display()); }
+        if let Err(e) = std::fs::write(&path, f) { crate::dlog!("Dreamcast: can't write {}: {e}", path.display()); }
+        self.saved = self.data.len();
+    }
+}
+
 pub struct DcSystem {
+    /// the sound output to a file (option dc_record_sound)
+    wav: WavRec,
     pub cpu: Sh4,
     pub dc: Dc,
     frame: Vec<u8>,
@@ -96,6 +148,8 @@ pub struct DcSystem {
     pub cpi: u64,
     /// skip polling loops to the next event (option dc_idle_skip)
     pub idle_skip: bool,
+    /// the FPU's round-to-zero / denormal modes done exactly (option dc_fpu_exact; slower)
+    pub fpu_exact: bool,
     /// polling loops found: start address → (the loop's code words, idle?)
     idle_loops: HashMap<u32, (Vec<u16>, bool)>,
     /// print a speed line every 300 frames (option speed_log, or with the debug report)
@@ -140,11 +194,12 @@ impl DcSystem {
         if let Some(d) = disc { dc.gd.disc = gdrom::DiscSlot::new(d); }
         let name = disc_path.as_deref().and_then(|p| std::path::Path::new(p).file_stem()).map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| filename.rsplit_once('.').map_or(filename, |(s, _)| s).to_string());
+        dc.render_async = true;
         crate::dlog!("Dreamcast: BIOS loaded, video cable {}", ["VGA", "?", "RGB", "composite"][dc.chip.cable as usize]);
         Ok(Self {
             cpu: Sh4::new(), dc, frame: vec![0; OUT_W * OUT_H * 4], current_frame: 0, ext: 0, time_rem: 0, video_mode: u32::MAX,
             debug_report: false, pc_hist: HashMap::new(), jumps: Default::default(), disc_path,
-            cpi: 2, idle_skip: true, idle_loops: HashMap::new(), speed_log: false, prof: Prof::default(),
+            cpi: 2, fpu_exact: false, idle_skip: true, idle_loops: HashMap::new(), speed_log: false, wav: WavRec::default(), prof: Prof::default(),
             // the flash is the console's, not the game's: one file for every game
             save_filename: "dc_flash".to_string(),
             save_battery_path: "user://GD_EMU/DC/Save".to_string(),
@@ -154,25 +209,22 @@ impl DcSystem {
 
     /// Run the CPU up to cycle `target`, taking interrupts between instructions.
     fn run_cpu(&mut self, target: u64) {
+        self.cpu.fast_fpu = !self.fpu_exact;
         if self.debug_report { return self.run_cpu_traced(target); }
-        // a backward jump to the same place several times in a row: maybe a polling loop
-        let (mut loop_to, mut loop_n) = (u32::MAX, 0u32);
-        while self.dc.now < target {
-            if let Some((level, code)) = self.dc.irq {
-                if self.cpu.accepts(level) { self.cpu.interrupt(&mut self.dc, code); }
-            }
-            if self.cpu.sleeping { self.dc.now = target; return; }
-            let pc = self.cpu.pc;
-            self.cpu.step(&mut self.dc);
-            self.dc.now += self.cpi;
-            let to = self.cpu.pc;
-            if to < pc && pc - to <= 64 && self.idle_skip {
-                if to == loop_to { loop_n += 1; } else { loop_to = to; loop_n = 1; }
-                // checked once per run of the same loop (4th pass)
-                if loop_n == 4 && self.polling_loop(to, pc) {
-                    self.prof.idle_cycles += target - self.dc.now;
-                    self.dc.now = target;
-                    return;
+        // a backward jump to the same place several times in a row: maybe a polling loop,
+        // checked once per run of the same loop (4th pass)
+        let mut loops = (u32::MAX, 0u32);
+        loop {
+            let watch = if self.idle_skip { Some(&mut loops) } else { None };
+            match self.cpu.run(&mut self.dc, target, self.cpi, watch) {
+                crate::common::cpu::sh4::RunExit::Done => return,
+                crate::common::cpu::sh4::RunExit::Sleep => { self.dc.now = target; return; }
+                crate::common::cpu::sh4::RunExit::Loop { to, last } => {
+                    if self.polling_loop(to, last) {
+                        self.prof.idle_cycles += target - self.dc.now;
+                        self.dc.now = target;
+                        return;
+                    }
                 }
             }
         }
@@ -260,7 +312,15 @@ impl DcSystem {
                 self.reset();
             }
         }
-        self.dc.pvr.output(&self.dc.vram, &mut self.frame);
+        // a render still running on its thread: show the last picture again rather than
+        // wait (it is picked up at a later field or the next STARTRENDER)
+        let busy = self.dc.render_job.0.as_ref().is_some_and(|h| !h.is_finished());
+        if !busy {
+            self.dc.finish_render();
+            self.dc.pvr.output(&self.dc.vram, &mut self.frame);
+        } else {
+            self.prof.late_frames += 1;
+        }
         let mode = self.dc.pvr.reg(pvr::SPG_CONTROL);
         if mode != self.video_mode {
             if self.video_mode != u32::MAX {
@@ -279,16 +339,63 @@ impl DcSystem {
         let span = (self.dc.now - self.prof.cycles) as f64;
         let d = &mut self.dc;
         let ms = |t: std::time::Duration| t.as_secs_f64() * 1000.0 / emu;
-        let (r, s, a) = (ms(d.t_render), ms(d.t_sound), ms(d.t_arm));
+        let (r, rw, s, a) = (ms(d.t_render), ms(d.t_render_wait), ms(d.t_sound), ms(d.t_arm));
         let total = wall * 1000.0 / emu;
-        crate::dlog!("Dreamcast speed: {:.0}% of real time ({:.0} ms of host time per emulated second: render {r:.0}, sound {s:.0}, ARM7 {a:.0}, SH-4 + rest {:.0}); SH-4 idle-skipped {:.0}%, {} cycles an instruction",
-                     100.0 / total * 1000.0, total, total - r - s - a,
+        crate::dlog!("Dreamcast speed: {:.0}% of real time ({:.0} ms of host time per emulated second: render {r:.0} on other threads (CPU waited {rw:.0}), sound {s:.0}, ARM7 {a:.0}, SH-4 + rest {:.0}); SH-4 idle-skipped {:.0}%, {} cycles an instruction",
+                     100.0 / total * 1000.0, total, total - rw - s - a,
                      100.0 * self.prof.idle_cycles as f64 / span, self.cpi);
+        let (n, polys, px, tr) = d.r_sum;
+        if n > 0 {
+            crate::dlog!("  {:.0} renders per emulated second, each about {} polygons, {}k pixels shaded ({}k translucent); {} textures cached; {} fields repeated the last picture",
+                         n as f64 / emu, polys / n, px / n / 1000, tr / n / 1000, d.rcache.tex.len(), self.prof.late_frames);
+        }
+        d.r_sum = (0, 0, 0, 0);
+        let st = std::mem::take(&mut d.aica.snd.stats);
+        let n = st.samples;
+        let dry = crate::common::debug_log::AUDIO_DRY.swap(0, std::sync::atomic::Ordering::Relaxed);
+        let queued = crate::common::debug_log::AUDIO_QUEUED.load(std::sync::atomic::Ordering::Relaxed);
+        let arm = d.arm_steps - self.prof.arm_steps;
+        let mut pcs: Vec<_> = d.arm_pcs.iter().map(|(&p, &c)| (p, c)).collect();
+        pcs.sort_by(|x, y| y.1.cmp(&x.1));
+        d.arm_pcs.clear();
+        let mvol = d.aica.peek16(0x2800) & 0xF;
+        // where the ARM7 spends its time: the code there, its registers, what it reads
+        let busiest = pcs.first().map_or(0, |p| p.0);
+        let at = (busiest & 0x1F_FFFC).saturating_sub(0x10) as usize;
+        let code: Vec<String> = (0..12).map(|k| {
+            let i = (at + 4 * k) & (d.aica.wave.len() - 1);
+            format!("{:08X}", u32::from_le_bytes(d.aica.wave[i..i + 4].try_into().unwrap()))
+        }).collect();
+        let mut rd: Vec<_> = d.aica.arm_reads.iter().map(|(&r, &n)| (r, n)).collect();
+        rd.sort_by(|x, y| y.1.cmp(&x.1));
+        d.aica.arm_reads.clear();
+        let io = std::mem::take(&mut d.snd_io);
+        let ci = std::mem::take(&mut d.aica.cpu_ints);
+        crate::dlog!("  sound traffic: SH-4 wrote {}k bytes to sound RAM, {} AICA DMAs ({}k bytes; last G2 {:08X} system {:08X} length {:08X} dir/trigger {:04X}), {} DMA starts without ADEN; CPU interrupts ARM7→SH-4 {}, SH-4→ARM7 {}; MCIEB {:04X} MCIPD {:04X} SCIEB {:04X}",
+                     io[0] / 1024, io[1], io[2] / 1024, d.g2_last[0], d.g2_last[1], d.g2_last[2], d.g2_last[3], io[3], ci[0], ci[1],
+                     d.aica.peek16(0x28B4), d.aica.mcipd, d.aica.peek16(0x289C));
+        let words = |a: u32| (0..16).map(|k| {
+            let i = ((a & 0x1F_FFFC) as usize + 4 * k) & (d.aica.wave.len() - 4);
+            format!("{:08X}", u32::from_le_bytes(d.aica.wave[i..i + 4].try_into().unwrap()))
+        }).collect::<Vec<_>>().join(" ");
+        crate::dlog!("  ARM7 code at {at:05X}: {}; r0-r14 {}; CPSR {:08X}; most read registers {}",
+                     code.join(" "), d.arm.r[..15].iter().map(|v| format!("{v:08X}")).collect::<Vec<_>>().join(" "), d.arm.cpsr,
+                     rd.iter().take(4).map(|(r, n)| format!("{r:04X}x{n}")).collect::<Vec<_>>().join(" "));
+        crate::dlog!("  sound RAM at r10 {:05X}: {}; at r12 {:05X}: {}; GD-ROM commands {}",
+                     d.arm.r[10] & 0x1F_FFFC, words(d.arm.r[10]), d.arm.r[12] & 0x1F_FFFC, words(d.arm.r[12]),
+                     std::mem::take(&mut d.gd.cmd_counts).iter().map(|(c, n)| format!("{c:02X}x{n}")).collect::<Vec<_>>().join(" "));
+        use aica_sound::SndStats;
+        crate::dlog!("  sound: {:.0} samples per emulated second, {:.1} key-ons/s, {:.1} channels playing; level direct {}, DSP {} ({} steps), CD {}, output {} (peak {:.2}, master volume {mvol}); ARM7 {:.1} M instructions/s, busiest PCs {}; frontend buffer ran dry {dry} times, {queued} frames queued",
+                     n as f64 / emu, st.keyons as f64 / emu, st.playing as f64 / n.max(1) as f64,
+                     SndStats::db(st.direct, n), SndStats::db(st.dsp, n), d.aica.snd.dsp_steps(), SndStats::db(st.cd, n), SndStats::db(st.out, n), st.peak,
+                     arm as f64 / emu / 1e6, pcs.iter().take(3).map(|(p, c)| format!("{p:08X}x{c}")).collect::<Vec<_>>().join(" "));
         d.t_render = Default::default();
+        d.t_render_wait = Default::default();
         d.t_sound = Default::default();
         d.t_arm = Default::default();
         let now = d.now;
-        self.prof = Prof { cycles: now, ..Prof::default() };
+        let arm_steps = self.dc.arm_steps;
+        self.prof = Prof { cycles: now, arm_steps, ..Prof::default() };
     }
 
     fn report(&mut self) {
@@ -391,7 +498,11 @@ impl System for DcSystem {
         }
     }
 
-    fn drain_audio(&mut self) -> Vec<f32> { std::mem::take(&mut self.dc.aica.out) }
+    fn drain_audio(&mut self) -> Vec<f32> {
+        let out = std::mem::take(&mut self.dc.aica.out);
+        self.wav.push(&out);
+        out
+    }
 
     fn sample_rate(&self) -> u32 { 44_100 }
 
@@ -421,7 +532,9 @@ impl System for DcSystem {
         let (s, _): (State, usize) = bincode::serde::decode_from_slice(data, config)
             .map_err(|e| format!("Failed to decode Dreamcast save state: {e:?}"))?;
         if s.version != STATE_VERSION { return Err(format!("save state version {} (expected {STATE_VERSION})", s.version)); }
+        self.dc.finish_render();
         let mut dc = s.dc;
+        dc.render_async = self.dc.render_async;
         dc.bios = std::mem::take(&mut self.dc.bios);
         dc.pads = self.dc.pads;
         dc.gd.disc = self.dc.gd.disc.clone();
@@ -466,7 +579,14 @@ impl System for DcSystem {
             "dc_cable" => self.dc.chip.cable = (value as u16) & 3,
             "dc_cpu_ratio" => self.cpi = value.clamp(1, 4) as u64,
             "dc_idle_skip" => self.idle_skip = value != 0,
+            "dc_fpu_exact" => self.fpu_exact = value != 0,
+            "dc_render_thread" => { self.dc.finish_render(); self.dc.render_async = value != 0; }
             "speed_log" => self.speed_log = value != 0,
+            "dc_record_sound" => {
+                let on = value != 0;
+                if on && !self.wav.on { self.wav = WavRec { on: true, ..WavRec::default() }; }
+                if !on { self.wav.on = false; }
+            }
             _ => {}
         }
     }

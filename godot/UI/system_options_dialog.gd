@@ -274,6 +274,21 @@ func _rebuild() -> void:
 		idle.button_pressed = _opt("dc_idle_skip")
 		idle.toggled.connect(func(on): _put("dc_idle_skip", on))
 		_row("Speed", idle)
+		var rthr := CheckBox.new()
+		rthr.text = "Draw 3D on other threads while the CPU runs (faster)"
+		rthr.button_pressed = _opt("dc_render_thread")
+		rthr.toggled.connect(func(on): _put("dc_render_thread", on))
+		_row("", rthr)
+		var fpx := CheckBox.new()
+		fpx.text = "Exact FPU rounding (slower; try if physics or geometry look off)"
+		fpx.button_pressed = _opt("dc_fpu_exact")
+		fpx.toggled.connect(func(on): _put("dc_fpu_exact", on))
+		_row("", fpx)
+		var rec := CheckBox.new()
+		rec.text = "Record the first minute of sound to dc_sound.wav (needs the speed log)"
+		rec.button_pressed = _opt("dc_record_sound")
+		rec.toggled.connect(func(on): _put("dc_record_sound", on))
+		_row("Debug", rec)
 		var slog := CheckBox.new()
 		slog.text = "Print a speed line every 5 seconds to debug_dc.log"
 		slog.button_pressed = _opt("dc_speed_log")

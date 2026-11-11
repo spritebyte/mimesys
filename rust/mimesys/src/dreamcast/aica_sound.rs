@@ -164,9 +164,35 @@ impl Default for Dsp {
     fn default() -> Self { Self { temp: vec![0; 128], mems: vec![0; 32], mixs: [0; 16], efreg: [0; 16], dec: 0, last_step: 0 } }
 }
 
+/// What the channels and the DSP did since the last speed line.
+#[derive(Clone, Default)]
+pub struct SndStats {
+    pub keyons: u64,
+    pub samples: u64,
+    /// channels playing, summed over samples
+    pub playing: u64,
+    /// squared levels (full scale = 1) of the direct outputs, the DSP outputs, the CD input
+    /// and the final mix; the final mix's peak
+    pub direct: f64,
+    pub dsp: f64,
+    pub cd: f64,
+    pub out: f64,
+    pub peak: f32,
+}
+
+impl SndStats {
+    pub fn db(sq: f64, n: u64) -> String {
+        if n == 0 || sq <= 0.0 { return "silent".into(); }
+        format!("{:.0} dB", 10.0 * (sq / n as f64).log10())
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Sound {
     pub slots: Vec<Slot>,
+    /// for the speed log
+    #[serde(skip)]
+    pub stats: SndStats,
     dsp: Dsp,
     /// the DSP program changed: find its last step again
     #[serde(default)]
@@ -177,7 +203,7 @@ impl Default for Sound {
     fn default() -> Self {
         let mut slots = vec![Slot::default(); 64];
         for s in &mut slots { s.eg_state = RELEASE; s.lpend = true; }
-        Self { slots, dsp: Dsp::default(), dsp_dirty: true }
+        Self { slots, stats: SndStats::default(), dsp: Dsp::default(), dsp_dirty: true }
     }
 }
 
@@ -267,6 +293,7 @@ impl Sound {
     }
 
     fn start(&mut self, regs: &mut [u8], s: usize) {
+        self.stats.keyons += 1;
         self.compute_eg(regs, s);
         self.compute_lfo(regs, s);
         let step = Self::step_of(regs, s);
@@ -327,6 +354,9 @@ impl Sound {
     }
 
     pub fn dsp_changed(&mut self) { self.dsp_dirty = true; }
+
+    /// Steps in the DSP program (0 = none).
+    pub fn dsp_steps(&self) -> usize { self.dsp.last_step }
 
     /// 2810: envelope / loop monitor of slot MSLC (reading clears the loop-end flag).
     pub fn monitor(&mut self, regs: &[u8]) -> u16 {
@@ -481,8 +511,10 @@ impl Sound {
         let common = r16(regs, 0x2800);
         let mono = common & 0x8000 != 0;
         let (mut l, mut r) = (0i32, 0i32);
+        let mut playing = 0;
         for s in 0..64 {
             if !self.slots[s].active { continue; }
+            playing += 1;
             let smp = self.update_slot(regs, wave, s);
             let tl = sr(regs, s, 0x28) >> 8 & 0xFF;
             let mix = sr(regs, s, 0x20);
@@ -496,7 +528,13 @@ impl Sound {
             r += (smp * t.rpan[enc]) >> SHIFT;
         }
         self.dsp_step(regs, wave, exts);
+        let full = (32768i64 << 3) as f64;
+        let st = &mut self.stats;
+        st.samples += 1;
+        st.playing += playing;
+        st.direct += ((l as f64) / full).powi(2) + ((r as f64) / full).powi(2);
         let efs = |i: usize| r16(regs, 0x2000 + 4 * i);
+        let (mut dsp_lr, mut cd_lr) = ([0i32; 2], [0i32; 2]);
         for i in 0..18 {
             let e = efs(i);
             let sdl = e >> 8 & 0xF;
@@ -504,17 +542,33 @@ impl Sound {
             let pan = if mono { 0 } else { e & 0x1F };
             let enc = (pan << 8 | sdl << 13) as usize;
             let v = if i < 16 { self.dsp.efreg[i] as i32 } else { exts[i - 16] as i32 };
-            l += (v * t.lpan[enc]) >> SHIFT;
-            r += (v * t.rpan[enc]) >> SHIFT;
+            let (dl, dr) = ((v * t.lpan[enc]) >> SHIFT, (v * t.rpan[enc]) >> SHIFT);
+            let acc = if i < 16 { &mut dsp_lr } else { &mut cd_lr };
+            acc[0] += dl;
+            acc[1] += dr;
+            l += dl;
+            r += dr;
         }
+        let st = &mut self.stats;
+        let sq = |v: [i32; 2]| ((v[0] as f64) / full).powi(2) + ((v[1] as f64) / full).powi(2);
+        st.cd += sq(cd_lr);
+        st.dsp += sq(dsp_lr);
         let (l, r) = if common & 0x100 != 0 {
             ((l >> 1).clamp(-131072, 131071), (r >> 1).clamp(-131072, 131071))
         } else {
             ((l >> 3).clamp(-32768, 32767), (r >> 3).clamp(-32768, 32767))
         };
-        let mv = t.lpan[((common & 0xF) << 13) as usize] as f32;
-        let scale = mv / (32768.0 * (1 << SHIFT) as f32);
-        (l as f32 * scale, r as f32 * scale)
+        // the pan table carries 4x headroom for the mix; master volume is plain attenuation
+        let mv = t.lpan[((common & 0xF) << 13) as usize] as f32 / 4.0;
+        // full scale: 2^15 for the 16-bit DAC, 2^17 for the 18-bit one (DAC18B), so both
+        // give the same loudness
+        let full = if common & 0x100 != 0 { 131072.0 } else { 32768.0 };
+        let scale = mv / (full * (1 << SHIFT) as f32);
+        let (lo, ro) = (l as f32 * scale, r as f32 * scale);
+        let st = &mut self.stats;
+        st.out += (lo as f64).powi(2) + (ro as f64).powi(2);
+        st.peak = st.peak.max(lo.abs()).max(ro.abs());
+        (lo, ro)
     }
 
     fn dsp_step(&mut self, regs: &[u8], wave: &mut [u8], exts: [i16; 2]) {
@@ -641,6 +695,22 @@ mod tests {
     }
 
     #[test]
+    fn the_18_bit_dac_is_as_loud_as_the_16_bit_one() {
+        let play = |dac18: bool| {
+            let mut r = regs();
+            let mut wave = vec![0u8; 0x20_0000];
+            setup(&mut r, &mut wave, 0);
+            if dac18 { put(&mut r, 0x2800, 0x10F); }
+            let mut snd = Sound::default();
+            put(&mut r, 0x00, 0xC000 | 1 << 9);
+            snd.slot_write(&mut r, 0, 0);
+            (0..20).map(|_| snd.sample(&mut r, &mut wave, [0, 0]).0).fold(0f32, |a, x| a.max(x.abs()))
+        };
+        let (a, b) = (play(false), play(true));
+        assert!(a > 0.1 && (a - b).abs() < 0.01 && b <= 1.0, "{a} {b}");
+    }
+
+    #[test]
     fn keyed_slot_plays_its_samples_and_loops() {
         let mut r = regs();
         let mut wave = vec![0u8; 0x20_0000];
@@ -657,6 +727,10 @@ mod tests {
         assert!(hi && lo, "{:?}", &out[0..100]);
         assert!(out[66..94].iter().all(|&s| s > 0.05), "looped");
         assert!(snd.slots[0].lpend);
+        // the speed log's numbers: one key-on, a loud direct output, nothing from the DSP
+        assert_eq!((snd.stats.keyons, snd.stats.samples), (1, 200));
+        assert!(snd.stats.direct > 0.0 && snd.stats.out > 0.0 && snd.stats.dsp == 0.0 && snd.stats.peak > 0.05);
+        assert_eq!(SndStats::db(0.0, 10), "silent");
         // key off: released, then silent and inactive
         put(&mut r, 0x00, 0x8000 | 1 << 9);
         snd.slot_write(&mut r, 0, 0);
@@ -731,8 +805,8 @@ mod tests {
         let mut snd = Sound::default();
         snd.slot_write(&mut r, 0, 0);
         let out: Vec<f32> = (0..80).map(|_| snd.sample(&mut r, &mut wave, [0, 0]).0).collect();
-        assert!(out[2..14].iter().all(|&s| (0.4..0.55).contains(&s)), "{:?}", &out[..20]);
+        assert!(out[2..14].iter().all(|&s| (0.1..0.1375).contains(&s)), "{:?}", &out[..20]);
         // after the first pass only the loop part (negative) plays
-        assert!(out[18..80].iter().all(|&s| s < -0.4), "{:?}", &out[14..80]);
+        assert!(out[18..80].iter().all(|&s| s < -0.1), "{:?}", &out[14..80]);
     }
 }

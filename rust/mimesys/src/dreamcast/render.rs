@@ -36,15 +36,112 @@ use std::sync::{Arc, Mutex};
 /// A texture level decoded to ARGB8888.
 type Texels = Arc<Vec<u32>>;
 
-/// Textures decoded during one render, shared by the bands: (TCW, TSP size bits, level).
+/// Decoded textures, kept from render to render. An entry goes when video RAM under it was
+/// written (`invalidate`, with the pages written since the last render) or after it went
+/// unused for a while. Key: TCW, TSP size bits, level, the palette and texture-control
+/// registers hashed.
 #[derive(Default)]
-pub struct TexCache(Mutex<HashMap<(u32, u32, u32), Texels>>);
+pub struct TexCache {
+    map: Mutex<HashMap<TexKey, TexEntry>>,
+    epoch: std::sync::atomic::AtomicU64,
+}
+
+type TexKey = (u32, u32, u32, u64);
+
+struct TexEntry {
+    /// video RAM bytes the texture may read (a generous bound)
+    lo: u32,
+    hi: u32,
+    /// decoded once, by whichever band asks first
+    cell: Arc<std::sync::OnceLock<Texels>>,
+    used: u64,
+}
+
+/// Renders an unused texture is kept for.
+const TEX_KEEP: u64 = 600;
+/// 4 KB pages of video RAM.
+pub const VRAM_PAGES: usize = 2048;
 
 impl TexCache {
-    fn get(&self, t: &Tex, key: (u32, u32, u32), vram: &[u8], pal: &[u32]) -> Texels {
-        if let Some(d) = self.0.lock().unwrap().get(&key) { return d.clone(); }
-        let d = Arc::new(t.decode(vram, pal));
-        self.0.lock().unwrap().entry(key).or_insert(d).clone()
+    pub(crate) fn get(&self, t: &Tex, key: TexKey, vram: &[u8], pal: &[u32]) -> Texels {
+        let cell = {
+            let epoch = self.epoch.load(std::sync::atomic::Ordering::Relaxed);
+            let mut map = self.map.lock().unwrap();
+            let e = map.entry(key).or_insert_with(|| {
+                let lo = t.vqbase.min(t.addr);
+                // stride or square, 16 bits a texel, plus a mip chain and a codebook
+                let top = t.stride.max(t.sx) * t.sy * 2;
+                TexEntry { lo, hi: t.addr.saturating_add(top + top / 3 + 0x800), cell: Default::default(), used: epoch }
+            });
+            e.used = epoch;
+            e.cell.clone()
+        };
+        cell.get_or_init(|| Arc::new(t.decode(vram, pal))).clone()
+    }
+
+    /// Before a render: drop the textures over pages written since the last one, and old ones.
+    pub fn invalidate(&self, dirty: &[u64; VRAM_PAGES / 64]) {
+        let epoch = self.epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let any = dirty.iter().any(|&w| w != 0);
+        self.map.lock().unwrap().retain(|_, e| {
+            if epoch - e.used > TEX_KEEP { return false; }
+            if !any { return true; }
+            let (p0, p1) = ((e.lo >> 12) as usize, ((e.hi >> 12) as usize).min(VRAM_PAGES - 1));
+            !(p0..=p1).any(|p| dirty[p / 64] >> (p % 64) & 1 != 0)
+        });
+    }
+
+    pub fn len(&self) -> usize { self.map.lock().unwrap().len() }
+}
+
+/// What the renders keep between frames: the texture cache and the copy of video RAM the
+/// render thread draws from, each with the 4 KB pages written since it was brought up to
+/// date. Cloning (save states) or loading starts afresh.
+#[derive(Default)]
+pub struct RenderCache {
+    pub tex: Arc<TexCache>,
+    pub snap: Option<Vec<u8>>,
+    pub tex_dirty: [u64; VRAM_PAGES / 64],
+    pub snap_dirty: [u64; VRAM_PAGES / 64],
+}
+
+impl Clone for RenderCache {
+    fn clone(&self) -> Self { RenderCache::default() }
+}
+
+impl RenderCache {
+    /// Video RAM bytes lo..=hi (physical index) were written.
+    #[inline]
+    pub fn mark(&mut self, lo: usize, hi: usize) {
+        let (p0, p1) = (lo >> 12, (hi >> 12).min(VRAM_PAGES - 1));
+        for p in p0..=p1 {
+            self.tex_dirty[p / 64] |= 1 << (p % 64);
+            self.snap_dirty[p / 64] |= 1 << (p % 64);
+        }
+    }
+
+    /// Before a render: the texture cache dropped what was written over, and the copy of
+    /// video RAM for the render thread (only the written pages copied).
+    pub fn prepare(&mut self, vram: &[u8]) -> Vec<u8> {
+        self.tex.invalidate(&self.tex_dirty);
+        self.tex_dirty = [0; VRAM_PAGES / 64];
+        let snap = match self.snap.take() {
+            Some(mut s) if s.len() == vram.len() => {
+                for (k, &w) in self.snap_dirty.iter().enumerate() {
+                    let mut w = w;
+                    while w != 0 {
+                        let p = k * 64 + w.trailing_zeros() as usize;
+                        w &= w - 1;
+                        let r = p << 12..((p + 1) << 12).min(vram.len());
+                        s[r.clone()].copy_from_slice(&vram[r]);
+                    }
+                }
+                s
+            }
+            _ => vram.to_vec(),
+        };
+        self.snap_dirty = [0; VRAM_PAGES / 64];
+        snap
     }
 }
 
@@ -86,9 +183,12 @@ pub struct Stats {
     pub pixels: u64,
     pub culled: u32,
     pub volumes: u32,
+    /// translucent fragments (part of pixels)
+    pub trans: u64,
 }
 
 /// A polygon's drawing state for one parameter set.
+#[derive(Clone)]
 struct Mode {
     textured: bool,
     tsp: u32,
@@ -109,6 +209,11 @@ struct Mode {
     set1: bool,
     /// multiply RGB by this (cheap shadow)
     shadow: f32,
+    /// FOG_COL_RAM, FOG_COL_VERT, FOG_CLAMP_MIN / MAX unpacked
+    fog_ram: [f32; 4],
+    fog_vert: [f32; 4],
+    clamp_lo: [f32; 4],
+    clamp_hi: [f32; 4],
 }
 
 /// Which pixels a draw may touch.
@@ -118,6 +223,27 @@ enum Pass {
     Draw(u32),
     /// re-shade the pixels of strip n that a modifier volume marked
     Modify(u32),
+    /// opaque, deferred: depth test only, recording strip n and the triangle's setup
+    Depth(u32),
+}
+
+/// A triangle's interpolation planes: z (= 1/w) and attribute × z.
+#[derive(Clone, Copy)]
+struct TriSetup {
+    /// index into the deferred strips
+    strip: u32,
+    pz: Plane,
+    pu: Plane,
+    pv: Plane,
+    pc: [Plane; 8],
+    flat_b: [f32; 4],
+    flat_o: [f32; 4],
+}
+
+/// An opaque strip waiting for the deferred shade: its mode and (once needed) textures.
+struct StripInfo {
+    m: Mode,
+    levels: Option<Vec<(Tex, Texels)>>,
 }
 
 /// The accumulation buffers.
@@ -127,25 +253,38 @@ struct Bufs {
     z: Vec<f32>,
     /// strip number + 1 that drew each pixel (opaque / punch-through), 0 = background
     id: Vec<u32>,
+    /// opaque triangle number + 1 that won each pixel in the depth pass
+    tid: Vec<u32>,
     /// modifier volumes marked the pixel
     mask: Vec<bool>,
     /// collecting translucent fragments (pixel, 1/w, colour, TSP) for the per-pixel sort
     sorting: bool,
+    /// while sorting: each pixel's last fragment depth, and whether every pixel's fragments
+    /// came back to front so far (then no sort is needed)
+    tlast: Vec<f32>,
+    inorder: bool,
     tfrags: Vec<(u32, f32, u32, u32)>,
 }
 
 impl Bufs {
     /// Blend a translucent fragment by its TSP's factors and buffer selects.
-    fn blend(&mut self, i: usize, col: [f32; 4], tsp: u32) {
+    /// In 8-bit integers: channel = (src × SF + dst × DF) / 255, clamped.
+    #[inline]
+    fn blend(&mut self, i: usize, col: u32, tsp: u32) {
         let (sf_sel, df_sel) = (tsp >> 29, tsp >> 26 & 7);
-        let src = if tsp & (1 << 25) != 0 { unpack(self.col2[i]) } else { col };
+        let src = if tsp & (1 << 25) != 0 { self.col2[i] } else { col };
         let target = if tsp & (1 << 24) != 0 { &mut self.col2 } else { &mut self.col };
-        let d = unpack(target[i]);
-        let sf = factor(sf_sel, d, src[0], d[0]);
-        let df = factor(df_sel, src, src[0], d[0]);
-        let mut o = [0f32; 4];
-        for ch in 0..4 { o[ch] = src[ch] * sf[ch] + d[ch] * df[ch]; }
-        target[i] = pack(o);
+        let d = target[i];
+        let (sa, da) = (src >> 24, d >> 24);
+        let (sf, df) = (factors(sf_sel, d, sa, da), factors(df_sel, src, sa, da));
+        let mut o = 0u32;
+        for (k, sh) in [24u32, 16, 8, 0].into_iter().enumerate() {
+            let x = (src >> sh & 0xFF) * sf[k] + (d >> sh & 0xFF) * df[k];
+            // x / 255 rounded (exact up to 65535; above that the result clamps to 255 anyway)
+            let q = (x + 128 + ((x + 128) >> 8)) >> 8;
+            o |= q.min(255) << sh;
+        }
+        target[i] = o;
     }
 }
 
@@ -162,6 +301,11 @@ pub struct Renderer<'a> {
     /// FOG_DENSITY as a number
     fog_den: f32,
     pub stats: Stats,
+    /// this band's textures (the shared cache behind it)
+    local: std::cell::RefCell<HashMap<(u32, u32, u32), Texels>>,
+    /// deferred opaque shading: the strips and triangles of the depth pass
+    dstrips: Vec<StripInfo>,
+    dtris: Vec<TriSetup>,
 }
 
 #[inline]
@@ -199,16 +343,17 @@ fn pack(c: [f32; 4]) -> u32 {
 
 /// A blend factor (TSP SRC / DST instruction); `other` is the colour on the other side.
 #[inline]
-fn factor(sel: u32, other: [f32; 4], src_a: f32, dst_a: f32) -> [f32; 4] {
+fn factors(sel: u32, other: u32, src_a: u32, dst_a: u32) -> [u32; 4] {
+    let ch = |c: u32| [c >> 24, c >> 16 & 0xFF, c >> 8 & 0xFF, c & 0xFF];
     match sel {
-        0 => [0.0; 4],
-        1 => [1.0; 4],
-        2 => other,
-        3 => [1.0 - other[0], 1.0 - other[1], 1.0 - other[2], 1.0 - other[3]],
+        0 => [0; 4],
+        1 => [255; 4],
+        2 => ch(other),
+        3 => ch(!other),
         4 => [src_a; 4],
-        5 => [1.0 - src_a; 4],
+        5 => [255 - src_a; 4],
         6 => [dst_a; 4],
-        _ => [1.0 - dst_a; 4],
+        _ => [255 - dst_a; 4],
     }
 }
 
@@ -279,6 +424,23 @@ fn bounds(p: [(f32, f32); 3], w: usize, by: usize, bh: usize, clip: Option<([u16
     if x0 > x1 || y0 > y1 { None } else { Some((x0, x1, y0, y1)) }
 }
 
+/// A row's span from the edges (one pixel of slack each side: the exact test decides).
+#[inline]
+fn span(e: &[(f32, f32, f32); 3], py: f32, x0: i32, x1: i32) -> Option<(i32, i32)> {
+    let (mut sx0, mut sx1) = (x0, x1);
+    for k in 0..3 {
+        let (a, rest) = (e[k].0, e[k].1 * py + e[k].2);
+        if a > 0.0 { sx0 = sx0.max((-rest / a - 0.5).floor() as i32 - 1); }
+        else if a < 0.0 { sx1 = sx1.min((-rest / a - 0.5).ceil() as i32 + 1); }
+        else if rest < 0.0 { return None; }
+    }
+    if sx0 > sx1 { None } else { Some((sx0, sx1)) }
+}
+
+/// The depth pass's arguments: edges, edge ownership, z plane, bounds x0 x1 y0 y1, z write,
+/// strip id, triangle number.
+type DepthArgs = ([(f32, f32, f32); 3], [bool; 3], Plane, i32, i32, i32, i32, bool, u32, u32);
+
 /// A screen-space plane: value(x, y) = a x + b y + c.
 #[derive(Clone, Copy, Default)]
 struct Plane { a: f32, b: f32, c: f32 }
@@ -318,9 +480,9 @@ impl<'a> Renderer<'a> {
         let n = w * h;
         let d = r(regs, FOG_DENSITY);
         Self {
-            regs, vram, w, y0, h, cache, stats: Stats::default(),
+            regs, vram, w, y0, h, cache, stats: Stats::default(), local: Default::default(), dstrips: Vec::new(), dtris: Vec::new(),
             fog_den: (d >> 8 & 0xFF) as f32 / 128.0 * 2f32.powi((d & 0xFF) as i8 as i32),
-            b: Bufs { col: vec![0; n], col2: vec![0; n], z: vec![0.0; n], id: vec![0; n], mask: Vec::new(), sorting: false, tfrags: Vec::new() },
+            b: Bufs { col: vec![0; n], col2: vec![0; n], z: vec![0.0; n], id: vec![0; n], tid: vec![0; n], mask: Vec::new(), sorting: false, tlast: Vec::new(), inorder: true, tfrags: Vec::new() },
         }
     }
 
@@ -345,6 +507,10 @@ impl<'a> Renderer<'a> {
             presort: self.reg(ISP_FEED_CFG) & 1 != 0,
             set1,
             shadow: 1.0,
+            fog_ram: unpack(self.reg(FOG_COL_RAM) | 0xFF00_0000),
+            fog_vert: unpack(self.reg(FOG_COL_VERT) | 0xFF00_0000),
+            clamp_lo: unpack(self.reg(FOG_CLAMP_MIN)),
+            clamp_hi: unpack(self.reg(FOG_CLAMP_MAX)),
         }
     }
 
@@ -357,7 +523,17 @@ impl<'a> Renderer<'a> {
     /// A texture level with its decoded texels.
     fn decoded(&self, m: &Mode, t: Tex, level: u32) -> (Tex, Texels) {
         let pal = &self.regs[PALETTE as usize / 4..PALETTE as usize / 4 + 1024];
-        (t, self.cache.get(&t, (m.tcw, m.tsp & 0x3F, level), self.vram, pal))
+        let k = (m.tcw, m.tsp & 0x3F, level);
+        if let Some(d) = self.local.borrow().get(&k) { return (t, d.clone()); }
+        // the palette entries and registers the decode used
+        let mut h: u64 = (self.reg(TEXT_CONTROL) as u64) << 32 | self.reg(PAL_RAM_CTRL) as u64;
+        let n = match t.fmt { 5 => 16, 6 => 256, _ => 0 };
+        for &c in &pal[(t.palbase as usize).min(1024 - n)..][..n] {
+            h = (h.rotate_left(5) ^ c as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+        let d = self.cache.get(&t, (k.0, k.1, k.2, h), self.vram, pal);
+        self.local.borrow_mut().insert(k, d.clone());
+        (t, d)
     }
 
     /// Clear to the background plane: ISP_BACKGND_T points (from PARAM_BASE's 1 MB page)
@@ -400,7 +576,7 @@ impl<'a> Renderer<'a> {
         self.b.col.fill(0);
         let p3 = [(v[0].x, v[0].y), (v[1].x, v[1].y), (v[2].x, v[2].y)];
         if area(p3[0], p3[1], p3[2]).abs() > 1e-12 {
-            self.tri(&m, [&v[0], &v[1], &v[2]], None, true, Pass::Draw(0));
+            self.tri(&m, [&v[0], &v[1], &v[2]], None, true, Pass::Draw(0), &mut None);
         } else {
             // a degenerate background: flat colour
             let tex = self.texture(&m).map(|t| self.decoded(&m, t, 0));
@@ -409,6 +585,7 @@ impl<'a> Renderer<'a> {
         }
         self.b.z.fill(depth);
         self.b.id.fill(0);
+        self.b.tid.fill(0);
     }
 
     /// Draw a scene.
@@ -416,12 +593,18 @@ impl<'a> Renderer<'a> {
         self.background();
         let Some(s) = scene else { return };
         let presort = self.reg(ISP_FEED_CFG) & 1 != 0;
-        for list in [LIST_OPAQUE, LIST_PUNCH] {
-            for (n, p) in s.polys.iter().enumerate().filter(|(_, p)| p.list == list) { self.strip(s, p, Pass::Draw(n as u32 + 1)); }
-        }
+        // opaque, deferred as on the chip: depth first, then each visible pixel shaded once
+        for (n, p) in s.polys.iter().enumerate().filter(|(_, p)| p.list == LIST_OPAQUE) { self.strip(s, p, Pass::Depth(n as u32 + 1)); }
+        self.shade_deferred();
+        for (n, p) in s.polys.iter().enumerate().filter(|(_, p)| p.list == LIST_PUNCH) { self.strip(s, p, Pass::Draw(n as u32 + 1)); }
         self.modifiers(s);
         // auto-sort: collect the fragments, then blend each pixel's back to front
         self.b.sorting = !presort;
+        if self.b.sorting {
+            self.b.tlast.clear();
+            self.b.tlast.resize(self.w * self.h, f32::NEG_INFINITY);
+            self.b.inorder = true;
+        }
         for (n, p) in s.polys.iter().enumerate().filter(|(_, p)| p.list == LIST_TRANS) { self.strip(s, p, Pass::Draw(n as u32 + 1)); }
         if self.b.sorting { self.resolve(); }
     }
@@ -432,6 +615,11 @@ impl<'a> Renderer<'a> {
         let f = std::mem::take(&mut self.b.tfrags);
         self.b.sorting = false;
         if f.is_empty() { return; }
+        if self.b.inorder {
+            // already back to front at every pixel: blending in the order sent is the sort
+            for &(i, _, col, tsp) in &f { self.b.blend(i as usize, col, tsp); }
+            return;
+        }
         // group by pixel keeping the order sent (counting sort), then sort each pixel's
         // few fragments by depth (insertion sort: stable)
         let n = self.w * self.h;
@@ -448,7 +636,7 @@ impl<'a> Renderer<'a> {
                 let mut j = k;
                 while j > 0 && run[j - 1].1 > run[j].1 { run.swap(j - 1, j); j -= 1; }
             }
-            for &(_, _, col, tsp) in run.iter() { self.b.blend(i, unpack(col), tsp); }
+            for &(_, _, col, tsp) in run.iter() { self.b.blend(i, col, tsp); }
         }
     }
 
@@ -502,23 +690,29 @@ impl<'a> Renderer<'a> {
         };
         let cull = p.isp >> 27 & 3;
         let cull_val = f32::from_bits(self.reg(FPU_CULL_VAL)).abs();
-        if !modify { self.stats.polys += 1; }
+        let count = matches!(pass, Pass::Draw(_) | Pass::Depth(_));
+        if count { self.stats.polys += 1; }
+        // the texture levels, decoded when a triangle first lands in this band
+        let mut levels = None;
+        if let Pass::Depth(_) = pass { self.dstrips.push(StripInfo { m: m.clone(), levels: None }); }
         for k in 0..v.len().saturating_sub(2) {
             let tv = [&v[k], &v[k + 1], &v[k + 2]];
             if cull != 0 {
                 let mut ar = area((tv[0].x, tv[0].y), (tv[1].x, tv[1].y), (tv[2].x, tv[2].y));
                 if k & 1 != 0 { ar = -ar; }
                 if ar.abs() * 0.5 < cull_val || (cull == 2 && ar > 0.0) || (cull == 3 && ar < 0.0) {
-                    if !modify { self.stats.culled += 1; }
+                    if count { self.stats.culled += 1; }
                     continue;
                 }
             }
-            self.tri(&m, tv, clip, false, pass);
+            self.tri(&m, tv, clip, false, pass, &mut levels);
         }
     }
 
     /// One triangle. `fill` covers the whole band (the background plane).
-    fn tri(&mut self, m: &Mode, v: [&Vert; 3], clip: Option<([u16; 4], bool)>, fill: bool, pass: Pass) {
+    fn tri(&mut self, m: &Mode, v: [&Vert; 3], clip: Option<([u16; 4], bool)>, fill: bool, pass: Pass,
+           levels: &mut Option<Vec<(Tex, Texels)>>) {
+        let shading = !matches!(pass, Pass::Depth(_));
         let p = [(v[0].x, v[0].y), (v[1].x, v[1].y), (v[2].x, v[2].y)];
         let ar = area(p[0], p[1], p[2]);
         if !(ar.abs() > 1e-12) { return; }
@@ -529,14 +723,8 @@ impl<'a> Renderer<'a> {
             match bounds(p, w, self.y0, self.h, clip) { Some(b) => b, None => return }
         };
         let tex = self.texture(m);
-        let levels: Vec<(Tex, Texels)> = match tex {
-            Some(t) if t.levels > 0 => (0..=t.levels).map(|k| self.decoded(m, t.level(k), k)).collect(),
-            Some(t) => vec![self.decoded(m, t, 0)],
-            None => Vec::new(),
-        };
-        let mip = levels.len() > 1;
-        let size = levels.first().map_or(0.0, |t| t.0.sx as f32);
-        let adjust = match m.tsp >> 8 & 0xF { 0 => 1.0, d => d as f32 / 4.0 };
+        if shading && levels.is_none() { *levels = Some(self.levels(m)); }
+        let levels: &[(Tex, Texels)] = levels.as_deref().unwrap_or(&[]);
         // barycentric gradients, then planes of z (= 1/w) and of attribute × z
         let dx = [(p[1].1 - p[2].1) / ar, (p[2].1 - p[0].1) / ar, (p[0].1 - p[1].1) / ar];
         let dy = [(p[2].0 - p[1].0) / ar, (p[0].0 - p[2].0) / ar, (p[1].0 - p[0].0) / ar];
@@ -554,40 +742,56 @@ impl<'a> Renderer<'a> {
             }
         }
         let (flat_b, flat_o) = if m.set1 { (v[2].base1, v[2].off1) } else { (v[2].base, v[2].off) };
+        let ts = TriSetup { strip: self.dstrips.len().saturating_sub(1) as u32, pz, pu, pv, pc, flat_b, flat_o };
+        let tid = if let Pass::Depth(_) = pass { self.dtris.push(ts); self.dtris.len() as u32 } else { 0 };
         let e = edges(p, ar);
         let own = [owns(e[0]), owns(e[1]), owns(e[2])];
         let pt_ref = (self.reg(PT_ALPHA_REF) & 0xFF) as f32 / 255.0;
         let test = if m.list == LIST_TRANS && !m.presort { 6 } else { m.depth };
         let modify = matches!(pass, Pass::Modify(_));
+        // untextured with nothing varying over the triangle (backgrounds, fades, flat
+        // overlays): one colour for every pixel
+        let flat = |q: &Plane| q.a == 0.0 && q.b == 0.0;
+        let colour_fixed = !m.gouraud || (flat(&pz) && pc.iter().all(flat));
+        let constant = if levels.is_empty() && colour_fixed && (m.fog == 2 || flat(&pz)) && shading {
+            let (qx, qy) = (p[0].0, p[0].1);
+            let mut cz = [0f32; 8];
+            for ch in 0..8 { cz[ch] = pc[ch].at(qx, qy); }
+            let c = self.frag(m, &ts, levels, pz.at(qx, qy), 0.0, 0.0, &cz);
+            Some((c, pack(c)))
+        } else { None };
+        if let Pass::Depth(id) = pass {
+            if !fill && !matches!(clip, Some((_, false))) {
+                let a = (e, own, pz, x0, x1, ya, yb, m.zwrite, id, tid);
+                match test {
+                    0 => {}
+                    1 => self.depth_rows::<1>(a),
+                    2 => self.depth_rows::<2>(a),
+                    3 => self.depth_rows::<3>(a),
+                    4 => self.depth_rows::<4>(a),
+                    5 => self.depth_rows::<5>(a),
+                    6 => self.depth_rows::<6>(a),
+                    _ => self.depth_rows::<7>(a),
+                }
+                return;
+            }
+        }
         for y in ya..=yb {
             let py = y as f32 + 0.5;
             let row = (y as usize - self.y0) * w;
-            // the row's span from the edges (one pixel of slack each side: the exact test
-            // below decides)
-            let (mut sx0, mut sx1) = (x0, x1);
-            if !fill {
-                let mut empty = false;
-                for k in 0..3 {
-                    let (a, rest) = (e[k].0, e[k].1 * py + e[k].2);
-                    if a > 0.0 { sx0 = sx0.max((-rest / a - 0.5).floor() as i32 - 1); }
-                    else if a < 0.0 { sx1 = sx1.min((-rest / a - 0.5).ceil() as i32 + 1); }
-                    else if rest < 0.0 { empty = true; }
-                }
-                if empty || sx0 > sx1 { continue; }
-            }
-            let (x0, x1) = (sx0, sx1);
+            let (x0, x1) = if fill { (x0, x1) } else {
+                match span(&e, py, x0, x1) { Some(s) => s, None => continue }
+            };
             let px0 = x0 as f32 + 0.5;
             let mut ev = [e[0].0 * px0 + e[0].1 * py + e[0].2, e[1].0 * px0 + e[1].1 * py + e[1].2, e[2].0 * px0 + e[2].1 * py + e[2].2];
-            // plane values at the row start, stepped by a per pixel
-            let mut zv = pz.at(px0, py);
-            let (mut uz, mut vz) = (pu.at(px0, py), pv.at(px0, py));
-            let mut cz = [0f32; 8];
-            if m.gouraud { for ch in 0..8 { cz[ch] = pc[ch].at(px0, py); } }
+            // plane values at the row start; a pixel's = start + a × its distance from it
+            let z0 = pz.at(px0, py);
+            let (uz0, vz0) = (pu.at(px0, py), pv.at(px0, py));
+            let mut cz0 = [0f32; 8];
+            if m.gouraud { for ch in 0..8 { cz0[ch] = pc[ch].at(px0, py); } }
             for x in x0..=x1 {
-                let (cur, z, uzc, vzc, czc) = (ev, zv, uz, vz, cz);
+                let cur = ev;
                 ev[0] += e[0].0; ev[1] += e[1].0; ev[2] += e[2].0;
-                zv += pz.a; uz += pu.a; vz += pv.a;
-                if m.gouraud { for ch in 0..8 { cz[ch] += pc[ch].a; } }
                 if !fill {
                     if cur[0] < 0.0 || cur[1] < 0.0 || cur[2] < 0.0 { continue; }
                     if (cur[0] == 0.0 && !own[0]) || (cur[1] == 0.0 && !own[1]) || (cur[2] == 0.0 && !own[2]) { continue; }
@@ -596,43 +800,50 @@ impl<'a> Renderer<'a> {
                     }
                 }
                 let i = row + x as usize;
+                let dxp = (x - x0) as f32;
+                let z = z0 + pz.a * dxp;
                 match pass {
+                    Pass::Depth(id) => {
+                        if depth_pass(test, z, self.b.z[i]) {
+                            if m.zwrite { self.b.z[i] = z; }
+                            self.b.id[i] = id;
+                            self.b.tid[i] = tid;
+                        }
+                        continue;
+                    }
                     Pass::Draw(_) if !fill => if !depth_pass(test, z, self.b.z[i]) { continue; },
                     Pass::Modify(id) => {
                         if self.b.id[i] != id || !self.b.mask.get(i).copied().unwrap_or(false) || z != self.b.z[i] { continue; }
                     }
                     _ => {}
                 }
-                let inv = if z.abs() > 1e-30 { 1.0 / z } else { 0.0 };
-                let (bc, oc) = if m.gouraud {
-                    ([czc[0] * inv, czc[1] * inv, czc[2] * inv, czc[3] * inv],
-                     if need_off { [czc[4] * inv, czc[5] * inv, czc[6] * inv, czc[7] * inv] } else { [0.0; 4] })
-                } else { (flat_b, flat_o) };
-                let (u, vv) = (uzc * inv, vzc * inv);
-                let t = if !mip { levels.first() } else {
-                    // texels per pixel: d(u)/dx = (a_u - u a_z) / z, ...
-                    let (dudx, dvdx) = ((pu.a - u * pz.a) * inv, (pv.a - vv * pz.a) * inv);
-                    let (dudy, dvdy) = ((pu.b - u * pz.b) * inv, (pv.b - vv * pz.b) * inv);
-                    let rho = dudx.hypot(dvdx).max(dudy.hypot(dvdy)) * size * adjust;
-                    let k = if rho > 1.0 { (rho.log2().round() as usize).min(levels.len() - 1) } else { 0 };
-                    levels.get(k)
+                let (col, packed) = if let Some(c) = constant { c } else {
+                    let (uzc, vzc) = (uz0 + pu.a * dxp, vz0 + pv.a * dxp);
+                    let mut czc = [0f32; 8];
+                    if m.gouraud { for ch in 0..8 { czc[ch] = cz0[ch] + pc[ch].a * dxp; } }
+                    let c = self.frag(m, &ts, levels, z, uzc, vzc, &czc);
+                    (c, pack(c))
                 };
-                let col = self.shade(m, t.map(|(t, d)| (t, &d[..])), bc, oc, u, vv, z);
                 let b = &mut self.b;
                 match m.list {
                     LIST_PUNCH if !modify => {
                         if col[0] < pt_ref { continue; }
-                        b.col[i] = pack(col);
+                        b.col[i] = packed;
                         if m.zwrite { b.z[i] = z; }
                         if let Pass::Draw(id) = pass { b.id[i] = id; }
                     }
-                    LIST_TRANS if b.sorting => b.tfrags.push((i as u32, z, pack(col), m.tsp)),
+                    LIST_TRANS if b.sorting => {
+                        if z < b.tlast[i] { b.inorder = false; } else { b.tlast[i] = z; }
+                        b.tfrags.push((i as u32, z, packed, m.tsp));
+                        self.stats.trans += 1;
+                    }
                     LIST_TRANS => {
-                        b.blend(i, col, m.tsp);
+                        self.stats.trans += 1;
+                        b.blend(i, packed, m.tsp);
                         if m.presort && m.zwrite { b.z[i] = z; }
                     }
                     _ => {
-                        b.col[i] = pack(col);
+                        b.col[i] = packed;
                         if let Pass::Draw(id) = pass {
                             if m.zwrite && !fill { b.z[i] = z; }
                             b.id[i] = id;
@@ -640,6 +851,90 @@ impl<'a> Renderer<'a> {
                     }
                 }
                 self.stats.pixels += 1;
+            }
+        }
+    }
+
+    /// A strip's texture levels, decoded (none untextured).
+    fn levels(&self, m: &Mode) -> Vec<(Tex, Texels)> {
+        match self.texture(m) {
+            Some(t) if t.levels > 0 => (0..=t.levels).map(|k| self.decoded(m, t.level(k), k)).collect(),
+            Some(t) => vec![self.decoded(m, t, 0)],
+            None => Vec::new(),
+        }
+    }
+
+    /// A fragment's colour from z and the attribute × z values at the pixel.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn frag(&self, m: &Mode, ts: &TriSetup, levels: &[(Tex, Texels)], z: f32, uz: f32, vz: f32, cz: &[f32; 8]) -> [f32; 4] {
+        let inv = if z.abs() > 1e-30 { 1.0 / z } else { 0.0 };
+        let need_off = m.offset || m.fog == 1;
+        let (bc, oc) = if m.gouraud {
+            ([cz[0] * inv, cz[1] * inv, cz[2] * inv, cz[3] * inv],
+             if need_off { [cz[4] * inv, cz[5] * inv, cz[6] * inv, cz[7] * inv] } else { [0.0; 4] })
+        } else { (ts.flat_b, ts.flat_o) };
+        let (u, vv) = (uz * inv, vz * inv);
+        let t = if levels.len() <= 1 { levels.first() } else {
+            // texels per pixel: d(u)/dx = (a_u - u a_z) / z, ...
+            let (pu, pv, pz) = (&ts.pu, &ts.pv, &ts.pz);
+            let (dudx, dvdx) = ((pu.a - u * pz.a) * inv, (pv.a - vv * pz.a) * inv);
+            let (dudy, dvdy) = ((pu.b - u * pz.b) * inv, (pv.b - vv * pz.b) * inv);
+            let size = levels[0].0.sx as f32;
+            let adjust = match m.tsp >> 8 & 0xF { 0 => 1.0, d => d as f32 / 4.0 };
+            let rho = dudx.hypot(dvdx).max(dudy.hypot(dvdy)) * size * adjust;
+            let k = if rho > 1.0 { (rho.log2().round() as usize).min(levels.len() - 1) } else { 0 };
+            levels.get(k)
+        };
+        self.shade(m, t.map(|(t, d)| (t, &d[..])), bc, oc, u, vv, z)
+    }
+
+    /// Shade each pixel the depth pass gave an opaque triangle, once, from its planes.
+    fn shade_deferred(&mut self) {
+        let mut strips = std::mem::take(&mut self.dstrips);
+        let tris = std::mem::take(&mut self.dtris);
+        let w = self.w;
+        for i in 0..w * self.h {
+            let t = self.b.tid[i];
+            if t == 0 { continue; }
+            let ts = &tris[t as usize - 1];
+            let st = &mut strips[ts.strip as usize];
+            if st.levels.is_none() { st.levels = Some(self.levels(&st.m)); }
+            let (px, py) = ((i % w) as f32 + 0.5, (self.y0 + i / w) as f32 + 0.5);
+            let mut cz = [0f32; 8];
+            if st.m.gouraud { for ch in 0..8 { cz[ch] = ts.pc[ch].at(px, py); } }
+            let col = self.frag(&st.m, ts, st.levels.as_deref().unwrap_or(&[]), ts.pz.at(px, py), ts.pu.at(px, py), ts.pv.at(px, py), &cz);
+            self.b.col[i] = pack(col);
+            self.stats.pixels += 1;
+        }
+    }
+
+    /// The deferred depth pass of one opaque triangle, the compare built in (MODE = ISP
+    /// depth mode). The same spans and z as `tri`, so the shade and modifier passes match.
+    fn depth_rows<const MODE: u32>(&mut self, (e, own, pz, x0, x1, ya, yb, zwrite, id, tid): DepthArgs) {
+        let w = self.w;
+        for y in ya..=yb {
+            let py = y as f32 + 0.5;
+            let row = (y as usize - self.y0) * w;
+            let Some((x0, x1)) = span(&e, py, x0, x1) else { continue };
+            let px0 = x0 as f32 + 0.5;
+            let mut ev = [e[0].0 * px0 + e[0].1 * py + e[0].2, e[1].0 * px0 + e[1].1 * py + e[1].2, e[2].0 * px0 + e[2].1 * py + e[2].2];
+            let z0 = pz.at(px0, py);
+            let n = (x1 - x0 + 1) as usize;
+            let zs = &mut self.b.z[row + x0 as usize..row + x0 as usize + n];
+            let ids = &mut self.b.id[row + x0 as usize..row + x0 as usize + n];
+            let tids = &mut self.b.tid[row + x0 as usize..row + x0 as usize + n];
+            for k in 0..n {
+                let cur = ev;
+                ev[0] += e[0].0; ev[1] += e[1].0; ev[2] += e[2].0;
+                let inside = |c: f32, o: bool| c > 0.0 || (c == 0.0 && o);
+                if !(inside(cur[0], own[0]) && inside(cur[1], own[1]) && inside(cur[2], own[2])) { continue; }
+                let z = z0 + pz.a * k as f32;
+                if depth_pass(MODE, z, zs[k]) {
+                    if zwrite { zs[k] = z; }
+                    ids[k] = id;
+                    tids[k] = tid;
+                }
             }
         }
     }
@@ -672,7 +967,7 @@ impl<'a> Renderer<'a> {
         match m.fog {
             0 | 3 => {
                 let f = self.fog_table(z);
-                let fc = unpack(self.reg(FOG_COL_RAM) | 0xFF00_0000);
+                let fc = m.fog_ram;
                 if m.fog == 0 {
                     for ch in 1..4 { c[ch] = c[ch] * (1.0 - f) + fc[ch] * f; }
                 } else {
@@ -681,13 +976,13 @@ impl<'a> Renderer<'a> {
             }
             1 => {
                 let f = o[0];
-                let fc = unpack(self.reg(FOG_COL_VERT) | 0xFF00_0000);
+                let fc = m.fog_vert;
                 for ch in 1..4 { c[ch] = c[ch] * (1.0 - f) + fc[ch] * f; }
             }
             _ => {}
         }
         if m.clamp {
-            let (lo, hi) = (unpack(self.reg(FOG_CLAMP_MIN)), unpack(self.reg(FOG_CLAMP_MAX)));
+            let (lo, hi) = (m.clamp_lo, m.clamp_hi);
             for ch in 0..4 { c[ch] = c[ch].clamp(lo[ch], hi[ch].max(lo[ch])); }
         }
         c
@@ -714,7 +1009,8 @@ impl<'a> Renderer<'a> {
 /// Write the listed tiles of an accumulation buffer (`col`, w x h) to the framebuffer
 /// (FB_W_CTRL pack mode, FB_W_SOF1 / LINESTRIDE, FB_X/Y_CLIP; SCALER_CTL horizontal halving
 /// and vertical 0x800 halving).
-pub fn write_out(regs: &[u32], col: &[u32], w: usize, h: usize, tiles: &[(u32, u32)], vram: &mut [u8]) {
+pub fn write_out(regs: &[u32], col: &[u32], w: usize, h: usize, tiles: &[(u32, u32)], vram: &mut [u8]) -> Option<(usize, usize)> {
+        let (mut lo, mut hi) = (usize::MAX, 0);
         let reg = |o: u32| r(regs, o);
         let ctrl = reg(FB_W_CTRL);
         let pack_mode = ctrl & 7;
@@ -736,17 +1032,22 @@ pub fn write_out(regs: &[u32], col: &[u32], w: usize, h: usize, tiles: &[(u32, u
                 if (oy as u32) < cy0 || oy as u32 > cy1 { continue; }
                 for ox in (sx0 / hs)..((sx0 + 32) / hs) {
                     if (ox as u32) < cx0 || ox as u32 > cx1 { continue; }
-                    // average the source pixels that scale down into this one
-                    let mut acc = [0u32; 4];
-                    for yy in 0..vs {
-                        for xx in 0..hs {
-                            let (x, y) = (ox * hs + xx, oy * vs + yy);
-                            let c = if x < w && y < h { col[y * w + x] } else { 0 };
-                            for (k, s) in [24u32, 16, 8, 0].iter().enumerate() { acc[k] += c >> s & 0xFF; }
+                    let (a, rr, g, b) = if hs * vs == 1 {
+                        let c = if ox < w && oy < h { col[oy * w + ox] } else { 0 };
+                        (c >> 24, c >> 16 & 0xFF, c >> 8 & 0xFF, c & 0xFF)
+                    } else {
+                        // average the source pixels that scale down into this one
+                        let mut acc = [0u32; 4];
+                        for yy in 0..vs {
+                            for xx in 0..hs {
+                                let (x, y) = (ox * hs + xx, oy * vs + yy);
+                                let c = if x < w && y < h { col[y * w + x] } else { 0 };
+                                for (k, s) in [24u32, 16, 8, 0].iter().enumerate() { acc[k] += c >> s & 0xFF; }
+                            }
                         }
-                    }
-                    let n = (hs * vs) as u32;
-                    let (a, rr, g, b) = (acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n);
+                        let n = (hs * vs) as u32;
+                        (acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n)
+                    };
                     let val = match pack_mode {
                         0 => (kval >> 7) << 15 | (rr >> 3) << 10 | (g >> 3) << 5 | b >> 3,
                         1 => (rr >> 3) << 11 | (g >> 2) << 5 | b >> 3,
@@ -757,21 +1058,53 @@ pub fn write_out(regs: &[u32], col: &[u32], w: usize, h: usize, tiles: &[(u32, u
                         _ => a << 24 | rr << 16 | g << 8 | b,
                     };
                     let addr = base.wrapping_add(oy as u32 * stride + ox as u32 * bpp);
+                    if addr & 3 == 0 || (bpp == 2 && addr & 1 == 0) {
+                        // inside one 32-bit word: the bytes are next to each other in both paths
+                        let a = addr & 0x7F_FFFF;
+                        let i = (if base & 0x100_0000 != 0 { a as usize } else { map32(a) }) & m;
+                        if i + bpp as usize <= vram.len() {
+                            vram[i..i + bpp as usize].copy_from_slice(&val.to_le_bytes()[..bpp as usize]);
+                            lo = lo.min(i);
+                            hi = hi.max(i + bpp as usize - 1);
+                            continue;
+                        }
+                    }
                     for k in 0..bpp {
                         let a = addr.wrapping_add(k) & 0x7F_FFFF;
                         // render to texture (SOF bit 24): the 64-bit (texture) path
                         let i = if base & 0x100_0000 != 0 { a as usize } else { map32(a) };
                         vram[i & m] = (val >> (8 * k)) as u8;
+                        lo = lo.min(i & m);
+                        hi = hi.max(i & m);
                     }
                 }
             }
         }
+        (lo <= hi).then_some((lo, hi))
 }
 
-/// STARTRENDER: draw the scene PARAM_BASE names into the framebuffer. The buffer is split
-/// into horizontal bands drawn on threads of their own (each band runs the whole scene,
-/// clipped to its rows).
-pub fn render(regs: &[u32], scene: Option<&Scene>, vram: &mut [u8]) -> Stats {
+/// A finished render, not yet written to the framebuffer.
+pub struct Drawn {
+    col: Vec<u32>,
+    w: usize,
+    h: usize,
+    tiles: Vec<(u32, u32)>,
+    /// the PVR registers at STARTRENDER (FB_W_* for the write-out)
+    regs: Vec<u32>,
+    pub stats: Stats,
+    /// host time the drawing took
+    pub took: std::time::Duration,
+}
+
+impl Drawn {
+    /// Write the tiles to the framebuffer; the video RAM range written.
+    pub fn write(&self, vram: &mut [u8]) -> Option<(usize, usize)> { write_out(&self.regs, &self.col, self.w, self.h, &self.tiles, vram) }
+}
+
+/// Draw the scene PARAM_BASE names (STARTRENDER). The buffer is split into horizontal bands
+/// drawn on threads of their own (each band runs the whole scene, clipped to its rows).
+pub fn draw(regs: &[u32], scene: Option<&Scene>, vram: &[u8], cache: &TexCache) -> Drawn {
+    let t0 = std::time::Instant::now();
     let tiles = region_tiles(regs, vram);
     let (mut w, mut h) = (32, 32);
     for &(tx, ty) in &tiles {
@@ -779,28 +1112,58 @@ pub fn render(regs: &[u32], scene: Option<&Scene>, vram: &mut [u8]) -> Stats {
         h = h.max(ty as usize * 32 + 32);
     }
     let (w, h) = (w.min(MAX_W), h.min(MAX_H));
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8);
-    let bh = h.div_ceil(threads).max(16);
-    let shared: &[u8] = vram;
-    let cache = TexCache::default();
-    let cache = &cache;
-    let bands: Vec<(Vec<u32>, Stats)> = std::thread::scope(|sc| {
-        let jobs: Vec<_> = (0..h).step_by(bh).map(|y0| {
-            sc.spawn(move || {
-                let mut rd = Renderer::new(regs, shared, cache, w, y0, bh.min(h - y0));
+    // 32-row bands handed out to the threads as they finish (a busy band does not hold the
+    // others up); one core is left for the CPU
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).saturating_sub(1).clamp(1, 12);
+    const BAND: usize = 32;
+    let nb = h.div_ceil(BAND);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done: Vec<Mutex<Option<(Vec<u32>, Stats)>>> = (0..nb).map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|sc| {
+        for _ in 0..threads.min(nb) {
+            sc.spawn(|| loop {
+                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if k >= nb { break; }
+                let y0 = k * BAND;
+                let mut rd = Renderer::new(regs, vram, cache, w, y0, BAND.min(h - y0));
                 rd.draw(scene);
-                (std::mem::take(&mut rd.b.col), rd.stats)
-            })
-        }).collect();
-        jobs.into_iter().map(|j| j.join().expect("render band")).collect()
+                *done[k].lock().unwrap() = Some((std::mem::take(&mut rd.b.col), rd.stats));
+            });
+        }
     });
     let mut col = Vec::with_capacity(w * h);
     let mut stats = Stats { tiles: tiles.len() as u32, ..Stats::default() };
-    for (k, (c, st)) in bands.into_iter().enumerate() {
+    for (k, d) in done.into_iter().enumerate() {
+        let (c, st) = d.into_inner().unwrap().expect("render band");
         col.extend_from_slice(&c);
         stats.pixels += st.pixels;
+        stats.trans += st.trans;
         if k == 0 { stats.polys = st.polys; stats.culled = st.culled; stats.volumes = st.volumes; }
     }
-    write_out(regs, &col, w, h, &tiles, vram);
-    stats
+    Drawn { col, w, h, tiles, regs: regs.to_vec(), stats, took: t0.elapsed() }
+}
+
+/// Draw and write at once (a texture cache of its own).
+#[cfg(test)]
+pub fn render(regs: &[u32], scene: Option<&Scene>, vram: &mut [u8]) -> Stats {
+    let d = draw(regs, scene, vram, &TexCache::default());
+    d.write(vram);
+    d.stats
+}
+
+/// A render running on its own thread (with copies of the registers, scene and video RAM)
+/// while the CPU carries on. Not saved or cloned: a state is taken after it finished.
+#[derive(Default)]
+pub struct RenderJob(pub Option<std::thread::JoinHandle<(Drawn, Vec<u8>)>>);
+
+impl Clone for RenderJob {
+    fn clone(&self) -> Self { RenderJob(None) }
+}
+
+impl RenderJob {
+    /// The copy of video RAM comes back with the picture, to be brought up to date for
+    /// the next render.
+    pub fn start(regs: Vec<u32>, scene: Option<Scene>, vram: Vec<u8>, cache: Arc<TexCache>) -> Self {
+        RenderJob(Some(std::thread::spawn(move || { let d = draw(&regs, scene.as_ref(), &vram, &cache); (d, vram) })))
+    }
 }
