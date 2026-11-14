@@ -21,6 +21,19 @@ pub fn set_path(path: &str) {
 /// The log file's path, if any.
 pub fn path() -> Option<String> { LOG.lock().ok()?.as_ref().map(|(p, _)| p.clone()) }
 
+static DATA_DIR: Mutex<String> = Mutex::new(String::new());
+
+/// The frontend's data folder (user://, as a real path), for debug files written while
+/// no log is open.
+pub fn set_data_dir(dir: &str) { if let Ok(mut g) = DATA_DIR.lock() { *g = dir.to_string(); } }
+
+/// Where debug files go: next to the log, else in the data folder.
+pub fn dir() -> Option<std::path::PathBuf> {
+    if let Some(p) = path() { return std::path::Path::new(&p).parent().map(|d| d.to_path_buf()); }
+    let d = DATA_DIR.lock().ok()?.clone();
+    (!d.is_empty()).then(|| std::path::PathBuf::from(d))
+}
+
 /// The frontend's audio: times its output buffer had run dry, and frames queued (for the
 /// systems' speed logs).
 pub static AUDIO_DRY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

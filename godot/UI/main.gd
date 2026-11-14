@@ -509,14 +509,16 @@ func _apply_display_options() -> void:
 	var speed_log: bool = sys == "dc" and AppSettings.get_option(sys, "dc_speed_log")
 	# the report also goes to user://debug_<system>.log (the console loses its start)
 	emu_system.set_debug_log(ProjectSettings.globalize_path("user://debug_%s.log" % sys) if dbg_on or speed_log else "")
+	emu_system.set_data_dir(ProjectSettings.globalize_path("user://"))
 	emu_system.set_option("debug_report", 1 if dbg_on else 0)
 	if sys == "dc":
 		emu_system.set_option("speed_log", 1 if speed_log else 0)
-		emu_system.set_option("dc_cpu_ratio", int(str(AppSettings.get_option(sys, "dc_cpu_ratio"))))
+		emu_system.set_option("dc_cpu_half", int(round(float(str(AppSettings.get_option(sys, "dc_cpu_ratio"))) * 2.0)))
 		emu_system.set_option("dc_idle_skip", 1 if AppSettings.get_option(sys, "dc_idle_skip") else 0)
 		emu_system.set_option("dc_render_thread", 1 if AppSettings.get_option(sys, "dc_render_thread") else 0)
 		emu_system.set_option("dc_fpu_exact", 1 if AppSettings.get_option(sys, "dc_fpu_exact") else 0)
 		emu_system.set_option("dc_record_sound", 1 if AppSettings.get_option(sys, "dc_record_sound") else 0)
+		emu_system.set_option("dc_dump_frame", 1 if AppSettings.get_option(sys, "dc_dump_frame") else 0)
 	emu_mutex.unlock()
 	EmulatorScreen.mouse_default_cursor_shape = Control.CURSOR_CROSS \
 		if _zapper_on else Control.CURSOR_ARROW

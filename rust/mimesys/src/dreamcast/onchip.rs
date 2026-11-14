@@ -42,6 +42,10 @@ pub struct OnChip {
     pub basra: u8, pub basrb: u8, pub ccr: u32,
     pub tra: u32, pub expevt: u32, pub intevt: u32, pub ptea: u32,
     pub qacr: [u32; 2],
+    /// the TLB (used when MMUCR.AT is set). Saved after the rest of the state (see
+    /// `DcSystem::save_state`), so older states still load.
+    #[serde(skip)]
+    pub mmu: super::mmu::Mmu,
     // TMU
     pub tocr: u8,
     pub tstr: u8,
@@ -81,7 +85,7 @@ impl OnChip {
     pub fn new() -> Self {
         Self {
             pteh: 0, ptel: 0, ttb: 0, tea: 0, mmucr: 0, basra: 0, basrb: 0, ccr: 0,
-            tra: 0, expevt: 0, intevt: 0, ptea: 0, qacr: [0; 2],
+            tra: 0, expevt: 0, intevt: 0, ptea: 0, qacr: [0; 2], mmu: super::mmu::Mmu::new(),
             tocr: 0, tstr: 0, tmu: Default::default(), tcpr2: 0, tmu_at: 0,
             icr: 0, ipr: [0; 4],
             dma: Default::default(), dmaor: 0,
@@ -271,7 +275,8 @@ impl OnChip {
             // SCIF status: transmit FIFO empty and transmission ended, nothing received
             0xFFE8_0010 => 0x0060,
             0xFFE8_001C => 0,
-            0xF000_0000..=0xF7FF_FFFF => 0, // cache / TLB arrays
+            0xF600_0000..=0xF7FF_FFFF => self.mmu.array_read(a),
+            0xF000_0000..=0xF5FF_FFFF => 0, // cache / instruction TLB arrays
             _ => return self.misc.get(&a).copied().or(if (0xFFC8_0000..0xFFC8_0060).contains(&a)
                 || (0xFF20_0000..0xFF20_0024).contains(&a) || (0xFFE0_0000..0xFFE0_0020).contains(&a)
                 || (0xFFE8_0000..0xFFE8_0028).contains(&a) { Some(0) } else { None }),
@@ -290,8 +295,9 @@ impl OnChip {
             0xFF00_000C => self.tea = v,
             0xFF00_0010 => {
                 // TI (bit 2) flushes the TLB: reads back 0
+                if v & 4 != 0 { self.mmu.flush(); }
+                if v & 1 != 0 && self.mmucr & 1 == 0 { crate::dlog!("Dreamcast: the program turned the MMU on (MMUCR {v:08X})"); }
                 self.mmucr = v & !4;
-                if v & 1 != 0 { crate::dlog!("Dreamcast: the program turned the MMU on (MMUCR {v:08X}): not emulated yet"); }
             }
             0xFF00_0014 => self.basra = v as u8,
             0xFF00_0018 => self.basrb = v as u8,
@@ -366,7 +372,8 @@ impl OnChip {
                     self.serial_out.push(c as char);
                 }
             }
-            0xF000_0000..=0xF7FF_FFFF => {} // cache / TLB arrays
+            0xF600_0000..=0xF7FF_FFFF => { let (pteh, cr) = (self.pteh, self.mmucr); self.mmu.array_write(a, v, pteh, cr); }
+            0xF000_0000..=0xF5FF_FFFF => {} // cache / instruction TLB arrays
             _ => {
                 let known = (0xFFC8_0000..0xFFC8_0060).contains(&a) || (0xFF20_0000..0xFF20_0024).contains(&a)
                     || (0xFFE0_0000..0xFFE0_0020).contains(&a) || (0xFFE8_0000..0xFFE8_0028).contains(&a);

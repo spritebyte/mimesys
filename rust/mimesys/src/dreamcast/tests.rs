@@ -134,7 +134,7 @@ fn maple_get_condition_reads_the_pad() {
     let r: Vec<u32> = (0..4).map(|k| d.read(0x8C01_0100 + 4 * k, 4)).collect();
     assert_eq!(r[0] & 0xFF, 8, "data transfer");
     assert_eq!(r[0] >> 24, 3, "3 words");
-    assert_eq!(r[0] >> 16 & 0xFF, 0x20, "from the controller on port A");
+    assert_eq!(r[0] >> 16 & 0xFF, 0x21, "from the controller on port A, a memory card in its first slot");
     assert_eq!(r[1], 0x0100_0000);
     assert_eq!(r[2] & 0xFFFF, (0xFFFF & !maple::BTN_A & !maple::BTN_RIGHT) as u32);
     assert_eq!(r[3] & 0xFF, 0xFF, "stick right");
@@ -147,6 +147,35 @@ fn maple_get_condition_reads_the_pad() {
     d.write(t, 0x8002_0001, 4);
     d.write(0xA05F_6C18, 1, 4);
     assert_eq!(d.read(0x8C01_0100, 4), 0xFFFF_FFFF);
+}
+
+/// The memory card answers at sub-unit 1 of port A: its device info, then a block read.
+#[test]
+fn maple_reaches_the_memory_card() {
+    let mut d = bus();
+    let t = 0x8C01_0000;
+    let dma = |d: &mut Dc, frame: &[u32]| -> Vec<u32> {
+        d.write(t, 0x8000_0000 | (frame.len() as u32 - 1), 4);
+        d.write(t + 4, 0x0C01_0100, 4);
+        for (k, w) in frame.iter().enumerate() { d.write(t + 8 + 4 * k as u32, *w, 4); }
+        d.write(0xA05F_6C04, 0x0C01_0000, 4);
+        d.write(0xA05F_6C14, 1, 4);
+        d.write(0xA05F_6C18, 1, 4);
+        let n = d.read(0x8C01_0100, 4) >> 24;
+        (0..=n).map(|k| d.read(0x8C01_0100 + 4 * k, 4)).collect()
+    };
+    let r = dma(&mut d, &[0x01 | 0x01 << 8]);
+    assert_eq!(r[0] & 0xFF, 0x05, "device info");
+    assert_eq!(r[0] >> 16 & 0xFF, 0x01, "from A1");
+    assert_eq!(r[1], 0x0E00_0000, "storage, LCD, clock");
+    let r = dma(&mut d, &[0x0B | 0x01 << 8 | 2 << 24, vmu::FUNC_STORAGE, u32::from_le_bytes([0, 0, 0, 255])]);
+    assert_eq!(r[0] & 0xFF, 0x08);
+    assert_eq!(r.len(), 1 + 2 + 128);
+    assert_eq!(r[3], 0x5555_5555, "the root block's format mark");
+    // A2 is empty; nothing behind a card when it's unplugged
+    assert_eq!(dma(&mut d, &[0x01 | 0x02 << 8])[0], 0xFFFF_FFFF);
+    d.vmu_on = false;
+    assert_eq!(dma(&mut d, &[0x01 | 0x01 << 8])[0], 0xFFFF_FFFF);
 }
 
 /// Channel-2 DMA feeds the tile accelerator: a polygon list's end raises its interrupt.
@@ -411,4 +440,54 @@ fn cpu_ratio_counts_cycles_per_instruction() {
         let expect = s.dc.now / (5 * cpi);
         assert!(passes.abs_diff(expect) < expect / 50, "cpi {cpi}: {passes} vs {expect}");
     }
+}
+
+/// With the MMU on, a load from an unmapped page puts the registers back (even a
+/// post-increment of the address register) and takes the TLB-miss exception at VBR+0x400
+/// with TEA / PTEH set; after LDTLB the same instruction runs through the mapping.
+#[test]
+fn mmu_tlb_miss_undoes_the_instruction_then_ldtlb_maps_it() {
+    use crate::common::cpu::sh4::{Sh4, Sh4Bus};
+    let mut d = bus();
+    let mut cpu = Sh4::new();
+    d.write(0x8C01_0000, 0x6116, 2); // mov.l @r1+,r1
+    d.write(0x8C02_0010, 0xDEAD_BEEF, 4);
+    cpu.vbr = 0x8C00_0000;
+    cpu.pc = 0x8C01_0000;
+    cpu.r[1] = 0x0000_4010;
+    d.write(0xFF00_0010, 1, 4); // MMUCR.AT
+    cpu.step(&mut d);
+    assert_eq!(cpu.pc, 0x8C00_0400, "TLB miss vector");
+    assert_eq!(cpu.r[1], 0x0000_4010, "the post-increment was undone");
+    assert_eq!(cpu.spc, 0x8C01_0000);
+    assert_eq!(d.chip.expevt, 0x040);
+    assert_eq!(d.chip.tea, 0x4010);
+    assert_eq!(d.chip.pteh & 0xFFFF_FC00, 0x4000);
+    // the handler: PTEL = PPN 0C020000, 4 KB, RW, dirty, valid; LDTLB; RTE
+    d.chip.ptel = 0x0C02_0000 | 0x100 | 0x10 | 0x60 | 4;
+    d.ldtlb();
+    cpu.set_sr(cpu.ssr);
+    cpu.pc = cpu.spc;
+    cpu.step(&mut d);
+    assert_eq!(cpu.r[1], 0xDEAD_BEEF);
+    assert_eq!(cpu.pc, 0x8C01_0002);
+}
+
+/// Like `dc_speed`, with the code in main RAM as games have it: loads, stores, adds, a
+/// shift, compares, a taken and an untaken branch, a delayed branch.
+/// cargo test --release --lib dc_speed_ram -- --ignored --nocapture
+#[test]
+#[ignore]
+fn dc_speed_ram() {
+    let mut s = system_with(&[0u8; 16], &[]);
+    let code: [u16; 13] = [0x6212, 0x7201, 0x2122, 0x5311, 0x332C, 0x1131, 0x4208, 0x3230, 0x8901, 0x0009, 0x4410, 0xAFF3, 0x0009];
+    for (k, w) in code.iter().enumerate() { s.dc.ram[0x1_0000 + 2 * k..0x1_0002 + 2 * k].copy_from_slice(&w.to_le_bytes()); }
+    s.cpu.pc = 0x8C01_0000;
+    s.cpu.r[1] = 0x8C00_1000;
+    let t = std::time::Instant::now();
+    let n = std::env::var("DC_N").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    for _ in 0..n { s.run_frame(0); }
+    let el = t.elapsed().as_secs_f64();
+    assert!(s.cpu.pc >= 0x8C01_0000 && s.cpu.pc < 0x8C01_001A, "still in the loop: {:08X}", s.cpu.pc);
+    println!("{n} fields in {el:.2} s ({:.0}% of real time)", 100.0 * n as f64 / 60.0 / el);
 }

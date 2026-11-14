@@ -77,12 +77,18 @@ pub struct Aica {
     /// output samples (stereo, interleaved) waiting for the frontend
     #[serde(skip)]
     pub out: Vec<f32>,
-    /// the ARM's register reads by address (debug)
-    #[serde(skip)]
-    pub arm_reads: std::collections::BTreeMap<u32, u64>,
+    /// the ARM's register reads, a count per halfword address (debug; a plain table: the
+    /// driver polls registers thousands of times a frame)
+    #[serde(skip, default = "reads_table")]
+    pub arm_reads: Vec<u64>,
     /// interrupts asked for through MCIPD (to the SH-4) and SCIPD (to the ARM) bit 5
     #[serde(skip)]
     pub cpu_ints: [u64; 2],
+    /// register writes by register, from the SH-4 [0] and the ARM7 [1]
+    #[serde(skip)]
+    pub reg_writes: [std::collections::BTreeMap<u16, u64>; 2],
+    #[serde(skip)]
+    arm_writing: bool,
 }
 
 impl Default for Aica {
@@ -95,7 +101,7 @@ impl Aica {
         Self {
             wave: vec![0; WAVE_SIZE], regs: vec![0; 0x8000], arm_reset: true,
             rtc_base: unix_now + EPOCH_1950, rtc_cycle: 0, rtc_we: false, rtc_hi: 0,
-            timers: [Timer::default(); 3], scipd: 0, mcipd: 0, samples: 0, snd: Sound::default(), out: Vec::new(), arm_reads: Default::default(), cpu_ints: [0; 2],
+            timers: [Timer::default(); 3], scipd: 0, mcipd: 0, samples: 0, snd: Sound::default(), out: Vec::new(), arm_reads: reads_table(), cpu_ints: [0; 2], reg_writes: Default::default(), arm_writing: false,
         }
     }
 
@@ -123,7 +129,9 @@ impl Aica {
     /// (interrupts above bit 7 use bit 7's level). Timer A first, then B, C, the rest.
     fn irql(&self) -> u16 {
         let p = self.arm_pending();
-        let Some(bit) = [6u32, 7, 8, 3, 5, 4, 9, 10, 0, 1, 2].into_iter().find(|&b| p & (1 << b) != 0) else { return 0 };
+        // the lowest pending bit first (as Flycast does)
+        if p == 0 { return 0; }
+        let bit = p.trailing_zeros();
         let b = bit.min(7);
         (0..3).map(|k| ((self.r16(SCILV0 + 4 * k) >> b) & 1) << k).sum()
     }
@@ -272,6 +280,8 @@ impl Aica {
             SCIPD => self.scipd,
             MCIPD => self.mcipd,
             IRQL => self.irql(),
+            // MIDI: input and output buffers empty (MIEMP, MOEMP)
+            0x2808 => self.r16(o) & 0x00FF | 0x0900,
             _ => self.r16(o),
         }
     }
@@ -279,6 +289,12 @@ impl Aica {
     /// A register write (offset in the register file, either CPU).
     pub fn reg_write(&mut self, off: u32, v: u32, size: u32) {
         let o = off as usize & 0x7FFF;
+        // for the speed log: which registers each CPU writes (slot registers by offset,
+        // 7FFF = a write with KYONEX set)
+        let key = if o < 0x2000 { 0x8000 | (o & 0x7C) as u16 } else { (o & 0x7FFC) as u16 };
+        let who = self.arm_writing as usize;
+        *self.reg_writes[who].entry(key).or_insert(0) += 1;
+        if o < 0x2000 && o & 0x7C == 0 && (v << (8 * (o & 3))) & 0x8000 != 0 { *self.reg_writes[who].entry(0x7FFF).or_insert(0) += 1; }
         if o & !3 == ARMRST {
             let reset = v & 1 != 0;
             if self.arm_reset && !reset { crate::dlog!("Dreamcast: the AICA's ARM7 was started"); }
@@ -302,10 +318,8 @@ impl Aica {
 impl ArmBus for Aica {
     fn read8(&mut self, a: u32, _: u8) -> u8 { self.arm_read(a, 1) as u8 }
     fn read16(&mut self, a: u32, _: u8) -> u16 { self.arm_read(a & !1, 2) as u16 }
-    fn read32(&mut self, a: u32, _: u8) -> u32 {
-        let v = self.arm_read(a & !3, 4);
-        v.rotate_right((a & 3) * 8)
-    }
+    /// The aligned word: the CPU rotates an unaligned LDR itself.
+    fn read32(&mut self, a: u32, _: u8) -> u32 { self.arm_read(a & !3, 4) }
     fn write8(&mut self, a: u32, v: u8, _: u8) { self.arm_write(a, v as u32, 1) }
     fn write16(&mut self, a: u32, v: u16, _: u8) { self.arm_write(a & !1, v as u32, 2) }
     fn write32(&mut self, a: u32, v: u32, _: u8) { self.arm_write(a & !3, v, 4) }
@@ -316,12 +330,13 @@ impl Aica {
         match a & 0x00FF_FFFF {
             0..=0x7F_FFFF => {
                 let o = a as usize & (WAVE_SIZE - 1);
+                if size == 4 && o & 3 == 0 {
+                    return u32::from_le_bytes([self.wave[o], self.wave[o + 1], self.wave[o + 2], self.wave[o + 3]]);
+                }
                 (0..size as usize).fold(0, |v, k| v | (self.wave[(o + k) & (WAVE_SIZE - 1)] as u32) << (8 * k))
             }
             0x80_0000..=0x80_7FFF => {
-                if self.arm_reads.len() < 256 || self.arm_reads.contains_key(&(a & 0x7FFF)) {
-                    *self.arm_reads.entry(a & 0x7FFF).or_insert(0) += 1;
-                }
+                self.arm_reads[(a as usize & 0x7FFF) >> 1] += 1;
                 self.reg_read(a - 0x80_0000, size)
             }
             _ => 0,
@@ -334,11 +349,17 @@ impl Aica {
                 let o = a as usize & (WAVE_SIZE - 1);
                 for k in 0..size as usize { self.wave[(o + k) & (WAVE_SIZE - 1)] = (v >> (8 * k)) as u8; }
             }
-            0x80_0000..=0x80_7FFF => self.reg_write(a - 0x80_0000, v, size),
+            0x80_0000..=0x80_7FFF => {
+                self.arm_writing = true;
+                self.reg_write(a - 0x80_0000, v, size);
+                self.arm_writing = false;
+            }
             _ => {}
         }
     }
 }
+
+fn reads_table() -> Vec<u64> { vec![0; 0x4000] }
 
 #[cfg(test)]
 mod tests {

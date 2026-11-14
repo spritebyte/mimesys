@@ -81,6 +81,16 @@ pub struct Gdrom {
     limit: u16,
     /// the data waits for a G1 DMA
     pub dma: bool,
+    /// a CD_READ still to come off the disc: next FAD, sectors left, raw sectors. Reads go
+    /// a few sectors at a time as the host takes them (NBA 2K asks for 32767 sectors, takes
+    /// what it needs and stops the drive with an ATA NOP).
+    #[serde(default)]
+    stream: (u32, u32, bool),
+    /// debug: ATA NOPs and PIO bytes since the last look
+    #[serde(skip)]
+    pub nops: u32,
+    #[serde(skip)]
+    pub pio_bytes: u64,
     /// the sense key / additional code of the last error (REQ_ERROR)
     sense: u8,
     asc: u8,
@@ -194,7 +204,7 @@ impl Gdrom {
         Self {
             status: DRDY | DSC, error: 0, ireason: 3, state: ST_STANDBY, features: 0, byte_count: 0,
             drive_select: 0, devctl: 0, irq: false, phase: Phase::Idle, packet: Vec::new(), data: Vec::new(),
-            pos: 0, chunk_end: 0, limit: 0, dma: false, sense: 0, asc: 0, mode: MODE_DEFAULT.to_vec(), fad: 150,
+            pos: 0, chunk_end: 0, limit: 0, dma: false, stream: (0, 0, false), nops: 0, pio_bytes: 0, sense: 0, asc: 0, mode: MODE_DEFAULT.to_vec(), fad: 150,
             sectors: 0, log: Vec::new(), disc: DiscSlot::default(), cmd_counts: Default::default(), unknown: Default::default(),
             play_end: 0, play_start: 0, repeat: 0, audio_status: 0x15, cd_buf: Vec::new(), cd_pos: 0,
         }
@@ -232,6 +242,7 @@ impl Gdrom {
     /// The command finished: good, or an error with a sense key and code.
     fn complete(&mut self, sense: Option<(u8, u8)>) {
         self.phase = Phase::Idle;
+        self.stream.1 = 0;
         self.ireason = 3;
         self.dma = false;
         match sense {
@@ -246,7 +257,7 @@ impl Gdrom {
 
     /// Hand `data` to the host (by DMA when `dma`).
     fn send(&mut self, data: Vec<u8>, dma: bool) {
-        if data.is_empty() { return self.complete(None); }
+        if data.is_empty() && self.stream.1 == 0 { return self.complete(None); }
         self.data = data;
         self.pos = 0;
         self.phase = Phase::DataIn;
@@ -262,6 +273,7 @@ impl Gdrom {
     /// The next PIO piece: as much as the host's limit allows.
     fn next_chunk(&mut self) {
         let limit = match self.limit & !1 { 0 => 0x8000, l => l as usize };
+        while self.data.len() - self.pos < limit && self.more() {}
         let n = (self.data.len() - self.pos).min(limit);
         self.byte_count = n as u16;
         self.chunk_end = self.pos + n;
@@ -272,15 +284,36 @@ impl Gdrom {
     /// G1 DMA: up to `max` bytes of the waiting data.
     pub fn dma_take(&mut self, max: usize) -> Vec<u8> {
         if !self.dma || self.phase != Phase::DataIn { return Vec::new(); }
-        let n = (self.data.len() - self.pos).min(max);
-        let out = self.data[self.pos..self.pos + n].to_vec();
-        self.pos += n;
+        let mut out = Vec::with_capacity(max.min(1 << 20));
+        while out.len() < max {
+            if self.pos >= self.data.len() && !self.more() { break; }
+            let n = (self.data.len() - self.pos).min(max - out.len());
+            out.extend_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+        }
         out
     }
 
     /// The G1 DMA finished: the command completes once all its data went.
     pub fn dma_finish(&mut self) {
-        if self.dma && self.pos >= self.data.len() { self.complete(None); }
+        if self.dma && self.pos >= self.data.len() && self.stream.1 == 0 { self.complete(None); }
+    }
+
+    /// Read the next sectors of a CD_READ in progress onto the end of the data (dropping
+    /// what the host already took). False when there are none left.
+    fn more(&mut self) -> bool {
+        let (fad, left, raw) = self.stream;
+        if left == 0 { return false; }
+        let Some(d) = self.disc.0.clone() else { self.stream.1 = 0; return false };
+        self.data.drain(..self.pos);
+        self.chunk_end = self.chunk_end.saturating_sub(self.pos);
+        self.pos = 0;
+        let n = left.min(STREAM_SECTORS);
+        let ok = read_sectors(&mut d.lock().unwrap(), fad, n, raw, &mut self.data);
+        self.sectors += n as u64;
+        self.stream = if ok { (fad + n, left - n, raw) } else { (fad, 0, raw) };
+        self.fad = self.stream.0;
+        ok
     }
 
     /// The next CD audio frame (44.1 kHz stereo) while playing; silence otherwise.
@@ -324,7 +357,8 @@ impl Gdrom {
         let lo = *self.data.get(self.pos).unwrap_or(&0);
         let hi = *self.data.get(self.pos + 1).unwrap_or(&0);
         self.pos += 2;
-        if self.pos >= self.data.len() {
+        self.pio_bytes += 2;
+        if self.pos >= self.data.len() && self.stream.1 == 0 {
             self.complete(None);
         } else if self.pos >= self.chunk_end {
             self.next_chunk();
@@ -388,7 +422,16 @@ impl Gdrom {
                 self.byte_count = 0xEB14;
                 self.ireason = 1;
             }
-            0xEF | 0x00 => self.complete(None), // SET FEATURES, NOP
+            0xEF => self.complete(None), // SET FEATURES
+            0x00 => {
+                // NOP: aborts the command in progress - ABRT in the error register with the
+                // last sense key, CHECK in the status, and an interrupt
+                let key = self.sense;
+                self.nops += 1;
+                self.complete(None);
+                self.status = DRDY | DSC | CHECK;
+                self.error = key << 4 | 0x04;
+            }
             _ => self.illegal(),
         }
     }
@@ -477,31 +520,19 @@ impl Gdrom {
             }
             0x22 => self.complete(None), // CD_SCAN
             0x30 | 0x31 => {
-                // CD_READ: start (FAD, or MSF with bit 0), count; data select in bits 4-7
+                // CD_READ: start (FAD, or MSF with bit 0), count; data select in bits 4-7.
+                // The first sectors now, the rest as the host takes them.
                 let start = if p[1] & 1 != 0 { msf_of(p, 2) } else { fad_of(p, 2) };
                 let count = fad_of(p, 8);
                 let raw = p[1] >> 4 == 0xF;
-                let d = disc.unwrap();
-                let mut d = d.lock().unwrap();
-                let mut out = Vec::with_capacity(count as usize * if raw { SECTOR } else { 2048 });
-                let mut sec = [0u8; SECTOR];
-                let mut ok = true;
-                for k in 0..count {
-                    let lba = (start + k).saturating_sub(150);
-                    let Some(kind) = d.track_at(lba).map(|t| t.kind) else { ok = false; break };
-                    if !d.read_sector(lba, &mut sec) { ok = false; break; }
-                    if raw || kind == TrackKind::Audio {
-                        out.extend_from_slice(&sec);
-                    } else {
-                        let at = if sec[15] == 2 { 24 } else { 16 };
-                        out.extend_from_slice(&sec[at..at + 2048]);
-                    }
-                }
-                drop(d);
-                self.sectors += count as u64;
-                self.fad = start + count;
+                let n = count.min(STREAM_SECTORS);
+                let mut out = Vec::with_capacity(n as usize * SECTOR);
+                let ok = read_sectors(&mut disc.unwrap().lock().unwrap(), start, n, raw, &mut out);
+                self.sectors += n as u64;
+                self.fad = start + n;
                 self.state = ST_PAUSE;
                 if !ok { return self.complete(Some((5, 0x21))); }
+                self.stream = (start + n, count - n, raw);
                 let dma = self.features & 1 != 0;
                 self.send(out, dma);
             }
@@ -581,6 +612,30 @@ fn session(d: &Disc, s: u8) -> (u8, u32) {
         1 => d.tracks.first().map_or((1, 150), |t| (t.number, t.start + 150)),
         _ => d.tracks.iter().find(|t| t.start >= 45000).map_or((0, 0), |t| (t.number, t.start + 150)),
     }
+}
+
+/// Sectors a streaming CD_READ reads at a time (a few in tests, which have small images).
+#[cfg(not(test))]
+const STREAM_SECTORS: u32 = 32;
+#[cfg(test)]
+const STREAM_SECTORS: u32 = 4;
+
+/// Append `count` sectors from FAD `start` (2048 data bytes each, or whole raw / audio
+/// sectors); false if one is off the disc.
+fn read_sectors(d: &mut Disc, start: u32, count: u32, raw: bool, out: &mut Vec<u8>) -> bool {
+    let mut sec = [0u8; SECTOR];
+    for k in 0..count {
+        let lba = (start + k).saturating_sub(150);
+        let Some(kind) = d.track_at(lba).map(|t| t.kind) else { return false };
+        if !d.read_sector(lba, &mut sec) { return false; }
+        if raw || kind == TrackKind::Audio {
+            out.extend_from_slice(&sec);
+        } else {
+            let at = if sec[15] == 2 { 24 } else { 16 };
+            out.extend_from_slice(&sec[at..at + 2048]);
+        }
+    }
+    true
 }
 
 /// ATA IDENTIFY PACKET DEVICE (MAME's words): "SE" maker, "CD-ROM DRIVE" model, "6.42".

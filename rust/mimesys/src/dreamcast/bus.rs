@@ -23,7 +23,9 @@ use super::yuv::{self, Yuv};
 use crate::common::cpu::arm::arm7tdmi::Arm7tdmi;
 use super::holly::{self, Holly, SbAction};
 use super::maple::{self, DcPad};
+use super::vmu::Vmu;
 use super::onchip::{DmaJob, OnChip};
+use super::mmu::Access;
 use super::pvr::{self, Pvr};
 use super::render;
 use crate::common::cpu::sh4::{Event, Sh4Bus};
@@ -105,6 +107,12 @@ pub struct Dc {
     pub snd_io: [u64; 4],
     #[serde(skip)]
     pub g2_last: [u32; 4],
+    /// SH-4 writes to the first 128 KB of sound RAM (offset, value, size) and AICA DMAs to
+    /// it (G2 address, length, first words), for the speed log
+    #[serde(skip)]
+    pub snd_log: Vec<(u32, u32, u8)>,
+    #[serde(skip)]
+    pub dma_log: Vec<(u32, u32, Vec<u32>)>,
     /// renders, polygons, pixels, translucent fragments since the last speed line
     #[serde(skip)]
     pub r_sum: (u64, u64, u64, u64),
@@ -122,6 +130,23 @@ pub struct Dc {
     /// controllers on ports A-D
     #[serde(skip)]
     pub pads: [Option<DcPad>; 4],
+    /// the memory card in controller A's first slot (kept out of save states: loading
+    /// one never takes saves off the card)
+    #[serde(skip)]
+    pub vmu: Vmu,
+    #[serde(skip)]
+    pub vmu_on: bool,
+    /// save the next render's inputs to dc_frame.bin (debug)
+    #[serde(skip)]
+    pub dump_frame: bool,
+    /// debug traffic since the last speed line: YUV converter bytes, channel-2 DMAs
+    /// (count, bytes, last destination), G1 (GD-ROM) DMAs (count, bytes)
+    #[serde(skip)]
+    pub trace_yuv: u64,
+    #[serde(skip)]
+    pub trace_ch2: (u32, u64, u32),
+    #[serde(skip)]
+    pub trace_g1: (u32, u64),
     /// SB_SFRES: the program asked for a reset
     #[serde(skip)]
     pub soft_reset: bool,
@@ -130,6 +155,10 @@ pub struct Dc {
     pub unknown: BTreeMap<u32, (bool, u32)>,
     /// Maple DMAs run (debug)
     pub maple_dmas: u64,
+    /// debug: Maple frames since the last speed line, (recipient, command, function) ->
+    /// (frames, last reply header)
+    #[serde(skip)]
+    pub maple_log: BTreeMap<(u32, u32, u32), (u32, u32)>,
     /// debug: log chip-register accesses (with the PC) into `reg_log`
     #[serde(skip)]
     pub trace_regs: bool,
@@ -138,6 +167,15 @@ pub struct Dc {
     /// debug: the instruction running
     #[serde(skip)]
     pub cur_pc: u32,
+    /// Bit `a >> 26` set: addresses there are main RAM as they stand (no MMU translation),
+    /// so the CPU's accessors go straight to `ram`. Kept by `remap`; an all-clear mask is
+    /// always safe (everything takes the general path).
+    #[serde(skip)]
+    pub direct: u64,
+    /// an interrupt is asking or the MMU is on (`Sh4Bus::attention`); kept by `update_irq`
+    /// and `remap`
+    #[serde(skip)]
+    pub attn: bool,
 }
 
 impl Dc {
@@ -145,11 +183,12 @@ impl Dc {
         let mut d = Self {
             bios, flash: Flash::new(flash), ram: vec![0; RAM_SIZE], vram: vec![0; VRAM_SIZE],
             aica: Aica::new(unix_now), holly: Holly::new(), pvr: Pvr::new(), gd: Gdrom::new(), chip: OnChip::new(),
-            now: 0, next_line: 0, events: Vec::new(), t_render: Default::default(), t_sound: Default::default(), t_arm: Default::default(), t_render_wait: Default::default(), render_async: false, render_job: Default::default(), rcache: Default::default(), snd_io: [0; 4], g2_last: [0; 4], r_sum: (0, 0, 0, 0), gd_dma_end: None, yuv: Yuv::default(), arm: Arm7tdmi::new(), arm_now: 0, arm_acc: 0, arm_running: false, arm_steps: 0, arm_pcs: Default::default(), ta_buf: [0; 8], ta_fill: 0, vblank: false, irq: None,
-            pads: [Some(DcPad::default()), Some(DcPad::default()), None, None], soft_reset: false,
-            unknown: BTreeMap::new(), maple_dmas: 0, trace_regs: false, reg_log: Vec::new(), cur_pc: 0,
+            now: 0, next_line: 0, events: Vec::new(), t_render: Default::default(), t_sound: Default::default(), t_arm: Default::default(), t_render_wait: Default::default(), render_async: false, render_job: Default::default(), rcache: Default::default(), snd_io: [0; 4], g2_last: [0; 4], snd_log: Vec::new(), dma_log: Vec::new(), r_sum: (0, 0, 0, 0), gd_dma_end: None, yuv: Yuv::default(), arm: Arm7tdmi::new(), arm_now: 0, arm_acc: 0, arm_running: false, arm_steps: 0, arm_pcs: Default::default(), ta_buf: [0; 8], ta_fill: 0, vblank: false, irq: None,
+            pads: [Some(DcPad::default()), Some(DcPad::default()), None, None], vmu: Vmu::new(), vmu_on: true, dump_frame: false, trace_yuv: 0, trace_ch2: (0, 0, 0), trace_g1: (0, 0), soft_reset: false,
+            unknown: BTreeMap::new(), maple_dmas: 0, maple_log: BTreeMap::new(), trace_regs: false, reg_log: Vec::new(), cur_pc: 0, direct: 0, attn: true,
         };
         d.next_line = d.pvr.line_cycles();
+        d.remap();
         d
     }
 
@@ -159,6 +198,7 @@ impl Dc {
         self.pvr.reset();
         self.gd.reset();
         self.chip.reset();
+        self.remap();
         self.aica.reset();
         self.events.clear();
         self.gd_dma_end = None;
@@ -187,6 +227,7 @@ impl Dc {
             (Some(a), Some(b)) => Some(if b.0 > a.0 { b } else { a }),
             (a, b) => a.or(b),
         };
+        self.attn = self.irq.is_some() || self.mmu_on();
     }
 
     fn raise_later(&mut self, delay: u64, bits: u32) { self.events.push((self.now + delay, bits)); }
@@ -301,6 +342,8 @@ impl Dc {
         let dst = self.holly.g1[G1_GDSTAR] & 0x1FFF_FFE0;
         let len = self.holly.g1[G1_GDLEN] as usize;
         let data = self.gd.dma_take(len);
+        self.trace_g1.0 += 1;
+        self.trace_g1.1 += data.len() as u64;
         if dst >> 24 & 0x1C == 0x0C {
             for (k, b) in data.iter().enumerate() { self.ram[(dst as usize + k) & (RAM_SIZE - 1)] = *b; }
         } else {
@@ -313,7 +356,14 @@ impl Dc {
 
     fn maple_dma(&mut self) {
         let table = self.holly.maple[1]; // SB_MDSTAR
-        maple::dma(&mut self.ram, table, &self.pads);
+        let log = &mut self.maple_log;
+        maple::dma_logged(&mut self.ram, table, &self.pads, if self.vmu_on { Some(&mut self.vmu) } else { None }, &mut |f, r| {
+            // (port and unit, command, function) -> (frames, last reply header)
+            let key = (f[0] >> 8 & 0xFF, f[0] & 0xFF, if f[0] >> 24 > 0 { f.get(1).copied().unwrap_or(0) } else { 0 });
+            let e = log.entry(key).or_insert((0, 0));
+            e.0 += 1;
+            e.1 = r;
+        });
         self.maple_dmas += 1;
         self.raise_later(20_000, holly::IST_DMA_MAPLE);
     }
@@ -323,6 +373,12 @@ impl Dc {
         let len = match self.holly.r(holly::SB_C2DLEN) { 0 => 0x100_0000, n => n };
         let dst = (self.holly.r(holly::SB_C2DSTAT) & 0x03FF_FFE0) | 0x1000_0000;
         let texture = dst & 0x0100_0000 != 0;
+        self.trace_ch2 = (self.trace_ch2.0 + 1, self.trace_ch2.1 + len as u64, dst);
+        #[cfg(test)]
+        if std::env::var("DC_CH2").is_ok() {
+            let w: Vec<u32> = (0..len.min(64)).step_by(4).map(|k| self.read(src.wrapping_add(k), 4)).collect();
+            println!("ch2 {src:08X} -> {dst:08X} len {len}: {w:08X?}");
+        }
         for k in (0..len).step_by(4) {
             let v = self.read(src.wrapping_add(k), 4);
             self.write(if texture { dst.wrapping_add(k) } else { dst }, v, 4);
@@ -377,6 +433,10 @@ impl Dc {
         self.snd_io[1] += 1;
         self.snd_io[2] += len as u64;
         self.g2_last = [g2_a, sys_a, r[2], r[3] | r[4] << 8];
+        if !to_sys && self.dma_log.len() < 12 {
+            let w: Vec<u32> = (0..4.min(len / 4)).map(|k| self.read(sys_a.wrapping_add(4 * k), 4)).collect();
+            self.dma_log.push((g2_a, len, w));
+        }
         for k in (0..len).step_by(4) {
             if to_sys {
                 let v = self.read(g2_a.wrapping_add(k), 4);
@@ -387,6 +447,8 @@ impl Dc {
             }
         }
         self.holly.g2[6] = 0;
+        // SB_ADLEN bit 31: the end of the transfer also clears SB_ADEN
+        if self.holly.g2[2] & 0x8000_0000 != 0 { self.holly.g2[5] = 0; }
         self.raise_later((len as u64 / 4).max(100), holly::IST_DMA_AICA);
     }
 
@@ -521,6 +583,7 @@ impl Dc {
             }
             if (0xFFD8_0000..0xFFD8_0030).contains(&a) { self.chip.tmu_update(self.now); }
             let (known, job) = self.chip.write(a, v, size);
+            if a == 0xFF00_0010 { self.remap(); }
             if !known { self.note(a, true); }
             if let Some(j) = job { self.run_job(j); }
             self.update_irq();
@@ -587,6 +650,10 @@ impl Dc {
                 if self.pvr.write(r - 0x5F_8000, v) {
                     self.finish_render();
                     let base = self.pvr.reg(render::PARAM_BASE);
+                    if self.dump_frame {
+                        self.dump_frame = false;
+                        render::FrameDump::save(&self.pvr.regs, self.pvr.ta.scene(base), &self.vram);
+                    }
                     let t = std::time::Instant::now();
                     if self.render_async {
                         // copies, so the CPU can change video RAM / start the next scene
@@ -611,7 +678,12 @@ impl Dc {
             0x60_0000..=0x60_07FF => {}
             0x70_0000..=0x70_7FFF => self.aica.reg_write(q - 0x70_0000, v, size),
             0x71_0000..=0x71_000F => self.aica.rtc_write(r, v, self.now),
-            0x80_0000..=0x9F_FFFF => { self.snd_io[0] += size as u64; Self::put(&mut self.aica.wave, (q - 0x80_0000) as usize, v, size) }
+            0x80_0000..=0x9F_FFFF => {
+                self.snd_io[0] += size as u64;
+                // the sound driver's work area: the first writes of each speed-log period
+                if q - 0x80_0000 < 0x2_0000 && self.snd_log.len() < 40 { self.snd_log.push((q - 0x80_0000, v, size as u8)); }
+                Self::put(&mut self.aica.wave, (q - 0x80_0000) as usize, v, size)
+            }
             _ => self.note(p, true),
         }
     }
@@ -628,6 +700,7 @@ impl Dc {
         }
         if o >= 0x80_0000 {
             let bytes = v.to_le_bytes();
+            self.trace_yuv += size as u64;
             let (base, ctrl) = (self.pvr.reg(yuv::TA_YUV_TEX_BASE) & 0x7F_FFFF, self.pvr.reg(yuv::TA_YUV_TEX_CTRL));
             // the whole picture's bytes
             let (wb, hb) = ((ctrl & 0x3F) + 1, (ctrl >> 8 & 0x3F) + 1);
@@ -650,27 +723,71 @@ impl Dc {
 #[inline]
 fn is_ram(a: u32) -> bool { a & 0xE000_0000 != 0xE000_0000 && (a >> 26) & 7 == 3 }
 
-impl Sh4Bus for Dc {
-    #[inline]
-    fn read8(&mut self, a: u32) -> u8 {
+impl Dc {
+    /// Rebuild `direct` (after MMUCR changes or a state load): the RAM mirrors in every
+    /// region but P4, or only in P1 / P2 while the MMU translates the others.
+    pub fn remap(&mut self) {
+        let mmu = self.mmu_on();
+        self.direct = 0;
+        for r in 0..64u32 {
+            let (top, sub) = (r >> 3, r & 7);
+            if sub == 3 && top != 7 && (!mmu || top == 4 || top == 5) { self.direct |= 1 << r; }
+        }
+        self.attn = mmu || self.irq.is_some();
+    }
+
+    /// The MMU is on (MMUCR.AT).
+    #[inline(always)]
+    fn mmu_on(&self) -> bool { self.chip.mmucr & 1 != 0 }
+
+    /// Virtual -> physical with the MMU on; None when the access faulted.
+    #[inline(never)]
+    fn tr(&mut self, a: u32, acc: Access) -> Option<u32> {
+        let c = &mut self.chip;
+        // 7C000000-7FFFFFFF is the operand-cache RAM while CCR.ORA is set: never translated
+        if a >> 26 == 0x1F && c.ora() { return Some(a); }
+        let cr = c.mmucr;
+        c.mmu.translate(a, acc, &mut c.pteh, &mut c.tea, cr)
+    }
+}
+
+/// Translate `$a` when the MMU is on; a faulting access returns `$fail`.
+macro_rules! mmu {
+    ($s:ident, $a:ident, $acc:expr, $fail:expr) => {
+        let $a = if $s.mmu_on() { match $s.tr($a, $acc) { Some(p) => p, None => return $fail } } else { $a };
+    };
+}
+
+/// The accessors' general paths (MMU translation, registers, the RAM mirrors `direct`
+/// doesn't cover), kept out of line so the direct path inlines small.
+impl Dc {
+    #[inline(never)]
+    fn read8_slow(&mut self, a: u32) -> u8 {
+        mmu!(self, a, Access::Read, 0);
         if is_ram(a) { return self.ram[(a & 0xFF_FFFF) as usize]; }
         self.read(a, 1) as u8
     }
-    #[inline]
-    fn read16(&mut self, a: u32) -> u16 {
+
+    #[inline(never)]
+    fn read16_slow(&mut self, a: u32) -> u16 {
+        mmu!(self, a, Access::Read, 0);
         if is_ram(a) { let i = (a & 0xFF_FFFE) as usize; return u16::from_le_bytes([self.ram[i], self.ram[i + 1]]); }
         self.read(a, 2) as u16
     }
-    #[inline]
-    fn read64(&mut self, a: u32) -> u64 {
+
+    #[inline(never)]
+    fn read64_slow(&mut self, a: u32) -> u64 {
+        mmu!(self, a, Access::Read, 0);
         if is_ram(a) && a & 0xFF_FFF8 != 0xFF_FFF8 {
             let i = (a & 0xFF_FFFC) as usize;
             return u64::from_le_bytes(self.ram[i..i + 8].try_into().unwrap());
         }
         self.read32(a) as u64 | (self.read32(a.wrapping_add(4)) as u64) << 32
     }
-    #[inline]
-    fn write64(&mut self, a: u32, v: u64) {
+
+    #[inline(never)]
+    fn write64_slow(&mut self, a: u32, v: u64) {
+        mmu!(self, a, Access::Write, ());
         if is_ram(a) && a & 0xFF_FFF8 != 0xFF_FFF8 {
             let i = (a & 0xFF_FFFC) as usize;
             return self.ram[i..i + 8].copy_from_slice(&v.to_le_bytes());
@@ -678,34 +795,44 @@ impl Sh4Bus for Dc {
         self.write32(a, v as u32);
         self.write32(a.wrapping_add(4), (v >> 32) as u32);
     }
-    #[inline]
-    fn read32(&mut self, a: u32) -> u32 {
+
+    #[inline(never)]
+    fn read32_slow(&mut self, a: u32) -> u32 {
+        mmu!(self, a, Access::Read, 0);
         if a & 0xE000_0000 != 0xE000_0000 && (a >> 26) & 7 == 3 {
             let i = (a & 0xFF_FFFC) as usize;
             return u32::from_le_bytes(self.ram[i..i + 4].try_into().unwrap());
         }
         self.read(a, 4)
     }
-    #[inline]
-    fn write8(&mut self, a: u32, v: u8) {
+
+    #[inline(never)]
+    fn write8_slow(&mut self, a: u32, v: u8) {
+        mmu!(self, a, Access::Write, ());
         if is_ram(a) { self.ram[(a & 0xFF_FFFF) as usize] = v; return; }
         self.write(a, v as u32, 1)
     }
-    #[inline]
-    fn write16(&mut self, a: u32, v: u16) {
+
+    #[inline(never)]
+    fn write16_slow(&mut self, a: u32, v: u16) {
+        mmu!(self, a, Access::Write, ());
         if is_ram(a) { let i = (a & 0xFF_FFFE) as usize; return self.ram[i..i + 2].copy_from_slice(&v.to_le_bytes()); }
         self.write(a, v as u32, 2)
     }
-    #[inline]
-    fn write32(&mut self, a: u32, v: u32) {
+
+    #[inline(never)]
+    fn write32_slow(&mut self, a: u32, v: u32) {
+        mmu!(self, a, Access::Write, ());
         if a & 0xE000_0000 != 0xE000_0000 && (a >> 26) & 7 == 3 {
             let i = (a & 0xFF_FFFC) as usize;
             return self.ram[i..i + 4].copy_from_slice(&v.to_le_bytes());
         }
         self.write(a, v, 4)
     }
-    #[inline(always)]
-    fn fetch16(&mut self, a: u32) -> u16 {
+
+    #[inline(never)]
+    fn fetch16_slow(&mut self, a: u32) -> u16 {
+        mmu!(self, a, Access::Fetch, 0);
         if a & 0xE000_0000 != 0xE000_0000 {
             let p = a & 0x1FFF_FFFF;
             if p >> 26 == 3 { let i = (p & 0xFF_FFFE) as usize; return u16::from_le_bytes([self.ram[i], self.ram[i + 1]]); }
@@ -713,11 +840,98 @@ impl Sh4Bus for Dc {
         }
         self.read(a, 2) as u16
     }
+}
+
+impl Sh4Bus for Dc {
+    #[inline(always)]
+    fn read8(&mut self, a: u32) -> u8 {
+        if self.direct >> (a >> 26) & 1 != 0 { return self.ram[(a & 0xFF_FFFF) as usize]; }
+        self.read8_slow(a)
+    }
+    #[inline(always)]
+    fn read16(&mut self, a: u32) -> u16 {
+        if self.direct >> (a >> 26) & 1 != 0 {
+            let i = (a & 0xFF_FFFE) as usize;
+            if let Some(b) = self.ram.get(i..i + 2) { return u16::from_le_bytes([b[0], b[1]]); }
+        }
+        self.read16_slow(a)
+    }
+    #[inline(always)]
+    fn read64(&mut self, a: u32) -> u64 {
+        if self.direct >> (a >> 26) & 1 != 0 {
+            let i = (a & 0xFF_FFFC) as usize;
+            if let Some(b) = self.ram.get(i..i + 8) { return u64::from_le_bytes(b.try_into().unwrap()); }
+        }
+        self.read64_slow(a)
+    }
+    #[inline(always)]
+    fn write64(&mut self, a: u32, v: u64) {
+        if self.direct >> (a >> 26) & 1 != 0 {
+            let i = (a & 0xFF_FFFC) as usize;
+            if let Some(b) = self.ram.get_mut(i..i + 8) { b.copy_from_slice(&v.to_le_bytes()); return; }
+        }
+        self.write64_slow(a, v)
+    }
+    #[inline(always)]
+    fn read32(&mut self, a: u32) -> u32 {
+        if self.direct >> (a >> 26) & 1 != 0 {
+            let i = (a & 0xFF_FFFC) as usize;
+            if let Some(b) = self.ram.get(i..i + 4) { return u32::from_le_bytes([b[0], b[1], b[2], b[3]]); }
+        }
+        self.read32_slow(a)
+    }
+    #[inline(always)]
+    fn write8(&mut self, a: u32, v: u8) {
+        if self.direct >> (a >> 26) & 1 != 0 { self.ram[(a & 0xFF_FFFF) as usize] = v; return; }
+        self.write8_slow(a, v)
+    }
+    #[inline(always)]
+    fn write16(&mut self, a: u32, v: u16) {
+        if self.direct >> (a >> 26) & 1 != 0 {
+            let i = (a & 0xFF_FFFE) as usize;
+            if let Some(b) = self.ram.get_mut(i..i + 2) { b.copy_from_slice(&v.to_le_bytes()); return; }
+        }
+        self.write16_slow(a, v)
+    }
+    #[inline(always)]
+    fn write32(&mut self, a: u32, v: u32) {
+        if self.direct >> (a >> 26) & 1 != 0 {
+            let i = (a & 0xFF_FFFC) as usize;
+            if let Some(b) = self.ram.get_mut(i..i + 4) { b.copy_from_slice(&v.to_le_bytes()); return; }
+        }
+        self.write32_slow(a, v)
+    }
+    #[inline(always)]
+    fn fetch16(&mut self, a: u32) -> u16 {
+        if self.direct >> (a >> 26) & 1 != 0 {
+            let i = (a & 0xFF_FFFE) as usize;
+            if let Some(b) = self.ram.get(i..i + 2) { return u16::from_le_bytes([b[0], b[1]]); }
+        }
+        self.fetch16_slow(a)
+    }
     fn pref(&mut self, a: u32) {
         if a >> 26 != 0x38 { return; }
-        let (dest, data) = self.chip.sq_flush(a);
+        let (mut dest, data) = self.chip.sq_flush(a);
+        if self.mmu_on() {
+            // the SQ address goes through the TLB
+            let c = &mut self.chip;
+            let cr = c.mmucr;
+            match c.mmu.sq_target(a, &mut c.pteh, &mut c.tea, cr) { Some(p) => dest = p, None => return }
+        }
         for (k, w) in data.iter().enumerate() { self.write(dest + 4 * k as u32, *w, 4); }
     }
+    fn ldtlb(&mut self) {
+        let c = &mut self.chip;
+        c.mmucr = c.mmu.ldtlb(c.pteh, c.ptel, c.mmucr);
+    }
+    #[inline(always)]
+    fn mmu(&self) -> bool { self.mmu_on() }
+    #[inline(always)]
+    fn attention(&self) -> bool { self.attn }
+    #[inline]
+    fn mmu_priv(&mut self, md: bool) { self.chip.mmu.md = md; }
+    #[inline]
+    fn mmu_fault(&mut self) -> Option<u32> { self.chip.mmu.fault.take() }
     #[inline]
     fn irq(&self) -> Option<(u32, u32)> { self.irq }
     #[inline]

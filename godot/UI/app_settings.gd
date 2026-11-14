@@ -90,11 +90,12 @@ const OPTION_DEFAULTS := {
 	"dc_broadcast": "flash", # Dreamcast: TV standard: "flash" (as dc_flash.bin says), "ntsc", "pal" (next load)
 	"dc_debug": false,       # Dreamcast: print where the CPU is and what the chips do (for bug reports)
 	"dc_speed_log": false,   # Dreamcast: print a speed line every 5 seconds (light, unlike dc_debug)
-	"dc_cpu_ratio": "2",     # Dreamcast: SH-4 cycles each instruction counts ("1" exact clock, slowest)
+	"dc_cpu_ratio": "1.5",   # Dreamcast: SH-4 cycles each instruction counts ("1" most CPU time, slowest; "2" some games stall)
 	"dc_idle_skip": true,    # Dreamcast: skip loops that only wait for memory to change
 	"dc_render_thread": true,  # Dreamcast: draw 3D on other threads while the CPU runs
 	"dc_fpu_exact": false,   # Dreamcast: SH-4 round-to-zero / denormal modes done exactly
 	"dc_record_sound": false,  # Dreamcast: write the first minute of sound to dc_sound.wav
+	"dc_dump_frame": false,  # Dreamcast: save the next 3D frame to dc_frame.bin (bug reports)
 }
 ## Game Boy boot ROMs: "bios" (above) is the Game Boy Color one, this is the original's.
 const GB_DMG_BIOS_DEFAULT := "user://BIOS/dmg_boot.bin"

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::pvr::IST_LIST_END;
 
 /// A vertex: screen x / y, z = 1/w, texture u / v, base and offset colours as A R G B 0..1.
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vert {
     pub x: f32,
     pub y: f32,
@@ -29,7 +29,7 @@ pub struct Vert {
 /// One strip (sprites are 4-vertex strips) with the words of its global parameter.
 /// `isp` carries the object-control bits from the PCW in 25-22 (texture, offset, Gouraud,
 /// 16-bit UV), the way the TA writes them into the ISP/TSP instruction word.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Poly {
     pub list: u8,
     pub isp: u32,
@@ -50,7 +50,7 @@ pub struct Poly {
 /// A modifier-volume triangle: its list (1 opaque, 3 translucent), the volume instruction
 /// of its header (0 normal, 1 inside last polygon, 2 outside last polygon), the header it
 /// came after (a volume closes after the triangles of a header with instruction 1 or 2).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModTri {
     pub list: u8,
     pub mode: u8,
@@ -59,7 +59,7 @@ pub struct ModTri {
 }
 
 /// Lists the TA built for one TA_ISP_BASE.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub struct Scene {
     pub isp_base: u32,
     pub polys: Vec<Poly>,
@@ -162,10 +162,18 @@ impl Ta {
         self.scenes.push(s);
     }
 
-    /// The scene whose ISP base is `base` (the current one included).
+    /// The scene a render with PARAM_BASE `base` draws (the current one included): the
+    /// newest one the TA wrote at that base or a little above it - a game may keep the
+    /// first bytes for itself (NBA 2K: TA_ISP_BASE = PARAM_BASE + 0x80, the background
+    /// plane's parameters in front). Newest, because a stale scene from an earlier mode can
+    /// sit at the exact base (NBA 2K2's intro movie at 0, its menus at 0x80).
     pub fn scene(&mut self, base: u32) -> Option<&Scene> {
-        if self.cur.isp_base == base { return Some(&self.cur); }
-        self.scenes.iter().find(|s| s.isp_base == base)
+        const NEAR: u32 = 0x10_0000;
+        let near = |s: &Scene| s.isp_base.wrapping_sub(base) < NEAR;
+        if near(&self.cur) && !(self.cur.polys.is_empty() && self.cur.mods.is_empty() && self.scenes.iter().any(|s| near(s))) {
+            return Some(&self.cur);
+        }
+        self.scenes.iter().rev().find(|s| near(s)).or(if near(&self.cur) { Some(&self.cur) } else { None })
     }
 
     /// The list a parameter belongs to: the open one, or the one its PCW names.

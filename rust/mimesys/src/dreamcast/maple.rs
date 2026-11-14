@@ -9,6 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::vmu::Vmu;
+
 /// A controller's state: buttons active low (C B A Start Up Down Left Right in bits 0-7,
 /// Z Y X D in 8-11), triggers 0-255, stick 0-255 (0x80 = centre).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -36,9 +38,14 @@ pub const BTN_X: u16 = 1 << 10;
 
 const FUNC_CONTROLLER: u32 = 0x0100_0000;
 
-fn put_str(out: &mut Vec<u8>, s: &str, len: usize) {
+pub(super) fn put_str(out: &mut Vec<u8>, s: &str, len: usize) {
     let b = s.as_bytes();
     for k in 0..len { out.push(*b.get(k).unwrap_or(&b' ')); }
+}
+
+/// Bytes -> little-endian words (the length a multiple of 4).
+pub(super) fn words(b: &[u8]) -> Vec<u32> {
+    b.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
 }
 
 /// The 28-word device information block of a standard controller.
@@ -52,16 +59,17 @@ pub fn controller_info() -> Vec<u32> {
     put_str(&mut b, "Dreamcast Controller", 30);
     put_str(&mut b, "Produced By or Under License From SEGA ENTERPRISES,LTD.", 60);
     b.extend(0x01F4_01AEu32.to_le_bytes()); // standby 43 mA, max 50 mA
-    b.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+    words(&b)
 }
 
-/// A controller's answer to one frame (None: no reply).
-pub fn controller_reply(frame: &[u32], pad: &DcPad, port: u32) -> Option<Vec<u32>> {
+/// A controller's answer to one frame (None: no reply). `vmu`: a card is in its first
+/// slot (the sender address then has bit 0 set).
+pub fn controller_reply(frame: &[u32], pad: &DcPad, port: u32, vmu: bool) -> Option<Vec<u32>> {
     let f = *frame.first()?;
     let cmd = f & 0xFF;
     let (recipient, sender) = (f >> 8 & 0xFF, f >> 16 & 0xFF);
-    // we are the main unit at 0x20 of this port; nothing plugged into the controller
-    let me = 0x20 | port << 6;
+    // we are the main unit at 0x20 of this port; bits 0-4 say which slots are filled
+    let me = 0x20 | port << 6 | vmu as u32;
     let _ = recipient;
     let mut data: Vec<u32> = match cmd {
         0x01 => controller_info(),
@@ -69,7 +77,7 @@ pub fn controller_reply(frame: &[u32], pad: &DcPad, port: u32) -> Option<Vec<u32
             let mut d = controller_info();
             let mut v = Vec::new();
             put_str(&mut v, "Version 1.000,1998/05/11,315-6215-AB   ,Analog Module: The 4th Edition. 05/08", 80);
-            d.extend(v.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())));
+            d.extend(words(&v));
             d
         }
         0x03 => Vec::new(),
@@ -87,27 +95,52 @@ pub fn controller_reply(frame: &[u32], pad: &DcPad, port: u32) -> Option<Vec<u32
 }
 
 /// Run a Maple DMA over `ram` (16 MB, the table and the replies live there); `pads`:
-/// the controllers on ports A-D (None = nothing plugged in). Returns the number of
-/// table entries processed.
-pub fn dma(ram: &mut [u8], table: u32, pads: &[Option<DcPad>; 4]) -> usize {
+/// the controllers on ports A-D (None = nothing plugged in); `vmu`: the memory card in
+/// controller A's first slot. Returns the number of table entries processed.
+pub fn dma(ram: &mut [u8], table: u32, pads: &[Option<DcPad>; 4], vmu: Option<&mut Vmu>) -> usize {
+    dma_logged(ram, table, pads, vmu, &mut |_, _| {})
+}
+
+/// `dma`, calling `log(frame, reply header)` for each frame sent.
+pub fn dma_logged(ram: &mut [u8], table: u32, pads: &[Option<DcPad>; 4], mut vmu: Option<&mut Vmu>,
+                  log: &mut dyn FnMut(&[u32], u32)) -> usize {
     let mask = ram.len() - 1;
     let rd = |ram: &[u8], a: u32| { let i = a as usize & mask & !3; u32::from_le_bytes(ram[i..i + 4].try_into().unwrap()) };
     let mut a = table;
     let mut n = 0;
     loop {
         let head = rd(ram, a);
-        let dest = rd(ram, a + 4);
         let len = (head & 0xFF) + 1;
         let port = head >> 16 & 3;
         let pattern = head >> 8 & 7;
+        n += 1;
+        // only a "start" entry carries a reply address and a frame; the others (lightgun
+        // mode, reset, NOP) are the header word alone
+        if pattern != 0 {
+            a = a.wrapping_add(4);
+            if head >> 31 != 0 || n >= 64 { break; }
+            continue;
+        }
+        let dest = rd(ram, a + 4);
         let frame: Vec<u32> = (0..len).map(|k| rd(ram, a + 8 + 4 * k)).collect();
         a = a.wrapping_add(8 + 4 * len);
-        n += 1;
-        if pattern == 0 {
-            let reply = match &pads[port as usize] {
-                Some(p) => controller_reply(&frame, p, port).unwrap_or_else(|| vec![0xFFFF_FFFF]),
-                None => vec![0xFFFF_FFFF],
+        {
+            let unit = frame[0] >> 8 & 0x3F;
+            let card = if port == 0 && pads[0].is_some() { vmu.as_deref_mut() } else { None };
+            let reply = match (&pads[port as usize], unit, card) {
+                (Some(_), 0x01, Some(v)) => {
+                    let sender = frame[0] >> 16 & 0xFF;
+                    let (code, mut d) = v.reply(&frame);
+                    let mut out = vec![code | sender << 8 | (port << 6 | 1) << 16 | (d.len() as u32) << 24];
+                    out.append(&mut d);
+                    out
+                }
+                // the controller's other slots (A2, a rumble pack...) are empty
+                (Some(_), 0x01..=0x1F, _) => vec![0xFFFF_FFFF],
+                (Some(p), _, card) => controller_reply(&frame, p, port, card.is_some()).unwrap_or_else(|| vec![0xFFFF_FFFF]),
+                _ => vec![0xFFFF_FFFF],
             };
+            log(&frame, reply[0]);
             for (k, w) in reply.iter().enumerate() {
                 let i = (dest as usize).wrapping_add(4 * k) & mask & !3;
                 ram[i..i + 4].copy_from_slice(&w.to_le_bytes());
@@ -121,6 +154,21 @@ pub fn dma(ram: &mut [u8], table: u32, pads: &[Option<DcPad>; 4]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A NOP entry is its header word alone: the frame after it still gets its reply.
+    #[test]
+    fn a_nop_entry_is_one_word() {
+        let mut ram = vec![0u8; 0x10000];
+        let put = |ram: &mut [u8], a: usize, v: u32| ram[a..a + 4].copy_from_slice(&v.to_le_bytes());
+        put(&mut ram, 0x100, 0x0000_0700); // NOP, length field 0
+        put(&mut ram, 0x104, 0x8000_0000); // last: start, port A, 1 word
+        put(&mut ram, 0x108, 0x2000);
+        put(&mut ram, 0x10C, 0x01 | 0x01 << 8); // device request to A1
+        let mut vmu = Vmu::new();
+        let pads = [Some(DcPad::default()), None, None, None];
+        assert_eq!(dma(&mut ram, 0x100, &pads, Some(&mut vmu)), 2);
+        assert_eq!(u32::from_le_bytes(ram[0x2000..0x2004].try_into().unwrap()) & 0xFF_00FF, 0x01_0005);
+    }
 
     #[test]
     fn info_block_layout() {

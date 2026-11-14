@@ -9,9 +9,11 @@
 //! - Gouraud / flat, perspective-correct u v and colours, offset colour, the four texture
 //!   shading instructions, user tile clip
 //! - culling: 1 small (|area| < FPU_CULL_VAL), 2 / 3 by winding: mode 2 culls triangles
-//!   clockwise on screen (y down; counter-clockwise with y up, KallistiOS's "CCW"), mode 3
-//!   the others; odd triangles of a strip count reversed; small ones culled in 2 and 3 too.
-//!   (Patch 0101 had 2 / 3 the other way round: Sonic Adventure lost walls.)
+//!   counter-clockwise on screen (y down), mode 3 clockwise; odd triangles of a strip count
+//!   reversed; sprites (strip A B D C) follow the same rule; small ones culled in 2 and 3
+//!   too. Checked against Crazy Taxi frames (Gena's face, the road, the car body), and it
+//!   is the rule Flycast's renderers come to. (Patches 0101-0119 had this backwards for a
+//!   while; if Sonic Adventure loses walls, that was blamed on culling once - look elsewhere.)
 //! - mipmaps: a level per pixel from the texel / pixel ratio (u v one pixel right and down),
 //!   scaled by the TSP "D adjust"
 //! - fog: table (FOG_DENSITY, FOG_TABLE, FOG_COL_RAM), per vertex (offset alpha,
@@ -363,6 +365,44 @@ fn area(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
     (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
 }
 
+/// Screen coordinates this large (a vertex just in front of the eye, which some games send
+/// unclipped: Ready 2 Rumble's ring ropes) lose the pixel in f32 edge sums; such triangles
+/// are set up from homogeneous vertices (x/z, y/z, 1/z with z = 1/w), whose sizes stay
+/// moderate. The lines and the 1/w plane are the same, only computed without cancelling.
+const FAR: f32 = 8192.0;
+
+/// Homogeneous set-up when the triangle needs it: edges (k = opposite vertex k, positive
+/// inside) and, per vertex, w_k / |det| (λ_k = e_k(x, y) · that).
+fn homogeneous(v: [&Vert; 3]) -> Option<([(f64, f64, f64); 3], [f64; 3], f64)> {
+    if !v.iter().any(|q| q.x.abs() > FAR || q.y.abs() > FAR) { return None; }
+    if !v.iter().all(|q| q.z > 0.0 && q.z.is_finite() && q.x.is_finite() && q.y.is_finite()) { return None; }
+    let h: Vec<(f64, f64, f64)> = v.iter().map(|q| {
+        let w = 1.0 / q.z as f64;
+        (q.x as f64 * w, q.y as f64 * w, w)
+    }).collect();
+    let cross = |i: usize, j: usize| {
+        let (a, b) = (h[i], h[j]);
+        (a.1 * b.2 - a.2 * b.1, a.2 * b.0 - a.0 * b.2, a.0 * b.1 - a.1 * b.0)
+    };
+    let e = [cross(1, 2), cross(2, 0), cross(0, 1)];
+    let det = e[0].0 * h[0].0 + e[0].1 * h[0].1 + e[0].2 * h[0].2;
+    if !(det.abs() > 0.0) || !det.is_finite() { return None; }
+    let s = det.signum();
+    let e = e.map(|(a, b, c)| (a * s, b * s, c * s));
+    let wk = [h[0].2 / det.abs(), h[1].2 / det.abs(), h[2].2 / det.abs()];
+    // screen area ×2 with its sign: det / (w0 w1 w2)
+    let ar = det / (h[0].2 * h[1].2 * h[2].2);
+    Some((e, wk, ar))
+}
+
+/// Signed screen area ×2 of a strip triangle (homogeneous when the coordinates are huge).
+fn tri_area(v: [&Vert; 3]) -> f32 {
+    match homogeneous(v) {
+        Some((_, _, ar)) => ar as f32,
+        None => area((v[0].x, v[0].y), (v[1].x, v[1].y), (v[2].x, v[2].y)),
+    }
+}
+
 /// Visit the pixels of a triangle in the band of rows y0 .. y0 + h (centres; an edge pixel
 /// belongs to one side only). `f(band index, weights)` gets screen-space barycentric
 /// weights summing to 1. (Modifier volumes; polygons use `Renderer::tri`.)
@@ -430,8 +470,10 @@ fn span(e: &[(f32, f32, f32); 3], py: f32, x0: i32, x1: i32) -> Option<(i32, i32
     let (mut sx0, mut sx1) = (x0, x1);
     for k in 0..3 {
         let (a, rest) = (e[k].0, e[k].1 * py + e[k].2);
-        if a > 0.0 { sx0 = sx0.max((-rest / a - 0.5).floor() as i32 - 1); }
-        else if a < 0.0 { sx1 = sx1.min((-rest / a - 0.5).ceil() as i32 + 1); }
+        // a nearly level edge crosses the row far away: the i32 cast saturates, so the
+        // slack pixel must not wrap it round (Sonic Adventure's near-clipped floors)
+        if a > 0.0 { sx0 = sx0.max(((-rest / a - 0.5).floor() as i32).saturating_sub(1)); }
+        else if a < 0.0 { sx1 = sx1.min(((-rest / a - 0.5).ceil() as i32).saturating_add(1)); }
         else if rest < 0.0 { return None; }
     }
     if sx0 > sx1 { None } else { Some((sx0, sx1)) }
@@ -698,9 +740,9 @@ impl<'a> Renderer<'a> {
         for k in 0..v.len().saturating_sub(2) {
             let tv = [&v[k], &v[k + 1], &v[k + 2]];
             if cull != 0 {
-                let mut ar = area((tv[0].x, tv[0].y), (tv[1].x, tv[1].y), (tv[2].x, tv[2].y));
+                let mut ar = tri_area(tv);
                 if k & 1 != 0 { ar = -ar; }
-                if ar.abs() * 0.5 < cull_val || (cull == 2 && ar > 0.0) || (cull == 3 && ar < 0.0) {
+                if ar.abs() * 0.5 < cull_val || (cull == 2 && ar < 0.0) || (cull == 3 && ar > 0.0) {
                     if count { self.stats.culled += 1; }
                     continue;
                 }
@@ -714,7 +756,7 @@ impl<'a> Renderer<'a> {
            levels: &mut Option<Vec<(Tex, Texels)>>) {
         let shading = !matches!(pass, Pass::Depth(_));
         let p = [(v[0].x, v[0].y), (v[1].x, v[1].y), (v[2].x, v[2].y)];
-        let ar = area(p[0], p[1], p[2]);
+        let ar = tri_area(v);
         if !(ar.abs() > 1e-12) { return; }
         let w = self.w;
         let (x0, x1, ya, yb) = if fill {
@@ -726,11 +768,24 @@ impl<'a> Renderer<'a> {
         if shading && levels.is_none() { *levels = Some(self.levels(m)); }
         let levels: &[(Tex, Texels)] = levels.as_deref().unwrap_or(&[]);
         // barycentric gradients, then planes of z (= 1/w) and of attribute × z
+        let hom = homogeneous(v);
         let dx = [(p[1].1 - p[2].1) / ar, (p[2].1 - p[0].1) / ar, (p[0].1 - p[1].1) / ar];
         let dy = [(p[2].0 - p[1].0) / ar, (p[0].0 - p[2].0) / ar, (p[1].0 - p[0].0) / ar];
         let z3 = [v[0].z, v[1].z, v[2].z];
-        let pz = Plane::new(&p, &dx, &dy, z3);
-        let pl = |f: &dyn Fn(&Vert) -> f32| Plane::new(&p, &dx, &dy, [f(v[0]) * z3[0], f(v[1]) * z3[1], f(v[2]) * z3[2]]);
+        let plane = |vals: [f32; 3]| match &hom {
+            // value(x, y) = Σ λ_k v_k, λ_k = e_k(x, y) w_k / |det|
+            Some((e, wk, _)) => {
+                let c = [vals[0] as f64 * wk[0], vals[1] as f64 * wk[1], vals[2] as f64 * wk[2]];
+                Plane {
+                    a: (e[0].0 * c[0] + e[1].0 * c[1] + e[2].0 * c[2]) as f32,
+                    b: (e[0].1 * c[0] + e[1].1 * c[1] + e[2].1 * c[2]) as f32,
+                    c: (e[0].2 * c[0] + e[1].2 * c[1] + e[2].2 * c[2]) as f32,
+                }
+            }
+            None => Plane::new(&p, &dx, &dy, vals),
+        };
+        let pz = plane(z3);
+        let pl = |f: &dyn Fn(&Vert) -> f32| plane([f(v[0]) * z3[0], f(v[1]) * z3[1], f(v[2]) * z3[2]]);
         let (pu, pv) = if tex.is_none() { (Plane::default(), Plane::default()) }
             else if m.set1 { (pl(&|q| q.u1), pl(&|q| q.v1)) } else { (pl(&|q| q.u), pl(&|q| q.v)) };
         let need_off = m.offset || m.fog == 1;
@@ -744,7 +799,14 @@ impl<'a> Renderer<'a> {
         let (flat_b, flat_o) = if m.set1 { (v[2].base1, v[2].off1) } else { (v[2].base, v[2].off) };
         let ts = TriSetup { strip: self.dstrips.len().saturating_sub(1) as u32, pz, pu, pv, pc, flat_b, flat_o };
         let tid = if let Pass::Depth(_) = pass { self.dtris.push(ts); self.dtris.len() as u32 } else { 0 };
-        let e = edges(p, ar);
+        let e = match &hom {
+            // scaled so the largest coefficient is 1 (they can be tiny)
+            Some((he, _, _)) => {
+                let m = he.iter().flat_map(|q| [q.0.abs(), q.1.abs(), q.2.abs()]).fold(0f64, f64::max);
+                he.map(|(a, b, c)| ((a / m) as f32, (b / m) as f32, (c / m) as f32))
+            }
+            None => edges(p, ar),
+        };
         let own = [owns(e[0]), owns(e[1]), owns(e[2])];
         let pt_ref = (self.reg(PT_ALPHA_REF) & 0xFF) as f32 / 255.0;
         let test = if m.list == LIST_TRANS && !m.presort { 6 } else { m.depth };
@@ -1025,6 +1087,52 @@ pub fn write_out(regs: &[u32], col: &[u32], w: usize, h: usize, tiles: &[(u32, u
         let kval = ctrl >> 16 & 0xFF;
         let athr = ctrl >> 8 & 0xFF;
         let m = vram.len() - 1;
+        #[cfg(test)]
+        let fast_ok = !super::pvr::SLOW_OUTPUT.load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(test))]
+        let fast_ok = true;
+        let tex = base & 0x100_0000 != 0;
+        // the usual case: no scaling, 16 or 32 bits a pixel, aligned so each pixel sits in
+        // one 32-bit word; tile rows clipped up front (the general loop stays the reference)
+        if fast_ok && hs * vs == 1 && (bpp == 2 || bpp == 4) && base % bpp == 0 && stride % 4 == 0 && w % 32 == 0 && h % 32 == 0 {
+            for &(tx, ty) in tiles {
+                let (sx0, sy0) = (tx as usize * 32, ty as usize * 32);
+                if sx0 >= w || sy0 >= h { continue; }
+                let xa = sx0.max(cx0 as usize);
+                let xb = (sx0 + 32).min(cx1 as usize + 1).min(w);
+                let ya = sy0.max(cy0 as usize);
+                let yb = (sy0 + 32).min(cy1 as usize + 1).min(h);
+                if xa >= xb || ya >= yb { continue; }
+                for oy in ya..yb {
+                    let row = &col[oy * w..oy * w + w];
+                    let rbase = base.wrapping_add(oy as u32 * stride);
+                    for ox in xa..xb {
+                        let c = row[ox];
+                        let (a, rr, g, b) = (c >> 24, c >> 16 & 0xFF, c >> 8 & 0xFF, c & 0xFF);
+                        let val = match pack_mode {
+                            0 => (kval >> 7) << 15 | (rr >> 3) << 10 | (g >> 3) << 5 | b >> 3,
+                            1 => (rr >> 3) << 11 | (g >> 2) << 5 | b >> 3,
+                            2 => (a >> 4) << 12 | (rr >> 4) << 8 | (g >> 4) << 4 | b >> 4,
+                            3 => ((a >= athr) as u32) << 15 | (rr >> 3) << 10 | (g >> 3) << 5 | b >> 3,
+                            5 => kval << 24 | rr << 16 | g << 8 | b,
+                            _ => a << 24 | rr << 16 | g << 8 | b,
+                        };
+                        let ad = rbase.wrapping_add(ox as u32 * bpp) & 0x7F_FFFF;
+                        let i = (if tex { ad as usize } else { map32(ad) }) & m;
+                        if bpp == 2 {
+                            vram[i..i + 2].copy_from_slice(&(val as u16).to_le_bytes());
+                            lo = lo.min(i);
+                            hi = hi.max(i + 1);
+                        } else {
+                            vram[i..i + 4].copy_from_slice(&val.to_le_bytes());
+                            lo = lo.min(i);
+                            hi = hi.max(i + 3);
+                        }
+                    }
+                }
+            }
+            return (lo <= hi).then_some((lo, hi));
+        }
         for &(tx, ty) in tiles {
             let (sx0, sy0) = (tx as usize * 32, ty as usize * 32);
             if sx0 >= w || sy0 >= h { continue; }
@@ -1097,13 +1205,59 @@ pub struct Drawn {
 }
 
 impl Drawn {
+    /// The drawn tile area, ARGB, and its size (tests).
+    #[cfg(test)]
+    pub fn pixels(&self) -> (&[u32], usize, usize) { (&self.col, self.w, self.h) }
+
     /// Write the tiles to the framebuffer; the video RAM range written.
     pub fn write(&self, vram: &mut [u8]) -> Option<(usize, usize)> { write_out(&self.regs, &self.col, self.w, self.h, &self.tiles, vram) }
 }
 
 /// Draw the scene PARAM_BASE names (STARTRENDER). The buffer is split into horizontal bands
 /// drawn on threads of their own (each band runs the whole scene, clipped to its rows).
+/// One render's inputs, saved for a bug report (dc_frame.bin next to the debug log) and
+/// replayed by the `replay_frame` test.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct FrameDump {
+    pub regs: Vec<u32>,
+    pub scene: Option<Scene>,
+    #[serde(with = "serde_bytes")]
+    pub vram: Vec<u8>,
+}
+
+impl FrameDump {
+    fn config() -> impl bincode::config::Config { bincode::config::standard().with_fixed_int_encoding() }
+
+    /// Write dc_frame_1.bin, dc_frame_2.bin... (the first free name) next to the log, or
+    /// in the data folder when no log is open.
+    pub fn save(regs: &[u32], scene: Option<&Scene>, vram: &[u8]) {
+        let Some(dir) = crate::common::debug_log::dir() else {
+            crate::dlog!("Dreamcast: no folder to save the frame in");
+            return;
+        };
+        let Some(path) = (1..10_000).map(|n| dir.join(format!("dc_frame_{n}.bin"))).find(|p| !p.exists()) else { return };
+        let d = FrameDump { regs: regs.to_vec(), scene: scene.cloned(), vram: vram.to_vec() };
+        match bincode::serde::encode_to_vec(&d, Self::config()) {
+            Ok(b) => match std::fs::write(&path, b) {
+                Ok(()) => crate::dlog!("Dreamcast: frame saved to {} ({} polygons)", path.display(), d.scene.as_ref().map_or(0, |s| s.polys.len())),
+                Err(e) => crate::dlog!("Dreamcast: can't write {}: {e}", path.display()),
+            },
+            Err(e) => crate::dlog!("Dreamcast: can't encode the frame: {e}"),
+        }
+    }
+
+    pub fn load(b: &[u8]) -> Option<Self> {
+        bincode::serde::decode_from_slice(b, Self::config()).ok().map(|(d, _)| d)
+    }
+}
+
+/// Test tool: draw nothing (profiling the CPU side of a save state).
+#[cfg(test)]
+pub static SKIP_DRAW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn draw(regs: &[u32], scene: Option<&Scene>, vram: &[u8], cache: &TexCache) -> Drawn {
+    #[cfg(test)]
+    let scene = if SKIP_DRAW.load(std::sync::atomic::Ordering::Relaxed) { None } else { scene };
     let t0 = std::time::Instant::now();
     let tiles = region_tiles(regs, vram);
     let (mut w, mut h) = (32, 32);

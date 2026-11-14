@@ -248,6 +248,34 @@ fn cd_read_by_dma() {
     assert_eq!(g.status, DRDY | DSC);
 }
 
+/// A long read comes off the disc a few sectors at a time, by PIO or DMA, and an ATA NOP
+/// stops it with ABRT / CHECK and an interrupt (NBA 2K streams that way).
+#[test]
+fn long_reads_stream_and_nop_aborts() {
+    let mut g = drive("stream");
+    packet(&mut g, [0x30, 0x20, 0x00, 0xB0, 0x5E, 0, 0, 0, 0, 0, 10, 0]);
+    let out = pio_all(&mut g);
+    assert_eq!(out.len(), 10 * 2048);
+    for k in 0..10u32 {
+        assert!((0..2048).all(|i| out[k as usize * 2048 + i] == byte(45000 + k, i)), "sector {k}");
+    }
+    assert_eq!(g.status, DRDY | DSC);
+    g.write(0x84, 1);
+    packet(&mut g, [0x30, 0x20, 0x00, 0xB0, 0x5E + 1, 0, 0, 0, 0, 0, 9, 0]);
+    g.read(0x9C);
+    let a = g.dma_take(5 * 2048 + 100);
+    assert_eq!(a.len(), 5 * 2048 + 100);
+    assert_eq!(a[5 * 2048 + 99], byte(45006, 99));
+    g.dma_finish();
+    assert!(!g.irq, "not finished: 4 sectors to go");
+    // the host stops the drive
+    g.write(0x9C, 0x00);
+    assert!(g.irq);
+    assert_eq!(g.status & (CHECK | DRQ | BSY), CHECK);
+    assert_eq!(g.error & 0x04, 0x04, "ABRT");
+    assert!(g.dma_take(2048).is_empty());
+}
+
 #[test]
 fn reset_keeps_the_disc() {
     let mut g = drive("reset");

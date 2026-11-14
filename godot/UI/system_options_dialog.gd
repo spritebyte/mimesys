@@ -263,7 +263,7 @@ func _rebuild() -> void:
 		bcast.item_selected.connect(func(i): _put("dc_broadcast", bcasts[i][0]))
 		_row("TV standard (next load)", bcast)
 		var ratio := OptionButton.new()
-		var ratios := [["1", "1 cycle an instruction (exact clock, slowest)"], ["2", "2 cycles an instruction (default)"], ["3", "3 cycles an instruction (fastest)"]]
+		var ratios := [["1", "1 cycle an instruction (most CPU time, slowest)"], ["1.5", "1.5 cycles an instruction (default)"], ["2", "2 cycles an instruction (faster; Sonic Adventure, Crazy Taxi stall)"], ["3", "3 cycles an instruction (fastest)"]]
 		for r in ratios:
 			ratio.add_item(r[1])
 		ratio.select(max(0, ratios.map(func(r): return r[0]).find(str(_opt("dc_cpu_ratio")))))
@@ -289,6 +289,11 @@ func _rebuild() -> void:
 		rec.button_pressed = _opt("dc_record_sound")
 		rec.toggled.connect(func(on): _put("dc_record_sound", on))
 		_row("Debug", rec)
+		var dump := CheckBox.new()
+		dump.text = "Save a 3D frame (dc_frame_1.bin, _2...) each time this is ticked on"
+		dump.button_pressed = _opt("dc_dump_frame")
+		dump.toggled.connect(func(on): _put("dc_dump_frame", on))
+		_row("Debug", dump)
 		var slog := CheckBox.new()
 		slog.text = "Print a speed line every 5 seconds to debug_dc.log"
 		slog.button_pressed = _opt("dc_speed_log")

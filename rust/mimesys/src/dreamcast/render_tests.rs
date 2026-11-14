@@ -577,14 +577,14 @@ fn cull_case(cull: u32, ccw: bool) -> u16 {
 
 #[test]
 fn back_face_culling_follows_screen_winding() {
-    // mode 2 culls clockwise on screen (y down) = counter-clockwise with y up
+    // mode 2 culls counter-clockwise on screen (y down)
     assert_eq!(cull_case(0, true), 0xFFFF);
-    assert_eq!(cull_case(2, false), 0, "mode 2 culls screen-clockwise");
-    assert_eq!(cull_case(2, true), 0xFFFF);
-    assert_eq!(cull_case(3, true), 0, "mode 3 culls screen-counter-clockwise");
-    assert_eq!(cull_case(3, false), 0xFFFF);
+    assert_eq!(cull_case(2, true), 0, "mode 2 culls screen-counter-clockwise");
+    assert_eq!(cull_case(2, false), 0xFFFF);
+    assert_eq!(cull_case(3, false), 0, "mode 3 culls screen-clockwise");
+    assert_eq!(cull_case(3, true), 0xFFFF);
     // a strip keeps one facing: every second triangle counts reversed
-    for (cull, want) in [(2, 0), (3, 0xFFFF)] {
+    for (cull, want) in [(2, 0xFFFF), (3, 0)] {
         let mut r = Rig::new(0xFF00_0000);
         r.send(&[hdr(0, 0), ISP_GEQ | cull << 27, 0, 0, 0, 0, 0, 0]);
         rect(&mut r, 0.0, 0.0, 64.0, 64.0, 1.0, 0xFFFF_FFFF);
@@ -861,4 +861,69 @@ fn cpu_and_direct_path_writes_mark_video_ram() {
     assert_eq!(s, d.vram);
     assert!(d.vram.iter().any(|&b| b == 0x78), "32-bit write landed");
     assert!(d.vram.iter().any(|&b| b == 0xEF), "direct write landed");
+}
+
+/// A nearly level edge (Sonic Adventure's floor, clipped at the near plane: two vertices
+/// at y 7861.02 a couple of ulps apart) crosses each row billions of pixels away; the span
+/// must not wrap round and drop the triangle.
+#[test]
+fn a_nearly_level_far_edge_keeps_its_triangle() {
+    let mut r = Rig::new(0xFF00_0000);
+    r.send(&[hdr(0, 0), ISP_GEQ, 0, 0, 0, 0, 0, 0]);
+    let b = f32::from_bits;
+    r.send(&v0(b(0x4625_795E), b(0x45F5_A825), 1.0, 0xFFFF_FFFF, false));
+    r.send(&v0(b(0x470A_74B7), b(0x45F5_A827), 1.0, 0xFFFF_FFFF, false));
+    r.send(&v0(b(0x4334_DE9A), b(0x4393_FD9C), b(0x3C91_B86F), 0xFFFF_FFFF, true));
+    r.end_list();
+    r.render();
+    // the triangle widens down from (181, 296): about x 227-338 at row 330, 419-991 at 470
+    assert_eq!(px565(&r.vram, 280, 330), 0xFFFF);
+    assert_eq!(px565(&r.vram, 500, 470), 0xFFFF);
+    assert_eq!(px565(&r.vram, 100, 330), 0);
+}
+
+/// The word-at-a-time framebuffer write and picture output give exactly what the per-pixel
+/// reference loops give, over pack modes, clips, strides, scaling, line doubling.
+#[test]
+fn fast_framebuffer_paths_match_the_reference() {
+    use super::pvr::{self, Pvr, SLOW_OUTPUT};
+    use std::sync::atomic::Ordering;
+    let mut seed = 0x1357_9BDFu32;
+    let mut next = move || { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; seed };
+    let (w, h) = (640usize, 480usize);
+    let col: Vec<u32> = (0..w * h).map(|_| next()).collect();
+    let tiles: Vec<(u32, u32)> = (0..15).flat_map(|y| (0..20).map(move |x| (x, y))).collect();
+    for case in 0..24u32 {
+        let mut regs = vec![0u32; 0x800];
+        let pack = [0, 1, 2, 3, 5, 6][case as usize % 6];
+        regs[render::FB_W_CTRL as usize / 4] = pack | (next() & 0xFF) << 8 | (next() & 0xFF) << 16;
+        let bpp = if pack >= 5 { 4 } else { 2 };
+        regs[render::FB_W_LINESTRIDE as usize / 4] = (640 * bpp + 8 * (case % 3)) / 8;
+        regs[render::FB_W_SOF1 as usize / 4] = 0x20_0000 + 4 * (case % 4) + if case % 5 == 0 { 0x100_0000 } else { 0 };
+        regs[render::FB_X_CLIP as usize / 4] = if case % 2 == 0 { 639 << 16 } else { 600 << 16 | 17 };
+        regs[render::FB_Y_CLIP as usize / 4] = if case % 2 == 0 { 479 << 16 } else { 400 << 16 | 5 };
+        regs[render::SCALER_CTL as usize / 4] = if case % 7 == 6 { 0x1_0400 } else { 0x400 };
+        let mut a = vec![0u8; 8 << 20];
+        let mut b = a.clone();
+        SLOW_OUTPUT.store(true, Ordering::Relaxed);
+        let ra = render::write_out(&regs, &col, w, h, &tiles, &mut a);
+        SLOW_OUTPUT.store(false, Ordering::Relaxed);
+        let rb = render::write_out(&regs, &col, w, h, &tiles, &mut b);
+        assert!(a == b && ra == rb, "write-out case {case}");
+        // read it back out as the display would
+        let mut p = Pvr::new();
+        p.regs[pvr::FB_R_CTRL as usize / 4] = 1 | [1u32, 0, 3][case as usize % 3] << 2 | (case & 8 != 0) as u32 * 2;
+        p.regs[pvr::FB_R_SOF1 as usize / 4] = 0x20_0000 + 4 * (case % 2);
+        p.regs[pvr::FB_R_SOF1 as usize / 4 + 1] = 0x20_0000 + 0x500;
+        let words = if case % 3 == 2 { 640 } else { 320 } - if case % 4 == 3 { 40 } else { 0 };
+        p.regs[pvr::FB_R_SIZE as usize / 4] = (words - 1) | 239 << 10 | 1 << 20;
+        if case & 16 != 0 { p.regs[pvr::VO_CONTROL as usize / 4] |= 0x100; } else { p.regs[pvr::VO_CONTROL as usize / 4] &= !0x100; }
+        if case % 3 == 1 { p.regs[pvr::SPG_CONTROL as usize / 4] |= 0x10; }
+        let (mut oa, mut ob) = (vec![0u8; 640 * 480 * 4], vec![0u8; 640 * 480 * 4]);
+        SLOW_OUTPUT.store(true, Ordering::Relaxed);
+        p.output(&a, &mut oa);
+        SLOW_OUTPUT.store(false, Ordering::Relaxed);
+        p.output(&a, &mut ob);
+        assert!(oa == ob, "output case {case}");
+    }
 }

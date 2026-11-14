@@ -375,6 +375,14 @@ impl Disc {
     }
 
     /// The track a sector belongs to (its pregap counts as part of it).
+    /// Test tool: a disc whose every sector reads as an empty data sector (headers, zero
+    /// data), for running save states without the game's disc.
+    #[cfg(test)]
+    pub fn blank(leadout: u32) -> Self {
+        let t = Track { number: 1, kind: TrackKind::Mode1Cooked, start: 0, pregap: 0, length: leadout, file: 0, offset: 0, swap: false, silent_until: leadout, sector_size: 2048 };
+        Self { files: Vec::new(), chd: None, tracks: vec![t], leadout, gd: true }
+    }
+
     pub fn track_at(&self, lba: u32) -> Option<&Track> {
         self.tracks.iter().rev().find(|t| lba >= t.pregap).filter(|_| lba < self.leadout)
     }

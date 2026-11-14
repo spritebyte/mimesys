@@ -220,6 +220,37 @@ impl Pvr {
                 continue;
             }
             let line = base.wrapping_add(src_line * stride);
+            // the usual case a word at a time: 16 or 32 bits a pixel, the line word-aligned
+            // and wide enough (the slow loop below stays the reference)
+            #[cfg(test)]
+            let fast_ok = !SLOW_OUTPUT.load(std::sync::atomic::Ordering::Relaxed);
+            #[cfg(not(test))]
+            let fast_ok = true;
+            let need = if hdouble { OUT_W / 2 } else { OUT_W };
+            if fast_ok && depth != 2 && line & 3 == 0 && width >= need {
+                let per = 4 / bpp as usize; // pixels a word
+                let mut px = [[0u8; 4]; 2];
+                for k in 0..need.div_ceil(per) {
+                    let i = map32(line.wrapping_add(4 * k as u32) & 0x7F_FFFF);
+                    let w = u32::from_le_bytes([vram[i], vram[i + 1], vram[i + 2], vram[i + 3]]);
+                    let n = match depth {
+                        0 => { for (j, c) in [w & 0xFFFF, w >> 16].into_iter().enumerate() { px[j] = [(c >> 7 & 0xF8) as u8, (c >> 2 & 0xF8) as u8, (c << 3 & 0xF8) as u8, 0xFF]; } 2 }
+                        1 => { for (j, c) in [w & 0xFFFF, w >> 16].into_iter().enumerate() { px[j] = [(c >> 8 & 0xF8) as u8, (c >> 3 & 0xFC) as u8, (c << 3 & 0xF8) as u8, 0xFF]; } 2 }
+                        _ => { px[0] = [(w >> 16) as u8, (w >> 8) as u8, w as u8, 0xFF]; 1 }
+                    };
+                    for j in 0..n {
+                        let sx = k * per + j;
+                        if sx >= need { break; }
+                        if hdouble {
+                            row[sx * 8..sx * 8 + 4].copy_from_slice(&px[j]);
+                            row[sx * 8 + 4..sx * 8 + 8].copy_from_slice(&px[j]);
+                        } else {
+                            row[sx * 4..sx * 4 + 4].copy_from_slice(&px[j]);
+                        }
+                    }
+                }
+                continue;
+            }
             for x in 0..OUT_W {
                 let sx = if hdouble { x / 2 } else { x };
                 let px = &mut row[x * 4..x * 4 + 4];
@@ -235,6 +266,11 @@ impl Pvr {
         }
     }
 }
+
+/// Test tool: take the per-pixel paths of the picture output and the framebuffer write
+/// (the references the word-at-a-time paths are checked against).
+#[cfg(test)]
+pub static SLOW_OUTPUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Video RAM is two 4 MB banks side by side 32 bits at a time: the "64-bit" view (textures,
 /// 04000000) is linear; the "32-bit" view (framebuffers, 05000000) has bank 0 in its low

@@ -401,6 +401,12 @@ impl EmuSystem {
         crate::common::debug_log::set_path(&path.to_string());
     }
 
+    /// The frontend's data folder as a real path (debug files land there when no log is open).
+    #[func]
+    fn set_data_dir(&mut self, path: GString) {
+        crate::common::debug_log::set_data_dir(&path.to_string());
+    }
+
     #[func]
     fn set_option(&mut self, key: GString, value: i64) {
         if key.to_string() == "frame_blend" { self.blend.set_mode(value as u8); return; }

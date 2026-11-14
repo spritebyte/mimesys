@@ -18,6 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
+mod fast;
 mod fparith;
 mod fpu;
 
@@ -37,6 +38,16 @@ pub trait Sh4Bus {
     fn pref(&mut self, _a: u32) {}
     /// LDTLB: PTEH / PTEL go into the TLB entry at MMUCR.URC.
     fn ldtlb(&mut self) {}
+    /// The MMU translates addresses: instructions then run through `step_mmu`, which can
+    /// undo one that faults.
+    fn mmu(&self) -> bool { false }
+    /// Before each instruction with the MMU on: privileged mode (SR.MD)?
+    fn mmu_priv(&mut self, _md: bool) {}
+    /// After it: the TLB exception one of its accesses raised (EXPEVT), if any.
+    fn mmu_fault(&mut self) -> Option<u32> { None }
+    /// For `Sh4::run`: false while no interrupt is asking and the MMU is off, so the loop
+    /// can skip both checks (true is always safe).
+    fn attention(&self) -> bool { true }
     /// An exception or interrupt was taken: the value for the CCN register (TRA, EXPEVT or
     /// INTEVT).
     fn event(&mut self, _reg: Event, _value: u32) {}
@@ -259,28 +270,129 @@ impl Sh4 {
     /// can look at it. One call runs many instructions, so the per-instruction cost stays
     /// in one loop.
     pub fn run<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, target: u64, cpi: u64, mut loops: Option<&mut (u32, u32)>) -> RunExit {
-        while bus.now() < target {
-            if let Some((level, code)) = bus.irq() {
-                if self.accepts(level) { self.interrupt(bus, code); }
-            }
-            if self.sleeping { return RunExit::Sleep; }
-            let pc = self.pc;
+        // `step_fused` wants to start between instructions, not between a branch and its
+        // slot (a state saved by the single-stepping path can be there)
+        if self.pending.is_some() && bus.now() < target && !self.sleeping {
             self.step(bus);
             bus.tick(cpi);
-            let to = self.pc;
-            if to < pc && pc - to <= 64 {
-                if let Some(l) = loops.as_deref_mut() {
-                    if to == l.0 { l.1 += 1; } else { *l = (to, 1); }
-                    if l.1 == 4 { return RunExit::Loop { to, last: pc }; }
+        }
+        if let Some((level, code)) = bus.irq() {
+            if self.accepts(level) { self.interrupt(bus, code); }
+        }
+        if self.sleeping { return RunExit::Sleep; }
+        while bus.now() < target {
+            let mut pc = self.pc;
+            let (to, check) = if bus.attention() {
+                if let Some((level, code)) = bus.irq() {
+                    if self.accepts(level) { self.interrupt(bus, code); pc = self.pc; }
+                }
+                if bus.mmu() {
+                    self.step_mmu(bus);
+                    bus.tick(cpi);
+                    (self.pc, true)
+                } else {
+                    self.step_fast_cold(bus, pc, cpi)
+                }
+            } else {
+                self.step_fast(bus, pc, cpi)
+            };
+            if !check { continue; }
+            // the PC didn't move on: a jump back, or SLEEP (which stays on itself)
+            if to <= pc {
+                if self.sleeping {
+                    match bus.irq() {
+                        Some((level, code)) if self.accepts(level) => self.interrupt(bus, code),
+                        _ => return RunExit::Sleep,
+                    }
+                } else if to < pc && pc - to <= 64 {
+                    if let Some(l) = loops.as_deref_mut() {
+                        if to == l.0 { l.1 += 1; } else { *l = (to, 1); }
+                        if l.1 == 4 {
+                            // `last`: the branch, or its delay slot when it has one
+                            let k = fast::KIND[bus.fetch16(pc) as usize];
+                            let last = if k == fast::K_BT || k == fast::K_BF { pc } else { pc.wrapping_add(2) };
+                            return RunExit::Loop { to, last };
+                        }
+                    }
                 }
             }
         }
         RunExit::Done
     }
 
+    /// One instruction at `pc` (= `self.pc`) and, when it is a delayed branch, its delay
+    /// slot too (nothing can come between them anyway: interrupts wait for the slot).
+    /// Counts their cycles and returns the new PC and whether the loop / SLEEP check is
+    /// worth making (the PC may not have moved forward). Expects `pending` empty on entry and
+    /// leaves it empty. The common instructions go through `fast`; the rest, and everything while the MMU
+    /// is on, through the general `execute`.
+    #[inline(always)]
+    fn step_fast<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, pc: u32, cpi: u64) -> (u32, bool) {
+        let op = bus.fetch16(pc);
+        match self.fast(bus, pc, op, fast::KIND[op as usize]) {
+            fast::Flow::Next => { let to = pc.wrapping_add(2); self.pc = to; bus.tick(cpi); (to, false) }
+            fast::Flow::Jump(to) => { self.pc = to; bus.tick(cpi); (to, true) }
+            fast::Flow::Done => { bus.tick(cpi); (self.pc, false) }
+            fast::Flow::Delayed(to) => { self.slot_fast(bus, pc, to); bus.tick(2 * cpi); (self.pc, true) }
+            fast::Flow::Slow => { let n = self.step_general(bus, pc, op); bus.tick(cpi * n); (self.pc, true) }
+        }
+    }
+
+    /// `step_fast` out of line, for the iterations that had something to check first.
+    #[inline(never)]
+    fn step_fast_cold<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, pc: u32, cpi: u64) -> (u32, bool) {
+        self.step_fast(bus, pc, cpi)
+    }
+
+    /// The delay slot (at `pc` + 2) of the fast-path branch at `pc`, then on to `to`.
+    #[inline(always)]
+    fn slot_fast<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, pc: u32, to: u32) {
+        let spc = pc.wrapping_add(2);
+        let op = bus.fetch16(spc);
+        let k = fast::KIND[op as usize];
+        self.branch_pc = pc;
+        if k != 0 && k < fast::K_FIRST_SENSITIVE {
+            let _ = self.fast(bus, spc, op, k);
+            self.pc = to;
+        } else {
+            self.pc = spc;
+            self.slot(bus, to);
+        }
+    }
+
+    /// An instruction the fast path doesn't have (already fetched), the general way.
+    #[inline(never)]
+    fn step_general<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, pc: u32, op: u16) -> u64 {
+        self.in_slot = false;
+        self.cur = pc;
+        self.trapped = false;
+        self.pc = pc.wrapping_add(2);
+        self.execute(bus, op, None);
+        match self.pending.take() {
+            None => 1,
+            Some(t) => { self.slot(bus, t); 2 }
+        }
+    }
+
+    /// The delay slot of a branch to `t` that just ran.
+    #[inline(never)]
+    fn slot<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, t: u32) {
+        self.in_slot = true;
+        self.cur = self.pc;
+        self.trapped = false;
+        let op = bus.fetch16(self.cur);
+        self.pc = self.cur.wrapping_add(2);
+        self.execute(bus, op, Some(t));
+        if !self.trapped {
+            self.pc = t;
+            if let Some(sr) = self.pending_sr.take() { self.set_sr(sr); }
+        }
+    }
+
     /// Run one instruction.
     #[inline(always)]
     pub fn step<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B) {
+        if bus.mmu() { return self.step_mmu(bus); }
         if self.sleeping { return; }
         let pending = self.pending.take();
         self.in_slot = pending.is_some();
@@ -295,6 +407,42 @@ impl Sh4 {
                 if let Some(sr) = self.pending_sr.take() { self.set_sr(sr); }
             }
         }
+    }
+
+    /// One instruction with the MMU on: if the fetch or an access faults, the registers go
+    /// back to what they were before it and the TLB exception is taken (SPC = the
+    /// instruction, or its branch when it's a delay slot), so the handler can load the TLB
+    /// and re-run it.
+    #[inline(never)]
+    fn step_mmu<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B) {
+        if self.sleeping { return; }
+        let saved = self.clone();
+        bus.mmu_priv(self.sr_hi & SR_MD != 0);
+        let pending = self.pending.take();
+        self.in_slot = pending.is_some();
+        self.cur = self.pc;
+        self.trapped = false;
+        let op = bus.fetch16(self.cur);
+        if let Some(code) = bus.mmu_fault() { return self.tlb_exception(bus, saved, code); }
+        self.pc = self.cur.wrapping_add(2);
+        self.execute(bus, op, pending);
+        if let Some(code) = bus.mmu_fault() { return self.tlb_exception(bus, saved, code); }
+        if let Some(t) = pending {
+            if !self.trapped {
+                self.pc = t;
+                if let Some(sr) = self.pending_sr.take() { self.set_sr(sr); }
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn tlb_exception<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, saved: Sh4, code: u32) {
+        let ret = if saved.pending.is_some() { saved.branch_pc } else { saved.pc };
+        *self = saved;
+        bus.event(Event::Expevt, code);
+        // TLB misses have their own vector
+        let offset = if code == 0x040 || code == 0x060 { 0x400 } else { 0x100 };
+        self.enter(ret, offset);
     }
 
     #[inline(always)]
@@ -697,3 +845,5 @@ impl Sh4 {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod fast_tests;

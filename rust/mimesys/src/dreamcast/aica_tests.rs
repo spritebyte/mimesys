@@ -188,3 +188,18 @@ fn sound_speed() {
     a.advance(SAMPLE_RATE);
     println!("sound: {:.1} ms per emulated second (32 channels + DSP)", t.elapsed().as_secs_f64() * 1000.0);
 }
+
+#[test]
+fn arm_unaligned_ldr_rotates_once() {
+    // LDR r0, [r1] at an address 2 bytes into a word: the word rotated right by 16
+    // (Manatee's DSP lock byte at 12476 hung on a double rotation)
+    use crate::common::cpu::arm::arm7tdmi::Arm7tdmi;
+    let mut a = super::aica::Aica::new(0);
+    a.wave[0..4].copy_from_slice(&0xE591_0000u32.to_le_bytes());
+    a.wave[0x100..0x104].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+    let mut arm = Arm7tdmi::new();
+    arm.r[1] = 0x102;
+    arm.jump(&mut a, 0);
+    arm.step(&mut a);
+    assert_eq!(arm.r[0], 0x2211_4433);
+}
