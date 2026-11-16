@@ -15,6 +15,7 @@
 // Returns every plausible system, best first. The frontend loads the best one straight away
 // when it's clear (score >= 80, or 30+ ahead of the next) and asks otherwise.
 // System ids are the ones the system factory takes: nes gb gbc gba sms gg md coleco pce a2600 a7800 a5200 lynx snes mcd.
+//      PlayStation: a .cue / .iso / .chd path whose sector 16 names PLAYSTATION
 //      Sega CD: a .cue / .iso path ("MCDP" + path) whose sector 0 starts SEGADISCSYSTEM
 //      Dreamcast: a .gdi / .chd / .cdi path, or the 2 MB BIOS (dc_boot.bin) to start with no disc
 //      Genesis "SEGA" at 0x100 (or an interleaved .smd dump)
@@ -59,6 +60,10 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
     // ---- 1. headers ----
     // a disc image: the frontend sends its path ("MCDP" + path), the disc is read here
     if data.starts_with(crate::segacd::PATH_MAGIC) {
+        // PlayStation: the disc's volume descriptor says PLAYSTATION
+        if matches!(ext.as_str(), "cue" | "iso" | "chd") && crate::ps1::open_disc(data).is_ok() {
+            return vec![Guess { system: "ps1", score: 100, why: format!("PlayStation disc (.{ext})") }];
+        }
         // Dreamcast discs: by extension (stage 2 boots the BIOS with the tray empty)
         if matches!(ext.as_str(), "gdi" | "chd" | "cdi") {
             return vec![Guess { system: "dc", score: 100, why: format!("Dreamcast disc image (.{ext})") }];

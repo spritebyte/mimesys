@@ -14,6 +14,7 @@
 
 use super::cdrom::Cdrom;
 use super::gpu::Gpu;
+use super::mdec::Mdec;
 use super::sio::Sio;
 use super::spu::Spu;
 use super::timers::Timers;
@@ -37,7 +38,7 @@ pub struct DmaChannel {
     pub chcr: u32,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Bus {
     pub ram: Vec<u8>,
     #[serde(skip)]
@@ -55,20 +56,41 @@ pub struct Bus {
     pub cdrom: Cdrom,
     pub spu: Spu,
     pub sio: Sio,
-    /// MDEC: registers only for now (stage 7)
-    mdec_ctrl: u32,
+    pub mdec: Mdec,
     /// extra cycles the last accesses cost (wait states), collected by the system
     #[serde(skip)]
     pub wait: u32,
     /// characters from the debug UART (expansion 2)
     #[serde(skip)]
     pub tty: Vec<u8>,
+    #[serde(skip)]
+    dma_logged: u32,
+    #[serde(skip)]
+    big_logged: u32,
+    #[serde(skip)]
+    cd_dma_logged: u32,
+    /// the CPU's pc, for the logs
+    #[serde(skip)]
+    pub cpu_pc: u32,
+    #[serde(skip)]
+    dma_routine: u32,
+}
+
+/// The BIOS's region letter, from "System ROM Version 2.2 12/04/95 A" near its end
+pub fn bios_region(bios: &[u8]) -> u8 {
+    let key = b"System ROM Version";
+    bios.windows(key.len()).position(|w| w == key)
+        .and_then(|at| bios[at..(at + 40).min(bios.len())].iter().position(|&c| c == 0).map(|end| (at, end)))
+        .and_then(|(at, end)| bios.get(at + end - 1).copied())
+        .filter(|c| c.is_ascii_uppercase())
+        .unwrap_or(b'A')
 }
 
 impl Bus {
     pub fn new(bios: Vec<u8>) -> Self {
         let mut b = bios;
         b.resize(BIOS_SIZE, 0xFF);
+        let region = bios_region(&b);
         Self {
             ram: vec![0; RAM_SIZE],
             bios: b,
@@ -82,12 +104,17 @@ impl Bus {
             com_delay: 0,
             timers: Timers::new(),
             gpu: Gpu::new(),
-            cdrom: Cdrom::new(),
+            cdrom: Cdrom::new(None, region),
             spu: Spu::new(),
             sio: Sio::new(),
-            mdec_ctrl: 0,
+            mdec: Mdec::new(),
             wait: 0,
             tty: Vec::new(),
+            dma_logged: 0,
+            big_logged: 0,
+            cd_dma_logged: 0,
+            cpu_pc: 0,
+            dma_routine: 0,
         }
     }
 
@@ -129,11 +156,13 @@ impl Bus {
             0x0F0..=0x0F3 => self.dpcr >> ((o & 3) * 8),
             0x0F4..=0x0F7 => self.dicr >> ((o & 3) * 8),
             0x100..=0x12F => self.timers.read(a & !3) >> ((o & 3) * 8),
+            // the data FIFO gives as many bytes as the read is wide
+            0x802 if size > 1 => (0..size).fold(0, |v, k| v | (self.cdrom.read(a) as u32) << (8 * k)),
             0x800..=0x803 => self.cdrom.read(a) as u32,
             0x810 => self.gpu.read(),
             0x814 => self.gpu.status(),
-            0x820 => 0,
-            0x824 => 0x8004_0000 | self.mdec_ctrl,           // MDEC idle, input FIFO empty
+            0x820 => self.mdec.read(),
+            0x824 => self.mdec.status(),
             0xC00..=0xFFF => {
                 let v = self.spu.read16(a & !1) as u32;
                 if size == 4 { v | (self.spu.read16((a & !1) + 2) as u32) << 16 } else { v >> ((a & 1) * 8) }
@@ -142,8 +171,51 @@ impl Bus {
         }
     }
 
+    /// A 32-bit register's current value, without read side effects (for narrow writes)
+    fn reg32(&self, o: u32) -> Option<u32> {
+        let o = o & !3;
+        Some(match o {
+            0x000..=0x023 => self.mem_ctrl[(o >> 2) as usize],
+            0x060 => self.ram_size,
+            0x074 => self.i_mask,
+            0x080..=0x0EF => {
+                let ch = &self.dma[((o - 0x80) >> 4) as usize];
+                match o & 0xC { 0 => ch.madr, 4 => ch.bcr, 8 => ch.chcr, _ => return None }
+            }
+            0x0F0 => self.dpcr,
+            0x0F4 => self.dicr & 0x00FF_803F,                 // flags: see io_write
+            0x100..=0x12F => {
+                let n = ((o >> 4) & 3) as usize;
+                if n > 2 { return None; }
+                let t = &self.timers.t[n];
+                match o & 0xF { 0 => t.count, 4 => t.mode & 0x3FF, 8 => t.target, _ => return None }
+            }
+            _ => return None,
+        })
+    }
+
     fn io_write(&mut self, a: u32, v: u32, size: u32) {
         let o = a & 0xFFF;
+        // A byte / halfword write to a 32-bit register lands in its byte lane: merge it
+        // with the rest (the BIOS and libraries write DICR's enable byte with SB, say).
+        // DICR's flags (24-30) are write-1-to-clear, so only the written lane can clear.
+        if size < 4 && !(0x070..=0x073).contains(&o) {
+            if let Some(cur) = self.reg32(o) {
+                let sh = (o & 3) * 8;
+                let mask = (((1u64 << (size * 8)) - 1) as u32) << sh;
+                let merged = (cur & !mask) | ((v << sh) & mask);
+                if o & !3 == 0x0F4 {
+                    // flags outside the lane stay as they are
+                    let keep = self.dicr & 0x7F00_0000 & !mask;
+                    let clear = (v << sh) & mask & 0x7F00_0000;
+                    let flags = self.dicr & 0x7F00_0000 & !clear;
+                    self.dicr = (merged & 0x00FF_803F) | flags | keep | (self.dicr & 0x8000_0000);
+                    self.update_dicr();
+                    return;
+                }
+                return self.io_write(a & !3, merged, 4);
+            }
+        }
         match o {
             0x000..=0x023 => self.mem_ctrl[(o >> 2) as usize] = v,
             0x040..=0x04F => self.sio.write(a, v),
@@ -183,7 +255,11 @@ impl Bus {
             0x800..=0x803 => self.cdrom.write(a, v as u8),
             0x810 => self.gpu.gp0(v),
             0x814 => self.gpu.gp1(v),
-            0x820 | 0x824 => if o == 0x824 { self.mdec_ctrl = v & 0x6000_0000 },
+            0x820 => {
+                self.mdec.write(v);
+                self.try_dma(1);
+            }
+            0x824 => self.mdec.control(v),
             0xC00..=0xFFF => {
                 self.spu.write16(a & !1, v as u16);
                 if size == 4 { self.spu.write16((a & !1) + 2, (v >> 16) as u16); }
@@ -211,6 +287,15 @@ impl Bus {
         let sync = (ch.chcr >> 9) & 3;
         let trigger = ch.chcr & 0x1000_0000 != 0;
         if !(enabled && busy && (sync != 0 || trigger)) { return; }
+        // (whole-sector CD reads are frequent: only the first 20 of those)
+        let routine = n == 3 && ch.bcr == 0x0001_0200;
+        if matches!(n, 0 | 1 | 3) && self.dma_logged < 300 && !(routine && self.dma_routine >= 20) {
+            self.dma_logged += 1;
+            if routine { self.dma_routine += 1; }
+            println!("PS1 DMA{n}: madr {:06X} bcr {:08X} chcr {:08X} (MDEC output {} words)", ch.madr, ch.bcr, ch.chcr, self.mdec.out_words());
+        }
+        // MDEC out waits until the decoder has that much output
+        if n == 1 && self.mdec.out_words() < Self::dma_words(&ch) { return; }
         match sync {
             2 => self.dma_list(n),
             _ => self.dma_block(n),
@@ -225,18 +310,32 @@ impl Bus {
             self.dicr |= 1 << (24 + n);
         }
         self.update_dicr();
+        // MDEC in may have produced what a waiting MDEC out needs
+        if n == 0 { self.try_dma(1); }
+    }
+
+    fn dma_words(ch: &DmaChannel) -> usize {
+        if (ch.chcr >> 9) & 3 == 0 {
+            let w = ch.bcr & 0xFFFF;
+            if w == 0 { 0x1_0000 } else { w as usize }
+        } else {
+            ((ch.bcr & 0xFFFF).max(1) * (ch.bcr >> 16).max(1)) as usize
+        }
     }
 
     fn dma_block(&mut self, n: usize) {
         let ch = self.dma[n];
-        let sync = (ch.chcr >> 9) & 3;
-        let words = if sync == 0 {
-            let w = ch.bcr & 0xFFFF;
-            if w == 0 { 0x1_0000 } else { w }
-        } else {
-            (ch.bcr & 0xFFFF).max(1) * (ch.bcr >> 16).max(1)
-        };
+        let words = Self::dma_words(&ch) as u32;
         let from_ram = ch.chcr & 1 != 0;
+        // bring-up: big transfers into RAM, and CD reads while streaming
+        if !from_ram && n != 6 && words >= 0x400 && self.big_logged < 100 {
+            self.big_logged += 1;
+            println!("PS1 DMA{n} -> RAM: {words} words to {:06X} (bcr {:08X} chcr {:08X}) at pc {:08X}", ch.madr, ch.bcr, ch.chcr, self.cpu_pc);
+        }
+        if n == 3 && self.cd_dma_logged < 120 && self.cdrom.streaming() {
+            self.cd_dma_logged += 1;
+            println!("PS1 DMA3 stream: {words} words to {:06X}, FIFO {} at pc {:08X}", ch.madr, self.cdrom.fifo_state(), self.cpu_pc);
+        }
         let step: i32 = if ch.chcr & 2 != 0 { -4 } else { 4 };
         let mut addr = ch.madr & 0x1F_FFFC;
         for k in 0..words {
@@ -244,6 +343,7 @@ impl Bus {
             if from_ram {
                 let w = u32::from_le_bytes(self.ram[a..a + 4].try_into().unwrap());
                 match n {
+                    0 => self.mdec.write(w),
                     2 => self.gpu.gp0(w),
                     4 => self.spu.dma_write(w),
                     _ => {}
@@ -251,7 +351,9 @@ impl Bus {
             } else {
                 let w = match n {
                     6 => if k == words - 1 { 0x00FF_FFFF } else { addr.wrapping_sub(4) & 0x1F_FFFF },
+                    1 => self.mdec.read(),
                     2 => self.gpu.read(),
+                    3 => self.cdrom.dma_word(),
                     4 => self.spu.dma_read(),
                     _ => 0,
                 };

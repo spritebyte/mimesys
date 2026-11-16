@@ -282,6 +282,8 @@ fn dump_state() {
     let path = std::env::var("PS1_STATE").unwrap();
     let data = std::fs::read(&path).unwrap();
     let mut s = Ps1System::from_rom(&vec![0u8; BIOS_SIZE], "scph1001.bin", &[]).unwrap();
+    // the state names the game it was saved from
+    s.save_filename = std::env::var("PS1_NAME").unwrap_or_else(|_| "scph1001".into());
     s.load_state(&data).unwrap();
     std::fs::write(format!("{path}.ram"), &s.bus.ram).unwrap();
     let c = &s.cpu;
@@ -290,6 +292,9 @@ fn dump_state() {
     eprintln!("I_STAT {:X} I_MASK {:X} DPCR {:08X} DICR {:08X}", s.bus.i_stat, s.bus.i_mask, s.bus.dpcr, s.bus.dicr);
     for (n, d) in s.bus.dma.iter().enumerate() { eprintln!("dma{n} madr {:08X} bcr {:08X} chcr {:08X}", d.madr, d.bcr, d.chcr); }
     for (n, t) in s.bus.timers.t.iter().enumerate() { eprintln!("t{n} count {:X} mode {:X} target {:X}", t.count, t.mode, t.target); }
+    eprintln!("MDEC {}", s.bus.mdec.debug());
+    eprintln!("CD {}", s.bus.cdrom.debug());
+    if std::env::var("PS1_RUN").is_err() { return; }
     // run on: how often is the CPU outside an exception handler?
     for f in 0..20 {
         let mut out = 0;
@@ -299,4 +304,269 @@ fn dump_state() {
         }
         eprintln!("chunk {f}: interrupts on {out}/1000, pc {:08X}, I_STAT {:X}", s.cpu.pc, s.bus.i_stat);
     }
+}
+
+// ---------------------------------------------------------------- CD-ROM
+
+/// A 40-sector MODE2/2352 disc: sector 16 is a PLAYSTATION volume descriptor, sector 20 an
+/// XA audio sector, the rest hold their LBA in the first data bytes.
+fn make_disc(dir_name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(dir_name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut bin = Vec::new();
+    for lba in 0..40u32 {
+        let mut s = vec![0u8; 2352];
+        s[1..11].fill(0xFF);
+        let msf = lba + 150;
+        let b = |v: u32| ((v / 10) << 4 | (v % 10)) as u8;
+        s[12] = b(msf / 75 / 60);
+        s[13] = b(msf / 75 % 60);
+        s[14] = b(msf % 75);
+        s[15] = 2;
+        s[24..28].copy_from_slice(&lba.to_le_bytes());
+        if lba == 16 {
+            s[24] = 1;
+            s[25..30].copy_from_slice(b"CD001");
+            s[32..43].copy_from_slice(b"PLAYSTATION");
+        }
+        if lba == 20 { s[18] = 0x64; s[22] = 0x64; }   // submode: real-time audio
+        bin.extend_from_slice(&s);
+    }
+    std::fs::write(dir.join("game.bin"), &bin).unwrap();
+    std::fs::write(dir.join("game.cue"), "FILE \"game.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n").unwrap();
+    dir.join("game.cue")
+}
+
+fn blob(p: &std::path::Path) -> Vec<u8> {
+    let mut b = b"MCDP".to_vec();
+    b.extend_from_slice(p.to_str().unwrap().as_bytes());
+    b
+}
+
+/// Send a command; return each interrupt's (type, response) until `n` have come
+fn cd(b: &mut Bus, c: u8, params: &[u8], n: usize) -> Vec<(u8, Vec<u8>)> {
+    b.write8(0x1F80_1800, 0);
+    for &p in params { b.write8(0x1F80_1802, p); }
+    b.write8(0x1F80_1801, c);
+    let mut out = vec![];
+    for _ in 0..4000 {
+        b.tick(1000);
+        b.write8(0x1F80_1800, 1);
+        let f = b.read8(0x1F80_1803) & 7;
+        if f != 0 {
+            let mut r = vec![];
+            while b.read8(0x1F80_1800) & 0x20 != 0 { r.push(b.read8(0x1F80_1801)); }
+            out.push((f, r));
+            if out.len() == n { return out; }
+            b.write8(0x1F80_1803, 0x1F);
+        }
+    }
+    out
+}
+
+fn ack(b: &mut Bus) {
+    b.write8(0x1F80_1800, 1);
+    b.write8(0x1F80_1803, 0x1F);
+}
+
+#[test]
+fn cdrom_reads_a_disc() {
+    let cue = make_disc("mimesys_ps1_cd1");
+    let disc = open_disc(&blob(&cue)).unwrap();
+    assert!(crate::common::rom_detect::detect(&blob(&cue), cue.to_str().unwrap()).iter().any(|g| g.system == "ps1"));
+    let mut b = Bus::new(vec![]);
+    b.cdrom = super::cdrom::Cdrom::new(Some(disc), b'A');
+    b.write8(0x1F80_1800, 1);
+    b.write8(0x1F80_1802, 0x1F);
+    // GetID: licensed, America
+    let r = cd(&mut b, 0x1A, &[], 2);
+    assert_eq!(r[0].0, 3);
+    ack(&mut b);
+    assert_eq!(r[1].0, 2);
+    assert_eq!(&r[1].1[4..8], b"SCEA");
+    ack(&mut b);
+    // GetTN, GetTD(0) = lead-out at 40 + 150 frames = 00:02
+    let r = cd(&mut b, 0x13, &[], 1);
+    assert_eq!(r[0].1[1..3], [1, 1]);
+    ack(&mut b);
+    let r = cd(&mut b, 0x14, &[0], 1);
+    assert_eq!(r[0].1[1..3], [0x00, 0x02]);
+    ack(&mut b);
+    // Setloc 00:02:16 (LBA 16), double speed, ReadN: INT3, then INT1 with the sector
+    cd(&mut b, 0x0E, &[0x80], 1);
+    ack(&mut b);
+    cd(&mut b, 0x02, &[0x00, 0x02, 0x16], 1);
+    ack(&mut b);
+    let r = cd(&mut b, 0x06, &[], 2);
+    assert_eq!(r[0].0, 3);
+    assert_eq!(r[1].0, 1, "a sector is ready");
+    assert_ne!(r[1].1[0] & 0x20, 0, "stat: reading");
+    b.write8(0x1F80_1800, 0);
+    b.write8(0x1F80_1803, 0x80);                    // want data
+    let head: Vec<u8> = (0..6).map(|_| b.read8(0x1F80_1802)).collect();
+    assert_eq!(&head[1..6], b"CD001");
+    // the rest through DMA channel 3: 0x7FA bytes left, 0x1FF words read 0x7FC
+    b.write32(0x1F80_10F0, 0x8000);
+    b.write32(0x1F80_10B0, 0x4000);
+    b.write32(0x1F80_10B4, 0x1FF);
+    b.write32(0x1F80_10B8, 0x1100_0000);
+    assert_eq!(&b.ram[0x4000 + 2..0x4000 + 13], b"PLAYSTATION");
+    ack(&mut b);
+    // the next sectors follow: 17, 18, 19, then 21 (20 is XA audio, but XA is off: delivered)
+    let r = cd(&mut b, 0x01, &[], 2);
+    assert_eq!(r[1].0, 1);
+    b.write8(0x1F80_1800, 0);
+    b.write8(0x1F80_1803, 0x80);
+    let w = b.read32(0x1F80_1802);
+    assert!((17..=18).contains(&w), "the next sector, LBA {w}");
+    ack(&mut b);
+    // Pause: INT3, then INT2
+    let r = cd(&mut b, 0x09, &[], 2);
+    assert_eq!((r[0].0, r[1].0), (3, 2));
+    ack(&mut b);
+    // GetlocP after a seek to 00:02:30 (LBA 30)
+    cd(&mut b, 0x02, &[0x00, 0x02, 0x30], 1);
+    ack(&mut b);
+    let r = cd(&mut b, 0x15, &[], 2);
+    assert_eq!(r[1].0, 2, "SeekL completes");
+    ack(&mut b);
+    let r = cd(&mut b, 0x11, &[], 1);
+    assert_eq!(r[0].1, vec![0x01, 0x01, 0x00, 0x00, 0x30, 0x00, 0x02, 0x30]);
+    ack(&mut b);
+}
+
+#[test]
+fn cdrom_skips_xa_audio_sectors() {
+    let cue = make_disc("mimesys_ps1_cd2");
+    let mut b = Bus::new(vec![]);
+    b.cdrom = super::cdrom::Cdrom::new(Some(open_disc(&blob(&cue)).unwrap()), b'A');
+    b.write8(0x1F80_1800, 1);
+    b.write8(0x1F80_1802, 0x1F);
+    cd(&mut b, 0x0E, &[0xC0], 1);                   // double speed, XA-ADPCM on
+    ack(&mut b);
+    cd(&mut b, 0x02, &[0x00, 0x02, 0x19], 1);       // LBA 19
+    ack(&mut b);
+    let mut got = vec![];
+    let r = cd(&mut b, 0x06, &[], 2);
+    assert_eq!(r[1].0, 1);
+    for _ in 0..2 {
+        b.write8(0x1F80_1800, 0);
+        b.write8(0x1F80_1803, 0x80);
+        got.push(b.read32(0x1F80_1802));
+        b.write8(0x1F80_1803, 0x00);
+        ack(&mut b);
+        for _ in 0..1000 { b.tick(1000); if b.read8(0x1F80_1803) & 7 != 0 { break; } }
+    }
+    assert_eq!(got, vec![19, 21], "sector 20 went to the XA decoder");
+}
+
+#[test]
+fn bios_region_letter() {
+    let mut bios = vec![0u8; BIOS_SIZE];
+    let s = b"System ROM Version 4.1 12/16/97 E\0";
+    bios[0x7FF32..0x7FF32 + s.len()].copy_from_slice(s);
+    assert_eq!(bios_region(&bios), b'E');
+    assert_eq!(bios_region(&vec![0u8; 16]), b'A');
+}
+
+// ---------------------------------------------------------------- MDEC
+
+/// The IDCT table games upload: 2^15 x c(z) x cos((2x + 1) z pi / 16)
+fn idct_table() -> Vec<u32> {
+    let mut t = [0i16; 64];
+    for z in 0..8 {
+        for x in 0..8 {
+            let c = if z == 0 { 1.0 / 2f64.sqrt() } else { 1.0 };
+            let v = c * (((2 * x + 1) * z) as f64 * std::f64::consts::PI / 16.0).cos() * 32768.0;
+            t[x + z * 8] = v.round().clamp(-32768.0, 32767.0) as i16;
+        }
+    }
+    t.chunks_exact(2).map(|p| (p[0] as u16 as u32) | (p[1] as u16 as u32) << 16).collect()
+}
+
+#[test]
+fn mdec_decodes_a_flat_macroblock_through_dma() {
+    let mut b = Bus::new(vec![]);
+    b.write32(0x1F80_1824, 0x8000_0000);            // reset
+    b.write32(0x1F80_1824, 0x6000_0000);            // DMA requests on
+    // tables: quantisers all 1, then the IDCT scale table
+    b.write32(0x1F80_1820, 0x4000_0001);
+    for _ in 0..32 { b.write32(0x1F80_1820, 0x0101_0101); }
+    b.write32(0x1F80_1820, 0x6000_0000);
+    for w in idct_table() { b.write32(0x1F80_1820, w); }
+    assert_ne!(b.read32(0x1F80_1824) & (1 << 31), 0, "output empty");
+    // MDEC out first (it waits): one 15-bit macroblock = 128 words to RAM 5000
+    b.write32(0x1F80_10F0, 0x0000_0088);            // channels 0 and 1
+    b.write32(0x1F80_1090, 0x5000);
+    b.write32(0x1F80_1094, 0x0004_0020);
+    b.write32(0x1F80_1098, 0x0100_0200);
+    assert_ne!(b.read32(0x1F80_1098) & 0x0100_0000, 0, "waiting for output");
+    // the coded macroblock: Cr, Cb = 0, Y1-4 = DC 320 (q 1): Y 40, unsigned 168
+    let mut half = vec![];
+    for blk in 0..6 { half.push(if blk < 2 { 1 << 10 } else { 1 << 10 | 320 }); half.push(0xFE00u16); }
+    let words: Vec<u32> = half.chunks_exact(2).map(|p| p[0] as u32 | (p[1] as u32) << 16).collect();
+    for (k, w) in words.iter().enumerate() { b.write32(0x6000 + 4 * k as u32, *w); }
+    b.write32(0x1F80_1820, 0x3800_0000 | words.len() as u32);   // decode, 15-bit
+    b.write32(0x1F80_1080, 0x6000);
+    b.write32(0x1F80_1084, words.len() as u32);
+    b.write32(0x1F80_1088, 0x0100_0201);
+    assert_eq!(b.read32(0x1F80_1098) & 0x0100_0000, 0, "MDEC out ran once the data was decoded");
+    let px = b.read16(0x5000);
+    assert_eq!(px & 31, 21, "168 >> 3: {px:04X}");
+    assert_eq!(px, 21 | 21 << 5 | 21 << 10);
+    assert_eq!(b.read16(0x5000 + 2 * 255), px, "all 256 pixels");
+    assert_ne!(b.read32(0x1F80_1824) & (1 << 31), 0, "output drained");
+    assert_eq!(b.read32(0x1F80_1824) & (1 << 29), 0, "not busy");
+}
+
+/// A slow CPU: sectors wait in the drive's buffer, each INT1 brings the next one, in order
+#[test]
+fn cdrom_buffers_sectors_for_a_slow_cpu() {
+    let cue = make_disc("mimesys_ps1_cd3");
+    let mut b = Bus::new(vec![]);
+    b.cdrom = super::cdrom::Cdrom::new(Some(open_disc(&blob(&cue)).unwrap()), b'A');
+    b.write8(0x1F80_1800, 1);
+    b.write8(0x1F80_1802, 0x1F);
+    cd(&mut b, 0x0E, &[0x80], 1);
+    ack(&mut b);
+    cd(&mut b, 0x02, &[0x00, 0x02, 0x21], 1);       // LBA 21
+    ack(&mut b);
+    let r = cd(&mut b, 0x06, &[], 2);
+    assert_eq!(r[1].0, 1);
+    let mut got = vec![];
+    for _ in 0..5 {
+        // dawdle for three sectors' time before taking this one
+        b.tick(700_000);
+        b.write8(0x1F80_1800, 0);
+        b.write8(0x1F80_1803, 0x80);
+        got.push(b.read32(0x1F80_1802));
+        b.write8(0x1F80_1803, 0x00);
+        ack(&mut b);
+        b.tick(1000);
+    }
+    assert_eq!(got, vec![21, 22, 23, 24, 25]);
+}
+
+/// Byte and halfword writes to 32-bit registers land in their byte lane (the streaming
+/// library enables DMA IRQs with SB to DICR + 2)
+#[test]
+fn narrow_writes_to_32_bit_registers() {
+    let mut b = Bus::new(vec![]);
+    b.write32(0x1F80_10F0, 0x0000_B000);            // DPCR: channel 3 on
+    b.write8(0x1F80_10F6, 0x88);                    // DICR byte 2: master + channel 3
+    assert_eq!(b.read32(0x1F80_10F4) & 0x00FF_FFFF, 0x0088_0000);
+    // a CD DMA (FIFO empty: zeros, but the completion counts)
+    b.write32(0x1F80_10B0, 0x5000);
+    b.write32(0x1F80_10B4, 0x0001_0008);
+    b.write32(0x1F80_10B8, 0x1100_0000);
+    assert_ne!(b.i_stat & IRQ_DMA, 0, "channel 3's done IRQ");
+    assert_ne!(b.read32(0x1F80_10F4) & (1 << 27), 0);
+    // byte write to the flags lane clears only that flag
+    b.write8(0x1F80_10F7, 0x08);
+    assert_eq!(b.read32(0x1F80_10F4) & 0x7F00_0000, 0);
+    assert_eq!(b.read32(0x1F80_10F4) & 0x00FF_0000, 0x0088_0000, "enables kept");
+    // halfword writes to a DMA address register
+    b.write16(0x1F80_10A2, 0x0012);
+    b.write16(0x1F80_10A0, 0x3456);
+    assert_eq!(b.read32(0x1F80_10A0), 0x12_3456);
 }

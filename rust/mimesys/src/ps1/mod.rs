@@ -5,13 +5,15 @@
 //!
 //! - Video timing (NTSC): 263 lines of 3413 GPU clocks (53.69 MHz), about 59.83 Hz; PAL
 //!   314 lines of 3406 (53.22 MHz). Vblank runs from the display's vertical range end to its start.
-//! - Loading: the BIOS file alone starts the console (the BIOS shell). A PS-EXE is
+//! - Loading: a disc image (.cue / .iso / .chd: the frontend sends its path), or the BIOS
+//!   file alone (the shell, no disc). A PS-EXE is
 //!   side-loaded once the BIOS reaches its shell entry (80030000), as other emulators do.
 //! - The BIOS's TTY output (putchar, A(3C) / B(3D)) is printed to the log.
 
 pub mod bus;
 pub mod cdrom;
 pub mod gpu;
+pub mod mdec;
 pub mod sio;
 pub mod spu;
 pub mod timers;
@@ -23,9 +25,10 @@ use crate::common::cpu::r3000::R3000;
 use crate::common::input as pad;
 use crate::common::system::{DisplayInfo, System};
 use bus::{Bus, BIOS_SIZE, IRQ_VBLANK};
+use crate::common::disc::Disc;
 use serde::{Deserialize, Serialize};
 
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 4;
 /// tick the devices in batches of about this many cycles
 const BATCH: u32 = 32;
 const CPU_HZ: u64 = 33_868_800;
@@ -48,6 +51,21 @@ impl Exe {
         let sp = if w(0x30) != 0 { w(0x30).wrapping_add(w(0x34)) } else { 0 };
         Some(Exe { pc: w(0x10), gp: w(0x14), addr: w(0x18), data: d[0x800..0x800 + size].to_vec(), sp })
     }
+}
+
+/// Whether a disc is a PlayStation one: its ISO 9660 volume descriptor (sector 16) says
+/// "PLAYSTATION" as the system.
+pub fn is_ps1_disc(d: &mut Disc) -> bool {
+    d.tracks.first().is_some_and(|t| !t.is_audio()) && !d.gd
+        && d.read_data(16).is_some_and(|s| &s[1..6] == b"CD001" && s[8..19] == *b"PLAYSTATION")
+}
+
+/// Open the disc in the frontend's "MCDP" + path blob; an error if it isn't a PS1 disc.
+pub fn open_disc(blob: &[u8]) -> Result<Disc, String> {
+    let path = crate::segacd::disc_path(blob).ok_or("not a disc image path")?;
+    let mut d = Disc::open(&path)?;
+    if !is_ps1_disc(&mut d) { return Err("not a PlayStation disc".into()); }
+    Ok(d)
 }
 
 pub fn is_bios(data: &[u8], file: &str) -> bool {
@@ -74,6 +92,8 @@ pub struct Ps1System {
 impl Ps1System {
     pub fn from_rom(rom: &[u8], filename: &str, bios: &[u8]) -> Result<Self, String> {
         let name = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
+        // a disc image: the frontend sends its path
+        let disc = if rom.starts_with(crate::segacd::PATH_MAGIC) { Some(open_disc(rom)?) } else { None };
         let (bios, exe) = if bios.len() == BIOS_SIZE {
             (bios.to_vec(), Exe::parse(rom))
         } else if is_bios(rom, name) {
@@ -81,8 +101,8 @@ impl Ps1System {
         } else {
             return Err("PlayStation needs its BIOS: put a 512 KB BIOS (e.g. scph1001.bin) in the BIOS folder".into());
         };
-        if exe.is_none() && rom != bios.as_slice() && !rom.is_empty() {
-            println!("PS1: {name} isn't a PS-EXE; starting the BIOS (discs come in stage 5)");
+        if exe.is_none() && disc.is_none() && rom != bios.as_slice() && !rom.is_empty() {
+            println!("PS1: {name} isn't a PS-EXE or a disc; starting the BIOS");
         }
         let stem = name.rsplit_once('.').map_or(name, |(s, _)| s).to_string();
         let mut s = Self {
@@ -100,6 +120,10 @@ impl Ps1System {
             save_path: "user://GD_EMU/PS1/State".to_string(),
         };
         s.frame.chunks_exact_mut(4).for_each(|p| p[3] = 0xFF);
+        if let Some(d) = disc {
+            println!("PS1: disc with {} track(s), {} sectors", d.tracks.len(), d.leadout);
+            s.bus.cdrom = cdrom::Cdrom::new(Some(d), bus::bios_region(&s.bus.bios));
+        }
         Ok(s)
     }
 
@@ -145,6 +169,7 @@ impl Ps1System {
         while self.owed > 0 {
             self.hooks();
             self.cpu.set_irq(self.bus.irq_line());
+            self.bus.cpu_pc = self.cpu.pc;
             let c = self.cpu.step(&mut self.bus) + std::mem::take(&mut self.bus.wait);
             self.owed -= c as i64;
             batch += c;
@@ -245,6 +270,7 @@ impl System for Ps1System {
             return Err("save state doesn't fit".into());
         }
         bus.bios = std::mem::take(&mut self.bus.bios);
+        bus.cdrom.disc = self.bus.cdrom.disc.take();
         bus.sio.buttons = self.bus.sio.buttons;
         bus.sio.connected = self.bus.sio.connected;
         self.cpu = cpu;
@@ -260,7 +286,10 @@ impl System for Ps1System {
 
     fn reset(&mut self) {
         let bios = std::mem::take(&mut self.bus.bios);
+        let disc = self.bus.cdrom.disc.take();
+        let region = bus::bios_region(&bios);
         self.bus = Bus::new(bios);
+        if disc.is_some() { self.bus.cdrom = cdrom::Cdrom::new(disc, region); }
         self.cpu = R3000::new();
         self.owed = 0;
     }

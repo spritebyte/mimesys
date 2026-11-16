@@ -87,6 +87,18 @@ pub struct R3000 {
     /// when the multiplier / divider finishes
     muldiv_done: u64,
     pub cycles: u64,
+    /// bring-up: the last 64 instructions (pc, instruction, sp, ra), dumped once on the
+    /// first exception that isn't an interrupt or syscall / break
+    #[serde(skip)]
+    trace: Vec<(u32, u32, u32, u32)>,
+    #[serde(skip)]
+    trace_pos: usize,
+    #[serde(skip)]
+    trace_dumped: bool,
+    #[serde(skip)]
+    watch_logged: u32,
+    #[serde(skip)]
+    zero_run: u32,
 }
 
 impl Default for R3000 {
@@ -117,6 +129,11 @@ impl R3000 {
             irq_line: false,
             muldiv_done: 0,
             cycles: 0,
+            trace: vec![(0, 0, 0, 0); 256],
+            trace_pos: 0,
+            trace_dumped: false,
+            watch_logged: 0,
+            zero_run: 0,
         };
         c.reset();
         c
@@ -170,6 +187,9 @@ impl R3000 {
     // ------------------------------------------------------------------ exceptions
 
     pub fn exception(&mut self, code: u32, cop: u32) {
+        if !matches!(code, EXC_INT | EXC_SYSCALL | EXC_BREAK) {
+            self.dump_trace(&format!("exception {code} at {:08X} (BadVaddr {:08X})", self.cur_pc, self.cop0[BADVADDR]), 64);
+        }
         let sr = self.cop0[SR];
         // push the KU/IE stack
         self.cop0[SR] = (sr & !0x3F) | ((sr << 2) & 0x3F);
@@ -191,6 +211,18 @@ impl R3000 {
         self.pc = vec;
         self.next_pc = vec + 4;
         self.branch_pending = false;
+    }
+
+    /// Bring-up: print the last `n` instructions, once per run
+    fn dump_trace(&mut self, why: &str, n: usize) {
+        if self.trace_dumped || self.trace.len() != 256 { return; }
+        self.trace_dumped = true;
+        println!("R3000: {why}; the last {n} instructions (pc instr sp ra):");
+        let n = n.min(256);
+        for k in 256 - n..256 {
+            let (pc, i, sp, ra) = self.trace[(self.trace_pos + k) % 256];
+            println!("  {pc:08X} {i:08X} sp {sp:08X} ra {ra:08X}");
+        }
     }
 
     fn fault(&mut self, code: u32) -> Fault { self.exception(code, 0); Fault }
@@ -244,6 +276,12 @@ impl R3000 {
 
     fn store32(&mut self, bus: &mut dyn R3000Bus, va: u32, v: u32) -> Res<()> {
         self.check(va, 3, EXC_ADES)?;
+        // bring-up: who stores the DPCR address (the value that ended up as a return
+        // address in Breath of Fire III)
+        if v == 0x1F80_10F0 && self.watch_logged < 40 && va < 0xC000_0000 && (va & 0x1F_FFFF) >= 0x1_0000 && (va & 0x1FFF_FFFF) < 0x80_0000 {
+            self.watch_logged += 1;
+            println!("R3000 watch: store 1F8010F0 to {va:08X} at pc {:08X} sp {:08X} ra {:08X} sr {:08X}", self.cur_pc, self.regs[29], self.regs[31], self.cop0[SR]);
+        }
         if va >= 0xC000_0000 {
             if va == 0xFFFE_0130 { self.cache_ctrl = v; }
             return Ok(());
@@ -310,6 +348,17 @@ impl R3000 {
             return 1;
         }
         let instr = if Self::scratch_hit(pc) { 0 } else { bus.fetch32(pc & SEG_MASK[(pc >> 29) as usize], pc >> 29 != 5) };
+        if self.trace.len() == 256 {
+            self.trace[self.trace_pos] = (pc, instr, self.regs[29], self.regs[31]);
+            self.trace_pos = (self.trace_pos + 1) % 256;
+            // running through zeroed RAM (16 NOPs in a row in a game's code area): how we got here
+            if instr == 0 && (pc & 0x1F_FFFF) >= 0x1_0000 && pc >> 29 == 4 {
+                self.zero_run += 1;
+                if self.zero_run == 16 { self.dump_trace(&format!("16 zero instructions in a row at {pc:08X}"), 256); }
+            } else {
+                self.zero_run = 0;
+            }
+        }
         self.pc = self.next_pc;
         self.next_pc = self.pc.wrapping_add(4);
         if self.execute(bus, instr).is_ok() {
