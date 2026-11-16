@@ -23,4 +23,5 @@ mod segacd;
 mod m32x;
 mod nds;
 mod dreamcast;
+pub mod ps1;
 

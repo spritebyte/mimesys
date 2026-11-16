@@ -647,6 +647,14 @@ func _process(_delta):
 		if tex_to_apply:
 			if EmulatorScreen.texture is AtlasTexture:
 				EmulatorScreen.texture.atlas = tex_to_apply
+				# the picture changed size (PS1 resolution switches): set the screen up again
+				if _display_info and (tex_to_apply.get_width() != _display_info.buffer_width \
+						or tex_to_apply.get_height() != _display_info.buffer_height):
+					emu_mutex.lock()
+					var fresh: SystemDisplayInfo = emu_system.display_info()
+					emu_mutex.unlock()
+					if fresh.buffer_width == tex_to_apply.get_width() and fresh.buffer_height == tex_to_apply.get_height():
+						setup_screen(fresh)
 				_update_filter_region()
 			else:
 				# Fallback if a frame arrives before setup_screen executes

@@ -106,6 +106,12 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 			if bios.size() <= 4:
 				OS.alert("Dreamcast needs its BIOS: put dc_boot.bin (2 MB) and dc_flash.bin (128 KB) in the BIOS folder.")
 				return null
+		"ps1":
+			bios = ps1_bios()
+			# the BIOS file itself starts the console with no disc
+			if bios.is_empty() and data.size() != 0x80000:
+				OS.alert("PlayStation needs its BIOS: put a 512 KB BIOS (e.g. scph1001.bin) in the BIOS folder.")
+				return null
 		"nds":
 			bios = nds_bios_blob()
 		"a5200":
@@ -270,6 +276,28 @@ static func nds_bios_blob() -> PackedByteArray:
 ## (128 KB), CABL = the video cable (0 VGA, 2 RGB, 3 composite), BCST = broadcast override
 ## (0 NTSC, 1 PAL; left out for "as the flash says"). Returns just "DCBB" when
 ## the BIOS is missing.
+## The PlayStation BIOS: System Options' choice, else the first 512 KB file in the BIOS
+## folder named like one (scph*, *psx*, *ps1*).
+static func ps1_bios() -> PackedByteArray:
+	var chosen := AppSettings.bios_path("ps1", "")
+	if chosen != "" and FileAccess.file_exists(chosen):
+		return load_bios(chosen)
+	var dir := DirAccess.open(BIOS_DIR)
+	if dir == null:
+		return PackedByteArray()
+	var files := dir.get_files()
+	files.sort()
+	for file in files:
+		var low := file.to_lower()
+		if not (low.begins_with("scph") or "psx" in low or "ps1" in low):
+			continue
+		var data := load_bios(BIOS_DIR.path_join(file))
+		if data.size() == 0x80000:
+			print("PlayStation BIOS: %s" % file)
+			return data
+	return PackedByteArray()
+
+
 static func dc_bios_blob() -> PackedByteArray:
 	var out := PackedByteArray("DCBB".to_ascii_buffer())
 	var boot := ""

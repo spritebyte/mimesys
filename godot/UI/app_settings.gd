@@ -35,6 +35,7 @@ const SYSTEM_BY_EXT := {
 	"cue": "md", "iso": "md",      # Sega CD discs (the Genesis pad profile)
 	"32x": "md",                   # 32X cartridges
 	"gdi": "dc", "chd": "dc", "cdi": "dc",   # Dreamcast discs
+	"psx": "ps1", "psexe": "ps1",            # PlayStation executables
 }
 ## Extensions several systems use: the ROM detector looks inside these files.
 const AMBIGUOUS_EXT := ["bin", "rom"]
@@ -143,6 +144,11 @@ func _init() -> void:
 			["c1_y", "X [Y]"], ["c1_l1", "Y [L]"], ["c1_r1", "Z [R]"], ["c1_select", "Mode [Select]"]] + dpad2 + [
 			["c2_select", "P2 A [P2 Select]"], ["c2_b", "P2 B [B]"], ["c2_a", "P2 C [A]"], ["c2_start", "P2 Start"],
 			["c2_y", "P2 X [Y]"], ["c2_l1", "P2 Y [L]"], ["c2_r1", "P2 Z [R]"], ["c2_z", "P2 Mode [Z]"]]},
+		"ps1": {"name": "PlayStation", "actions": dpad + [
+			["c1_b", "Cross [B]"], ["c1_a", "Circle [A]"], ["c1_x", "Square [X]"], ["c1_y", "Triangle [Y]"],
+			["c1_l1", "L1 [L]"], ["c1_r1", "R1 [R]"], ["c1_z", "L2 [Z]"], ["c1_start", "Start"], ["c1_select", "Select"]] + dpad2 + [
+			["c2_b", "P2 Cross [B]"], ["c2_a", "P2 Circle [A]"], ["c2_x", "P2 Square [X]"], ["c2_y", "P2 Triangle [Y]"],
+			["c2_l1", "P2 L1 [L]"], ["c2_r1", "P2 R1 [R]"], ["c2_z", "P2 L2 [Z]"], ["c2_start", "P2 Start"], ["c2_select", "P2 Select"]]},
 		"dc": {"name": "Sega Dreamcast", "actions": dpad + [
 			["c1_b", "A [B]"], ["c1_a", "B [A]"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_start", "Start"],
 			["c1_l1", "L trigger [L]"], ["c1_r1", "R trigger [R]"]] + dpad2 + [
