@@ -15,6 +15,8 @@ pub mod rastan;
 pub mod tmnt;
 pub mod cps1;
 pub mod cps2;
+pub mod bagman;
+pub mod gng;
 pub mod state;
 pub mod hiscore;
 
@@ -105,6 +107,16 @@ pub fn load_arcade(driver: &str, set_name: &str, mut regions: HashMap<String, Ve
             set_name, regions, driver == "tmnt2p")?)),
         "simpsons" | "simpsons2p" => Ok(Box::new(simpsons::simpsons_system::SimpsonsSystem::new(
             set_name, regions, driver == "simpsons2p")?)),
+        "gng" | "diamrun" => {
+            use gng::gng_system::{GngSystem, Variant};
+            let v = if driver == "diamrun" { Variant::DiamondRun } else { Variant::Gng };
+            Ok(wrap(GngSystem::new(v, set_name, regions)?, hs, "Capcom"))
+        },
+        "bagman" | "sbagman" => {
+            use bagman::bagman_system::{BagmanSystem, Variant};
+            let v = if driver == "sbagman" { Variant::SuperBagman } else { Variant::Bagman };
+            Ok(wrap(BagmanSystem::new(v, set_name, regions)?, hs, "Valadon"))
+        },
         other => Err(format!("no arcade driver name '{other}'")),
     }
 }

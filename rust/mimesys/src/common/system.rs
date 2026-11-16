@@ -42,6 +42,13 @@ pub trait System: Send {
     fn set_audio_rate_adjust(&mut self, _factor: f32) {}
     fn cheats_mut(&mut self) -> Option<&mut crate::common::cheats::Cheats> { None }
     fn set_option(&mut self, _key: &str, _value: i64) {}
+    /// The memory card in the slot (Dreamcast VMU), as a card file holds it.
+    fn memory_card(&self) -> Option<Vec<u8>> { None }
+    /// Put in a card (empty: a freshly formatted one). `swap`: as if the old one were pulled
+    /// out first, for a moment, so the game notices the change. False: no card slot.
+    fn insert_memory_card(&mut self, _data: &[u8], _swap: bool) -> bool { false }
+    /// The game wrote to the card since the last call.
+    fn memory_card_dirty(&mut self) -> bool { false }
     /// How long one frame lasts, in microseconds; 0 = the frontend's default (about 60 Hz).
     fn frame_time_usec(&self) -> i64 { 0 }
     /// Pointer for light guns: position in framebuffer pixels (-1 = off screen) and mouse

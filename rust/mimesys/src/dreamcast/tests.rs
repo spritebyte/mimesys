@@ -178,6 +178,68 @@ fn maple_reaches_the_memory_card() {
     assert_eq!(dma(&mut d, &[0x01 | 0x01 << 8])[0], 0xFFFF_FFFF);
 }
 
+/// Sort DMA: two chains from a 32-bit start table (the second block reached by a link),
+/// fed to the TA in order; then the sort-DMA end, after the list end it carried.
+#[test]
+fn sort_dma_feeds_linked_blocks_to_the_ta() {
+    let mut d = bus();
+    let base = 0x8C10_0000u32;
+    let put = |d: &mut super::bus::Dc, a: u32, w: &[u32]| for (k, v) in w.iter().enumerate() { d.write(a + 4 * k as u32, *v, 4); };
+    // block A at +0x100: header (size 2 = 64 bytes, next link 0x200) and a vertex
+    put(&mut d, base + 0x100, &[4 << 29, 0, 0, 0, 0, 0, 2, 0x200]);
+    put(&mut d, base + 0x120, &[7 << 29 | 1 << 28, 0, 0, 0, 0, 0, 0, 0]);
+    // block B at +0x200: header, vertex, end of chain (link 1)
+    put(&mut d, base + 0x200, &[4 << 29, 0, 0, 0, 0, 0, 2, 1]);
+    put(&mut d, base + 0x220, &[7 << 29 | 1 << 28, 0, 0, 0, 0, 0, 0, 0]);
+    // block C at +0x300: the end of the opaque list, alone (size 1), end of chain
+    put(&mut d, base + 0x300, &[0, 0, 0, 0, 0, 0, 1, 1]);
+    // start table: chain at 0x100, chain at 0x300, end of DMA
+    put(&mut d, base + 0x1000, &[0x100, 0x300, 2]);
+    d.write(0xA05F_6810, 0x0C10_1000, 4);  // SDSTAW
+    d.write(0xA05F_6814, 0x0C10_0000, 4);  // SDBAAW
+    d.write(0xA05F_6818, 1, 4);            // SDWLT: 32-bit links
+    d.write(0xA05F_681C, 0, 4);            // SDLAS: links in bytes
+    d.write(0xA05F_6820, 1, 4);            // SDST: go
+    assert_eq!((d.pvr.ta.params, d.pvr.ta.vertices), (2, 2), "both polygons reached the TA");
+    let (mut sort_end, mut list_end) = (None, None);
+    for t in 0..100 {
+        d.now += 10;
+        d.service();
+        let ist = d.holly.istnrm();
+        if ist & holly::IST_DMA_SORT != 0 { sort_end.get_or_insert(t); }
+        if ist & pvr::IST_LIST_END[0] != 0 { list_end.get_or_insert(t); }
+    }
+    assert!(list_end.is_some() && sort_end.is_some(), "{list_end:?} {sort_end:?}");
+}
+
+/// A long channel-2 DMA ending a list: the DMA-end interrupt comes before the list end,
+/// whose data arrives last (NBA 2K2 hangs at "Loading" the other way round).
+#[test]
+fn ch2_dma_end_comes_before_the_list_end_it_carries() {
+    let mut d = bus();
+    let n = 0x1000; // words: 16 KB of vertices, then the end of list
+    let mut words = vec![0u32; n + 8];
+    words[0] = 4 << 29;                    // polygon header, opaque list
+    for k in (8..n).step_by(8) { words[k] = 7 << 29; }
+    words[n - 8] = 7 << 29 | 1 << 28;      // last vertex: end of strip
+    words[n] = 0;                          // end of list
+    for (k, w) in words.iter().enumerate() { d.write(0x8C02_0000 + 4 * k as u32, *w, 4); }
+    d.write(0xFFA0_0020, 0x0C02_0000, 4);  // SAR2
+    d.write(0xA05F_6800, 0x1000_0000, 4);  // C2DSTAT: TA FIFO
+    d.write(0xA05F_6804, 4 * words.len() as u32, 4);
+    d.write(0xA05F_6808, 1, 4);
+    let (mut dma_end, mut list_end) = (None, None);
+    for t in 0..400 {
+        d.now += 50;
+        d.service();
+        let ist = d.holly.istnrm();
+        if ist & holly::IST_DMA_CH2 != 0 { dma_end.get_or_insert(t); }
+        if ist & pvr::IST_LIST_END[0] != 0 { list_end.get_or_insert(t); }
+    }
+    let (dma_end, list_end) = (dma_end.expect("DMA end"), list_end.expect("list end"));
+    assert!(dma_end < list_end, "DMA end at {dma_end}, list end at {list_end} (x50 cycles)");
+}
+
 /// Channel-2 DMA feeds the tile accelerator: a polygon list's end raises its interrupt.
 #[test]
 fn ch2_dma_to_the_ta_ends_a_list() {
@@ -484,10 +546,39 @@ fn dc_speed_ram() {
     for (k, w) in code.iter().enumerate() { s.dc.ram[0x1_0000 + 2 * k..0x1_0002 + 2 * k].copy_from_slice(&w.to_le_bytes()); }
     s.cpu.pc = 0x8C01_0000;
     s.cpu.r[1] = 0x8C00_1000;
+    if std::env::var("DC_JIT").is_ok() { s.set_option("dc_jit", 1); }
     let t = std::time::Instant::now();
     let n = std::env::var("DC_N").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
     for _ in 0..n { s.run_frame(0); }
     let el = t.elapsed().as_secs_f64();
     assert!(s.cpu.pc >= 0x8C01_0000 && s.cpu.pc < 0x8C01_001A, "still in the loop: {:08X}", s.cpu.pc);
     println!("{n} fields in {el:.2} s ({:.0}% of real time)", 100.0 * n as f64 / 60.0 / el);
+}
+
+/// A memory card swapped in from the frontend: the slot is empty for a moment (the game
+/// sees the card go), then holds the new card; the old one comes back out as card-file
+/// bytes, and a game's write marks the card for saving.
+#[test]
+fn memory_cards_swap() {
+    // a program that spins (BRA to itself)
+    let mut s = system_with(&[0xFE, 0xAF, 0x09, 0x00], &[]);
+    let old = s.memory_card().unwrap();
+    let mut other = vmu::Vmu::new();
+    other.data[0] = 0x5A; // something to tell it by
+    assert!(s.insert_memory_card(&other.data, true));
+    assert!(!s.dc.vmu_on, "out of the slot first");
+    for _ in 0..40 { s.run_frame(0); }
+    assert!(s.dc.vmu_on, "back in");
+    assert_eq!(s.memory_card().unwrap()[0], 0x5A);
+    assert_ne!(old[0], 0x5A);
+    // the save file follows the card in the slot
+    assert_eq!(s.get_sram().unwrap()[flash::SIZE], 0x5A);
+    // an empty card file: a new formatted card
+    s.insert_memory_card(&[], false);
+    assert_eq!(vmu::Vmu::summary(&s.memory_card().unwrap()), Some((200, vec![])));
+    assert!(!s.memory_card_dirty());
+    s.dc.vmu.dirty = true;
+    s.run_frame(0);
+    assert!(s.memory_card_dirty());
+    assert!(!s.memory_card_dirty(), "asking clears it");
 }

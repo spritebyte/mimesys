@@ -104,6 +104,14 @@ impl Vmu {
         if img.iter().all(|&b| b == 0) { self.format(); }
     }
 
+    /// A card file's free blocks and save names (None: not a 128 KB card image).
+    pub fn summary(img: &[u8]) -> Option<(usize, Vec<String>)> {
+        if img.len() != SIZE { return None; }
+        let mut v = Self::new();
+        v.load(img);
+        Some((v.free_blocks(), v.files()))
+    }
+
     /// Free user blocks (FAT entries 0-199 marked free).
     pub fn free_blocks(&self) -> usize {
         let f = FAT * BLOCK;

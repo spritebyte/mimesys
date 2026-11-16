@@ -140,6 +140,22 @@ fn timer_counts_with_its_prescale() {
 }
 
 #[test]
+fn loop_end_flag_survives_a_16_or_32_bit_read() {
+    // sound drivers (NBA 2K's) poll 2810 with word reads; the flag is bit 15 and reading
+    // clears it, so it must come from a single read of the register
+    let mut a = Aica::new(0);
+    a.reg_write(0x280C, 5 << 8, 2); // MSLC: slot 5
+    for size in [2, 4] {
+        a.snd.slots[5].lpend = true;
+        assert_eq!(a.reg_read(0x2810, size) & 0x8000, 0x8000, "{size}-byte read");
+        assert_eq!(a.reg_read(0x2810, size) & 0x8000, 0, "cleared by the read");
+    }
+    // a byte read of the high half sees it too
+    a.snd.slots[5].lpend = true;
+    assert_eq!(a.reg_read(0x2811, 1) & 0x80, 0x80);
+}
+
+#[test]
 fn sh4_keys_a_channel_and_sound_comes_out() {
     let mut d = dc();
     // a 16-bit looping square wave at 0x2000 in sound RAM, slot 3

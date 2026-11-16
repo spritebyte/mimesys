@@ -249,13 +249,19 @@ impl Aica {
         }
     }
 
-    /// A register read (offset in the register file, either CPU).
+    /// A register read (offset in the register file, either CPU). Each 16-bit register is
+    /// read once however many of its bytes are wanted: reading 2810 clears its loop-end
+    /// flag (bit 15), so reading it again for the high byte would always lose the flag.
     pub fn reg_read(&mut self, off: u32, size: u32) -> u32 {
         let o = off as usize & 0x7FFF;
         let mut v = 0u32;
+        let mut cur: Option<(usize, u16)> = None;
         for k in 0..size as usize {
             let a = (o + k) & 0x7FFF;
-            let w = self.read_reg16(a & !1);
+            let w = match cur {
+                Some((h, w)) if h == a & !1 => w,
+                _ => { let w = self.read_reg16(a & !1); cur = Some((a & !1, w)); w }
+            };
             v |= ((w >> ((a & 1) * 8)) as u32 & 0xFF) << (8 * k);
         }
         v

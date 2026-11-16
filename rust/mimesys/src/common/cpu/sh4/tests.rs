@@ -109,6 +109,9 @@ fn run(text: &str, filter: impl Fn(u16) -> bool) -> (usize, Vec<String>, Vec<Str
             let (i, v) = d.split_once('=').unwrap();
             want[i.parse::<usize>().unwrap()] = u32::from_str_radix(v, 16).unwrap();
         }
+        // a jump to an odd address: the chip's address error (which the reference doesn't
+        // model) comes on the step that fetches there
+        if want[56] & 1 != 0 { continue; }
         let mut bus = TestBus {
             ops: [0x0009, op, 0x311C, 0x0009, 0x322C], start: init[56],
             reads: accesses(f[3]).iter().map(|&(a, v, _)| (a, v)).collect(), writes: Vec::new(),
@@ -251,6 +254,40 @@ fn interrupts_and_sleep() {
     assert!(c.pending.is_some() && !c.accepts(15));
     c.step(&mut ram);
     assert!(c.accepts(15));
+}
+
+/// LDS / STS to FPUL and FPSCR are FPU instructions: with SR.FD set they raise the
+/// FPU-disabled exception and leave FPUL alone (Windows CE switches FPU registers lazily).
+#[test]
+fn fpul_moves_honour_fpu_disable() {
+    for op in [0x465Au16, 0x005A, 0x466A, 0x006A, 0x4656, 0x4052, 0x4666, 0x4062] {
+        let mut ram = Ram::new();
+        ram.prog(0x1000, &[op]);
+        let mut c = cpu_at(0x1000);
+        c.set_sr(SR_MD | SR_FD);
+        c.r[6] = 0x0C00_2000;
+        c.fpul = 0x1234;
+        c.step(&mut ram);
+        assert_eq!((c.pc, c.spc, c.fpul), (0x8100, 0x1000, 0x1234), "op {op:04X}");
+        assert_eq!(ram.events, vec![(Event::Expevt, EXP_FPU_DISABLED)], "op {op:04X}");
+    }
+}
+
+/// A jump to an odd address: once the delay slot has run, the instruction address error
+/// (0x0E0) with SPC = TEA = that address and PR set by the JSR - how Windows CE calls its
+/// kernel (JSR to FFFFFxxx odd addresses).
+#[test]
+fn jump_to_an_odd_address_is_an_address_error() {
+    let mut ram = Ram::new();
+    ram.prog(0x1000, &[0x430B, 0xE155]);        // JSR @R3; MOV #55,R1
+    let mut c = cpu_at(0x1000);
+    c.r[3] = 0xFFFF_FD1F;
+    c.step(&mut ram);
+    c.step(&mut ram);
+    assert_eq!((c.pc, c.r[1], c.pr), (0xFFFF_FD1F, 0x55, 0x1004));
+    c.step(&mut ram);
+    assert_eq!((c.pc, c.spc), (0x8100, 0xFFFF_FD1F));
+    assert_eq!(ram.events, vec![(Event::Tea, 0xFFFF_FD1F), (Event::Expevt, EXP_ADDR_FETCH)]);
 }
 
 /// Illegal instructions: 0x180, or 0x1A0 in a delay slot with SPC = the branch.

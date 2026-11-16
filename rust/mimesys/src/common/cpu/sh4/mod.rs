@@ -19,6 +19,10 @@
 use serde::{Deserialize, Serialize};
 
 mod fast;
+pub mod jit;
+/// Translated code is tracked in RAM lines of 1 << CODE_SHIFT bytes (`Sh4Bus::jit_code`).
+pub const CODE_SHIFT: u32 = 5;
+pub use jit::{Jit, JitMem};
 mod fparith;
 mod fpu;
 
@@ -45,6 +49,27 @@ pub trait Sh4Bus {
     fn mmu_priv(&mut self, _md: bool) {}
     /// After it: the TLB exception one of its accesses raised (EXPEVT), if any.
     fn mmu_fault(&mut self) -> Option<u32> { None }
+    /// An access since the last `mmu_fault` faulted (not taken yet).
+    fn mmu_faulted(&self) -> bool { false }
+    /// With the MMU on: the physical address an instruction fetch at `va` reads, when it's
+    /// in RAM and the TLB has it (without faulting); None otherwise.
+    fn jit_fetch_pa(&mut self, _va: u32, _md: bool) -> Option<u32> { None }
+    /// Writes to translated code are waiting for `jit_dirty`.
+    fn jit_any_dirty(&self) -> bool { true }
+    /// What the recompiler may touch directly (None: it doesn't run).
+    fn jit_mem(&mut self) -> Option<JitMem> { None }
+    /// Translated code now comes from this RAM line (1 << CODE_SHIFT bytes): report writes
+    /// to it.
+    fn jit_code(&mut self, _line: u32) {}
+    /// A flag the recompiler's blocks read before going straight on to the next block:
+    /// set when something needs the run loop (an interrupt, a write to code). Null: they
+    /// never go on.
+    fn jit_attn(&self) -> *const u8 { std::ptr::null() }
+    /// No translated code comes from this line any more.
+    fn jit_uncode(&mut self, _line: u32) {}
+    /// The writes to code lines since the last call, as RAM offsets: the 4-byte word at `a`,
+    /// or (`a | 1`) the whole line at `a`. The blocks they overlap are dropped.
+    fn jit_dirty(&mut self, _out: &mut Vec<u32>) {}
     /// For `Sh4::run`: false while no interrupt is asking and the MMU is off, so the loop
     /// can skip both checks (true is always safe).
     fn attention(&self) -> bool { true }
@@ -69,7 +94,7 @@ pub enum RunExit {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Event { Tra, Expevt, Intevt }
+pub enum Event { Tra, Expevt, Intevt, Tea }
 
 /// SR bits other than T / S / Q / M.
 pub const SR_MD: u32 = 1 << 30;
@@ -86,6 +111,8 @@ pub const FPSCR_DN: u32 = 1 << 18;
 pub const FPSCR_MASK: u32 = 0x003F_FFFF;
 
 /// EXPEVT codes.
+/// Instruction fetch from an odd address, or from P1-P4 in user mode (TEA = the address).
+pub const EXP_ADDR_FETCH: u32 = 0x0E0;
 pub const EXP_TRAPA: u32 = 0x160;
 pub const EXP_ILLEGAL: u32 = 0x180;
 pub const EXP_ILLEGAL_SLOT: u32 = 0x1A0;
@@ -394,6 +421,7 @@ impl Sh4 {
     pub fn step<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B) {
         if bus.mmu() { return self.step_mmu(bus); }
         if self.sleeping { return; }
+        if self.pc & 1 != 0 { return self.fetch_error(bus); }
         let pending = self.pending.take();
         self.in_slot = pending.is_some();
         self.cur = self.pc;
@@ -416,6 +444,7 @@ impl Sh4 {
     #[inline(never)]
     fn step_mmu<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B) {
         if self.sleeping { return; }
+        if self.pc & 1 != 0 || (self.sr_hi & SR_MD == 0 && self.pc >= 0x8000_0000) { return self.fetch_error(bus); }
         let saved = self.clone();
         bus.mmu_priv(self.sr_hi & SR_MD != 0);
         let pending = self.pending.take();
@@ -435,10 +464,32 @@ impl Sh4 {
         }
     }
 
+    /// The instruction address error: a jump to an odd address (or, in user mode, into
+    /// P1-P4). Windows CE makes its system calls this way, jumping to odd addresses near
+    /// FFFFFE00 and decoding the call from TEA in the handler.
+    #[cold]
+    #[inline(never)]
+    fn fetch_error<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B) {
+        let pc = self.pc;
+        self.pending = None;
+        bus.event(Event::Tea, pc);
+        bus.event(Event::Expevt, EXP_ADDR_FETCH);
+        self.enter(pc, 0x100);
+    }
+
     #[inline(never)]
     fn tlb_exception<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, saved: Sh4, code: u32) {
         let ret = if saved.pending.is_some() { saved.branch_pc } else { saved.pc };
         *self = saved;
+        self.tlb_exception_at(bus, ret, code);
+    }
+
+    /// The TLB exception `code` for the instruction at `ret` (the registers are as before
+    /// it already).
+    #[inline(never)]
+    pub(crate) fn tlb_exception_at<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, ret: u32, code: u32) {
+        self.pending = None;
+        self.pending_sr = None;
         bus.event(Event::Expevt, code);
         // TLB misses have their own vector
         let offset = if code == 0x040 || code == 0x060 { 0x400 } else { 0x100 };
@@ -684,8 +735,8 @@ impl Sh4 {
             0x032 => { self.r[n] = self.ssr; return; }
             0x03A => { self.r[n] = self.sgr; return; }
             0x042 => { self.r[n] = self.spc; return; }
-            0x05A => { self.r[n] = self.fpul; return; }
-            0x06A => { self.r[n] = self.fpscr; return; }
+            0x05A => { if self.fd_trap(bus) { return; } self.r[n] = self.fpul; return; }
+            0x06A => { if self.fd_trap(bus) { return; } self.r[n] = self.fpscr; return; }
             0x0FA => { self.r[n] = self.dbr; return; }
             0x083 => { bus.pref(self.r[n]); return; }
             0x093 | 0x0A3 | 0x0B3 => return, // OCBI / OCBP / OCBWB: no cache model
@@ -693,6 +744,7 @@ impl Sh4 {
             0x400 | 0x420 => { self.t = self.r[n] >> 31 != 0; self.r[n] <<= 1; return; }
             0x401 => { self.t = self.r[n] & 1 != 0; self.r[n] >>= 1; return; }
             0x402 | 0x403 | 0x412 | 0x413 | 0x422 | 0x423 | 0x433 | 0x443 | 0x432 | 0x452 | 0x462 | 0x4F2 => {
+                if matches!(op & 0xFF, 0x52 | 0x62) && self.fd_trap(bus) { return; }
                 let v = match op & 0xFF {
                     0x02 => self.mach,
                     0x03 => self.sr(),
@@ -713,6 +765,7 @@ impl Sh4 {
             0x404 => { self.t = self.r[n] >> 31 != 0; self.r[n] = self.r[n].rotate_left(1); return; }
             0x405 => { self.t = self.r[n] & 1 != 0; self.r[n] = self.r[n].rotate_right(1); return; }
             0x406 | 0x407 | 0x416 | 0x417 | 0x426 | 0x427 | 0x437 | 0x447 | 0x456 | 0x466 | 0x4F6 => {
+                if matches!(op & 0xFF, 0x56 | 0x66) && self.fd_trap(bus) { return; }
                 let v = bus.read32(self.r[n]);
                 self.r[n] = self.r[n].wrapping_add(4);
                 match op & 0xFF {
@@ -766,8 +819,8 @@ impl Sh4 {
             0x42E => { self.vbr = self.r[n]; return; }
             0x43E => { self.ssr = self.r[n]; return; }
             0x44E => { self.spc = self.r[n]; return; }
-            0x45A => { self.fpul = self.r[n]; return; }
-            0x46A => { let v = self.r[n]; self.set_fpscr(v); return; }
+            0x45A => { if self.fd_trap(bus) { return; } self.fpul = self.r[n]; return; }
+            0x46A => { if self.fd_trap(bus) { return; } let v = self.r[n]; self.set_fpscr(v); return; }
             0x4FA => { self.dbr = self.r[n]; return; }
             _ => {}
         }

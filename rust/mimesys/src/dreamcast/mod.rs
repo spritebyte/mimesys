@@ -161,16 +161,24 @@ pub struct DcSystem {
     /// SPG_CONTROL last reported
     video_mode: u32,
     debug_report: bool,
+    /// GD-ROM packet commands in the last speed-line window (the quiet-drive report)
+    gd_cmds_before: u64,
     /// where the CPU was at each slice since the last report
     pc_hist: HashMap<u32, u32>,
+    /// debug report: Windows CE system calls (set, method, caller, R4-R7, cycle, result), the
+    /// last 3000, and the one waiting for its return (index, return address)
+    ce_log: std::collections::VecDeque<(u32, u32, u32, [u32; 4], u64, Option<u32>)>,
+    ce_wait: Option<(u64, u32)>,
+    ce_seq: u64,
     /// debug: the last jumps (from, to, kind, times)
     jumps: std::collections::VecDeque<(u32, u32, &'static str, u32)>,
     pub disc_path: Option<String>,
     /// SH-4 cycles an instruction counts, the whole part in use now (see `cpi_half`)
     pub cpi: u64,
-    /// SH-4 cycles an instruction counts, in halves (option dc_cpu_ratio: 3 = 1.5, the
-    /// default). An odd value runs part of each slice at the cycle count below and the
-    /// rest at the one above, so the average comes out right.
+    /// SH-4 cycles an instruction counts, in halves (option dc_cpu_ratio: 2 = 1, the
+    /// default; at 1.5 Evolution's line-0 wait misses line 0 behind a long interrupt
+    /// handler every frame). An odd value runs part of each slice at the cycle count
+    /// below and the rest at the one above, so the average comes out right.
     pub cpi_half: u64,
     /// traced loop: the half cycle carried over
     cpi_carry: u64,
@@ -183,6 +191,10 @@ pub struct DcSystem {
     /// print a speed line every 300 frames (option speed_log, or with the debug report)
     speed_log: bool,
     prof: Prof,
+    /// the game wrote to the memory card since the frontend last asked
+    card_dirty: bool,
+    /// frames left with the card slot empty (a card swap)
+    card_out: u32,
     save_filename: String,
     save_battery_path: String,
     save_state_path: String,
@@ -190,6 +202,8 @@ pub struct DcSystem {
     /// image other emulators read too); rebuilt after a frame that changed either
     save_buf: Vec<u8>,
     save_dirty: bool,
+    /// the SH-4 recompiler (option dc_jit; None: interpreter only)
+    jit: Option<crate::common::cpu::sh4::Jit>,
     /// test tool: RAM words to report changes of (address, last value), in the traced loop
     #[cfg(test)]
     pub watch: Vec<(u32, u32)>,
@@ -232,16 +246,17 @@ impl DcSystem {
         let name = disc_path.as_deref().and_then(|p| std::path::Path::new(p).file_stem()).map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| filename.rsplit_once('.').map_or(filename, |(s, _)| s).to_string());
         dc.render_async = true;
+        bus::vwatch_init();
         crate::dlog!("Dreamcast: BIOS loaded, video cable {}", ["VGA", "?", "RGB", "composite"][dc.chip.cable as usize]);
         Ok(Self {
             cpu: Sh4::new(), dc, frame: vec![0; OUT_W * OUT_H * 4], current_frame: 0, ext: 0, time_rem: 0, video_mode: u32::MAX,
-            debug_report: false, pc_hist: HashMap::new(), jumps: Default::default(), disc_path,
-            cpi: 1, cpi_half: 3, cpi_carry: 0, fpu_exact: false, idle_skip: true, idle_loops: HashMap::new(), speed_log: false, wav: WavRec::default(), prof: Prof::default(),
+            debug_report: false, gd_cmds_before: 0, pc_hist: HashMap::new(), ce_log: Default::default(), ce_wait: None, ce_seq: 0, jumps: Default::default(), disc_path,
+            cpi: 1, cpi_half: 2, cpi_carry: 0, fpu_exact: false, idle_skip: true, idle_loops: HashMap::new(), speed_log: false, wav: WavRec::default(), prof: Prof::default(),
             // the flash is the console's, not the game's: one file for every game
             save_filename: "dc_flash".to_string(),
             save_battery_path: "user://GD_EMU/DC/Save".to_string(),
             save_state_path: format!("user://GD_EMU/DC/State/{name}"),
-            save_buf: Vec::new(), save_dirty: false, dump_armed: false,
+            save_buf: Vec::new(), save_dirty: false, card_dirty: false, card_out: 0, dump_armed: false, jit: None,
             #[cfg(test)]
             watch: Vec::new(),
         }.with_save_buf())
@@ -281,7 +296,11 @@ impl DcSystem {
         let mut loops = (u32::MAX, 0u32);
         loop {
             let watch = if self.idle_skip { Some(&mut loops) } else { None };
-            match self.cpu.run(&mut self.dc, target, self.cpi, watch) {
+            let exit = match self.jit.as_mut() {
+                Some(j) => self.cpu.run_jit(&mut self.dc, j, target, self.cpi, watch),
+                None => self.cpu.run(&mut self.dc, target, self.cpi, watch),
+            };
+            match exit {
                 crate::common::cpu::sh4::RunExit::Done => return,
                 crate::common::cpu::sh4::RunExit::Sleep => { self.dc.now = target; return; }
                 crate::common::cpu::sh4::RunExit::Loop { to, last } => {
@@ -290,6 +309,8 @@ impl DcSystem {
                         self.dc.now = target;
                         return;
                     }
+                    // not one: the recompiler may link its back branch from now on
+                    if let Some(j) = self.jit.as_mut() { j.not_idle(to); }
                 }
             }
         }
@@ -341,6 +362,23 @@ impl DcSystem {
             if self.cpu.sleeping { self.dc.now = target; return; }
             let pc = self.cpu.pc;
             self.dc.cur_pc = pc;
+            // Windows CE system calls: a jump to an odd address near FFFFFE00 (the result is
+            // R0 when the caller's return address comes up)
+            if pc >= 0xFFFF_0000 && pc & 1 != 0 {
+                let idx = 0xFFFF_FE01u32.wrapping_sub(pc) / 2;
+                let c = &self.cpu;
+                self.ce_log.push_back((idx >> 8, idx & 0xFF, c.pr, [c.r[4], c.r[5], c.r[6], c.r[7]], self.dc.now, None));
+                if self.ce_log.len() > 3000 { self.ce_log.pop_front(); }
+                self.ce_seq += 1;
+                self.ce_wait = Some((self.ce_seq, c.pr));
+            } else if let Some((seq, ret)) = self.ce_wait {
+                if pc == ret {
+                    let back = (self.ce_seq - seq) as usize;
+                    let n = self.ce_log.len();
+                    if back < n { self.ce_log[n - 1 - back].5 = Some(self.cpu.r[0]); }
+                    self.ce_wait = None;
+                }
+            }
             let expevt = self.dc.chip.expevt;
             self.cpu.step(&mut self.dc);
             // same clock as the fast path, so turning the report on doesn't change timing
@@ -392,15 +430,16 @@ impl DcSystem {
                 self.reset();
             }
         }
-        // a render still running on its thread: show the last picture again rather than
-        // wait (it is picked up at a later field or the next STARTRENDER)
-        let busy = self.dc.render_job.0.as_ref().is_some_and(|h| !h.is_finished());
-        if !busy {
+        // a render still running on its thread: the picture shown doesn't wait for it unless
+        // it's the one being drawn (a game that flips to a buffer as soon as its render is
+        // under way would otherwise never show a new picture while renders take a field)
+        let job = &self.dc.render_job;
+        let busy = job.0.as_ref().is_some_and(|h| !h.is_finished());
+        if !busy || job.busy_over(self.dc.pvr.display_range()) {
+            if busy { self.prof.late_frames += 1; }
             self.dc.finish_render();
-            self.dc.pvr.output(&self.dc.vram, &mut self.frame);
-        } else {
-            self.prof.late_frames += 1;
         }
+        self.dc.pvr.output(&self.dc.vram, &mut self.frame);
         let mode = self.dc.pvr.reg(pvr::SPG_CONTROL);
         if mode != self.video_mode {
             if self.video_mode != u32::MAX {
@@ -426,6 +465,12 @@ impl DcSystem {
                      100.0 * self.prof.idle_cycles as f64 / span, self.cpi_half as f64 / 2.0);
         crate::dlog!("  movie / disc traffic: YUV converter {}k bytes ({} macroblocks done of the picture), channel-2 DMAs {} ({}k bytes, last to {:08X}); GD-ROM: G1 DMAs {} ({}k bytes), PIO {}k bytes, {} sectors read in all, {} NOP aborts",
                      d.trace_yuv / 1024, d.yuv.count, d.trace_ch2.0, d.trace_ch2.1 / 1024, d.trace_ch2.2, d.trace_g1.0, d.trace_g1.1 / 1024, d.gd.pio_bytes / 1024, d.gd.sectors, d.gd.nops);
+        if let Some(j) = &mut self.jit {
+            crate::dlog!("  JIT: {} blocks translated ({} instructions) in {} ms, {} block runs, {} dropped for writes to their code, {} instructions interpreted (warming up or not translatable), {} flushes",
+                         j.compiled, j.compiled_insns, j.compile_us / 1000, j.runs, j.evicted, j.cold, j.flushes);
+            (j.compiled, j.compiled_insns, j.compile_us, j.runs, j.evicted, j.cold) = (0, 0, 0, 0, 0, 0);
+        }
+        let d = &mut self.dc;
         d.trace_yuv = 0;
         d.trace_ch2 = (0, 0, d.trace_ch2.2);
         d.trace_g1 = (0, 0);
@@ -452,7 +497,7 @@ impl DcSystem {
         }
         let (n, polys, px, tr) = d.r_sum;
         if n > 0 {
-            crate::dlog!("  {:.0} renders per emulated second, each about {} polygons, {}k pixels shaded ({}k translucent); {} textures cached; {} fields repeated the last picture",
+            crate::dlog!("  {:.0} renders per emulated second, each about {} polygons, {}k pixels shaded ({}k translucent); {} textures cached; {} fields waited for the render they show",
                          n as f64 / emu, polys / n, px / n / 1000, tr / n / 1000, d.rcache.tex.len(), self.prof.late_frames);
         }
         d.r_sum = (0, 0, 0, 0);
@@ -505,7 +550,14 @@ impl DcSystem {
         crate::dlog!("  AICA register writes: SH-4 {}; ARM7 {}", top(&rw[0]), top(&rw[1]));
         crate::dlog!("  sound RAM at r10 {:05X}: {}; at r12 {:05X}: {}; GD-ROM commands {}",
                      d.arm.r[10] & 0x1F_FFFC, words(d.arm.r[10]), d.arm.r[12] & 0x1F_FFFC, words(d.arm.r[12]),
-                     std::mem::take(&mut d.gd.cmd_counts).iter().map(|(c, n)| format!("{c:02X}x{n}")).collect::<Vec<_>>().join(" "));
+                     d.gd.cmd_counts.iter().map(|(c, n)| format!("{c:02X}x{n}")).collect::<Vec<_>>().join(" "));
+        // the drive went quiet after working: what led up to it
+        let cmds: u64 = std::mem::take(&mut d.gd.cmd_counts).values().sum();
+        if cmds == 0 && self.gd_cmds_before > 0 && !d.gd_trace.is_empty() {
+            crate::dlog!("  GD-ROM went quiet; its last {} events (cycle: what):", d.gd_trace.len());
+            for (t, e) in d.gd_trace.iter() { crate::dlog!("    {t}: {e}"); }
+        }
+        self.gd_cmds_before = cmds;
         use aica_sound::SndStats;
         crate::dlog!("  sound: {:.0} samples per emulated second, {:.1} key-ons/s, {:.1} channels playing; level direct {}, DSP {} ({} steps), CD {}, output {} (peak {:.2}, master volume {mvol}); ARM7 {:.1} M instructions/s, busiest PCs {}; frontend buffer ran dry {dry} times, {queued} frames queued",
                      n as f64 / emu, st.keyons as f64 / emu, st.playing as f64 / n.max(1) as f64,
@@ -520,12 +572,13 @@ impl DcSystem {
         self.prof = Prof { cycles: now, arm_steps, ..Prof::default() };
     }
 
-    fn report(&mut self) {
+    pub fn report(&mut self) {
         let c = &self.cpu;
         let d = &self.dc;
         crate::dlog!("DC frame {}: PC {:08X}{} SR {:08X} PR {:08X} VBR {:08X} SPC {:08X} FPSCR {:08X}, {} fields, cycle {}",
                  self.current_frame, c.pc, if c.sleeping { " (SLEEP)" } else { "" }, c.sr(), c.pr, c.vbr, c.spc, c.fpscr,
                  d.pvr.frames, d.now);
+        if let Some(w) = bus::vwatch_status() { crate::dlog!("  {w}"); }
         if let (Some(p), true) = (&self.disc_path, d.gd.has_disc()) {
             crate::dlog!("  disc {p}: drive state {:02X}, FAD {}, {} sectors read, DMA waiting {}", d.gd.sector_number(), d.gd.fad, d.gd.sectors, d.gd.dma);
         }
@@ -578,8 +631,27 @@ impl DcSystem {
             crate::dlog!("    {}", chunk.iter().map(|(f, t, k, n)| format!("{f:08X}>{t:08X}{}{}", if k.is_empty() { String::new() } else { format!(" {k}") }, if *n > 1 { format!(" x{n}") } else { String::new() })).collect::<Vec<_>>().join("  "));
         }
         if !self.dc.reg_log.is_empty() {
-            crate::dlog!("  register accesses since the last report (PC, R/W, address, value; first 400):");
+            crate::dlog!("  register accesses since the last report (PC, R/W, address, value; the first 400 and the last 1500; timers and MMU registers left out):");
             for l in std::mem::take(&mut self.dc.reg_log) { crate::dlog!("    {l}"); }
+            if self.dc.reg_dropped > 0 { crate::dlog!("    ... {} more ...", self.dc.reg_dropped); }
+            for l in std::mem::take(&mut self.dc.reg_tail) { crate::dlog!("    {l}"); }
+            self.dc.reg_dropped = 0;
+        }
+        if !self.dc.int_counts.is_empty() {
+            let ints: Vec<String> = std::mem::take(&mut self.dc.int_counts).iter().map(|(c, n)| format!("{c:03X} x{n}")).collect();
+            crate::dlog!("  interrupts taken since the last report (INTEVT): {}", ints.join(", "));
+        }
+        if !self.ce_log.is_empty() {
+            crate::dlog!("  Windows CE system calls with their callers, the last 3000 (set.method from caller (R4 R5 R6 R7) -> R0 @cycle):");
+            for (set, m, from, a, cyc, ret) in std::mem::take(&mut self.ce_log) {
+                let ret = ret.map_or("?".to_string(), |v| format!("{v:X}"));
+                crate::dlog!("    {set}.{m} from {from:08X} ({:X} {:X} {:X} {:X}) -> {ret} @{cyc}", a[0], a[1], a[2], a[3]);
+            }
+        }
+        if !self.dc.ce_calls.is_empty() {
+            crate::dlog!("  Windows CE system calls, the last 2000 runs (API set.method xcount @cycle):");
+            let calls: Vec<String> = std::mem::take(&mut self.dc.ce_calls).iter().map(|(s, m, n, c)| format!("{s}.{m}{} @{c}", if *n > 1 { format!(" x{n}") } else { String::new() })).collect();
+            for chunk in calls.chunks(8) { crate::dlog!("    {}", chunk.join("  ")); }
         }
         let pc = self.cpu.pc & !1;
         let code: Vec<String> = (0..16u32).map(|k| format!("{:04X}", self.dc.read(pc.wrapping_add(2 * k), 2))).collect();
@@ -604,6 +676,11 @@ impl System for DcSystem {
         self.set_input(input);
         self.run_field();
         self.current_frame += 1;
+        if self.card_out > 0 {
+            self.card_out -= 1;
+            self.dc.vmu_on = self.card_out == 0;
+        }
+        if self.dc.vmu.dirty { self.card_dirty = true; }
         if self.dc.flash.dirty || self.dc.vmu.dirty {
             self.dc.flash.dirty = false;
             self.dc.vmu.dirty = false;
@@ -675,9 +752,10 @@ impl System for DcSystem {
         dc.gd.disc = self.dc.gd.disc.clone();
         dc.flash.broadcast = self.dc.flash.broadcast;
         dc.flash.apply_broadcast();
-        if let Some(t) = utlb.filter(|t| t.len() == 64) { dc.chip.mmu.utlb = t; }
+        if let Some(t) = utlb.filter(|t| t.len() == 64) { dc.chip.mmu.utlb = t; dc.chip.mmu.invalidate(); }
         // the CPU's direct-RAM map follows MMUCR, which the state just set
         dc.remap();
+        if let Some(j) = self.jit.as_mut() { j.flush(); }
         dc.update_irq();
         self.dc = dc;
         self.cpu = s.cpu;
@@ -703,6 +781,23 @@ impl System for DcSystem {
 
     fn get_sram(&self) -> Option<&[u8]> { Some(&self.save_buf) }
 
+    fn memory_card(&self) -> Option<Vec<u8>> { Some(self.dc.vmu.data.clone()) }
+
+    fn insert_memory_card(&mut self, data: &[u8], swap: bool) -> bool {
+        let mut v = vmu::Vmu::new();
+        if data.len() == vmu::SIZE { v.load(data); }
+        crate::dlog!("Dreamcast: memory card A1 {}: {} blocks free, saves: {:?}", if swap { "swapped" } else { "put in" }, v.free_blocks(), v.files());
+        self.dc.vmu = v;
+        // out of the slot for half a second: the game sees the card go and come back
+        if swap { self.card_out = 30; self.dc.vmu_on = false; }
+        self.card_dirty = false;
+        self.build_save();
+        self.save_dirty = true;
+        true
+    }
+
+    fn memory_card_dirty(&mut self) -> bool { std::mem::take(&mut self.card_dirty) }
+
     fn reset(&mut self) {
         self.cpu.reset();
         self.dc.reset();
@@ -727,8 +822,12 @@ impl System for DcSystem {
             "dc_cpu_half" => self.cpi_half = value.clamp(2, 8) as u64,
             "dc_idle_skip" => self.idle_skip = value != 0,
             "dc_fpu_exact" => self.fpu_exact = value != 0,
+            "dc_jit" => {
+                if value != 0 && self.jit.is_none() { self.jit = Some(crate::common::cpu::sh4::Jit::new()); }
+                if value == 0 { self.jit = None; }
+            }
             "dc_render_thread" => { self.dc.finish_render(); self.dc.render_async = value != 0; }
-            "speed_log" => self.speed_log = value != 0,
+            "speed_log" => { self.speed_log = value != 0; self.dc.gd_trace_on = self.speed_log; }
             // one frame each time the box goes from off to on
             "dc_dump_frame" => {
                 let on = value != 0;

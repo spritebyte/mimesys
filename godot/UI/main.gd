@@ -50,6 +50,7 @@ var options_dialog: SystemOptionsDialog        # NEW (pass 2)
 var recent_menu: PopupMenu                     # NEW (pass 2)
 var _display_info: SystemDisplayInfo           # NEW (pass 2): kept so options apply live
 var cheats_dialog: CheatsDialog                # NEW (cheats)
+var card_dialog: MemoryCardDialog
 var link_dialog: LinkLoadDialog                # NEW (link cable)
 var link_mode := false                         # NEW (link cable): two Game Boys running
 var link_focus := 0                            # NEW (link cable): which one gets the controls
@@ -65,7 +66,7 @@ var _toast_label: Label
 var _toast_tween: Tween
 
 enum FileMenuID { LOAD_ROM, RELOAD_ROM, SAVE_STATE, LOAD_STATE, QUIT, LIBRARY, LINK, NETWORK }
-enum EmuMenuID { RESET, PAUSE, RESUME, STEP_CPU, CHEATS, DISK_SIDE }
+enum EmuMenuID { RESET, PAUSE, RESUME, STEP_CPU, CHEATS, DISK_SIDE, MEMORY_CARDS }
 enum DebugMenuID { CPU_REGISTERS, AUDIO_REGISTERS, VDP_REGISTERS, MEMORY_VIEWER, DISASSEMBLY }
 enum SettingsMenuID { NES, GB, CONTROLS, OPTIONS }
 enum ViewMenuID { FULLSCREEN }
@@ -80,7 +81,9 @@ func _ready() -> void:
 	sram_timer.autostart = true
 	sram_timer.timeout.connect(func():
 		if emu_system != null and emu_system.has_method("check_and_save_sram"):
-			emu_system.check_and_save_sram())
+			emu_system.check_and_save_sram()
+		if card_dialog:
+			card_dialog.save_if_dirty())
 	add_child(sram_timer)
 	init_menus()
 	_init_toast()
@@ -96,6 +99,8 @@ func _ready() -> void:
 	options_dialog.options_changed.connect(_apply_display_options)
 	cheats_dialog = CheatsDialog.new()
 	add_child(cheats_dialog)
+	card_dialog = MemoryCardDialog.new()
+	add_child(card_dialog)
 	link_dialog = LinkLoadDialog.new()
 	add_child(link_dialog)
 	link_dialog.chosen.connect(execute_link_load)
@@ -171,6 +176,7 @@ func init_menus():
 	emu_menu.add_separator()
 	emu_menu.add_item("Cheats...   (Ctrl+H)", EmuMenuID.CHEATS)
 	emu_menu.add_item("Switch Disk Side (Famicom Disk System)   (F4)", EmuMenuID.DISK_SIDE)
+	emu_menu.add_item("Memory Cards (Dreamcast)...", EmuMenuID.MEMORY_CARDS)
 
 	emu_menu.id_pressed.connect(_on_emu_menu)
 
@@ -255,6 +261,9 @@ func _on_emu_menu(id):
 
 		EmuMenuID.CHEATS:
 			cheats_dialog.open_dialog()
+
+		EmuMenuID.MEMORY_CARDS:
+			card_dialog.open_dialog()
 
 
 func _on_debug_menu(id):
@@ -516,6 +525,7 @@ func _apply_display_options() -> void:
 		emu_system.set_option("dc_cpu_half", int(round(float(str(AppSettings.get_option(sys, "dc_cpu_ratio"))) * 2.0)))
 		emu_system.set_option("dc_idle_skip", 1 if AppSettings.get_option(sys, "dc_idle_skip") else 0)
 		emu_system.set_option("dc_render_thread", 1 if AppSettings.get_option(sys, "dc_render_thread") else 0)
+		emu_system.set_option("dc_jit", 1 if AppSettings.get_option(sys, "dc_jit") else 0)
 		emu_system.set_option("dc_fpu_exact", 1 if AppSettings.get_option(sys, "dc_fpu_exact") else 0)
 		emu_system.set_option("dc_record_sound", 1 if AppSettings.get_option(sys, "dc_record_sound") else 0)
 		emu_system.set_option("dc_dump_frame", 1 if AppSettings.get_option(sys, "dc_dump_frame") else 0)
@@ -886,6 +896,7 @@ func _poll_trace_now() -> void:
 
 func _stop_current() -> void:
 	_stop_trace()
+	card_dialog.game_stopped()
 	if emu_system:
 		emu_system.power_off()
 	if cpu_thread.is_alive():
@@ -896,6 +907,7 @@ func _start_system(new_system, system_id: String, title: String) -> void:
 	current_system_id = system_id
 	AppSettings.apply_input_profile(current_system_id)
 	emu_system.power_on()
+	card_dialog.game_loaded(emu_system, emu_mutex, current_system_id)
 	cheats_dialog.game_loaded(emu_system, emu_mutex, current_system_id, title)   # NEW (cheats)
 	if cheats_dialog.active_count() > 0:
 		_toast("%d cheat(s) on" % cheats_dialog.active_count())

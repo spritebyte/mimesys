@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 pub const SB_C2DSTAT: u32 = 0x00;
 pub const SB_C2DLEN: u32 = 0x04;
 pub const SB_C2DST: u32 = 0x08;
+pub const SB_SDSTAW: u32 = 0x10;
+pub const SB_SDBAAW: u32 = 0x14;
+pub const SB_SDWLT: u32 = 0x18;
+pub const SB_SDLAS: u32 = 0x1C;
 pub const SB_SDST: u32 = 0x20;
 pub const SB_LMMODE0: u32 = 0x84;
 pub const SB_LMMODE1: u32 = 0x88;
@@ -34,7 +38,7 @@ pub const EXT_AICA: u32 = 1 << 1;
 
 /// What a system-block write starts.
 #[derive(Debug, PartialEq)]
-pub enum SbAction { None, Ch2Dma, SoftReset }
+pub enum SbAction { None, Ch2Dma, SortDma, SoftReset }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Holly {
@@ -108,11 +112,7 @@ impl Holly {
                 *self.w(off) = v & 1;
                 if v & 1 != 0 { SbAction::Ch2Dma } else { SbAction::None }
             }
-            SB_SDST => {
-                // sort DMA: not emulated, report it done
-                if v & 1 != 0 { self.raise(IST_DMA_SORT); }
-                SbAction::None
-            }
+            SB_SDST => if v & 1 != 0 { SbAction::SortDma } else { SbAction::None },
             SB_SFRES => if v & 0xFFFF == 0x7611 { SbAction::SoftReset } else { SbAction::None },
             _ => { *self.w(off) = v; SbAction::None }
         }

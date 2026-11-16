@@ -98,6 +98,9 @@ impl Ay8910 {
         self.set_envelope_shape(0);
     }
 
+    /// Change the chip clock (a YM2203's SSG follows the FM prescaler).
+    pub fn set_clock(&mut self, clock: u32) { self.tick_rate = clock as f64 / 8.0; }
+
     pub fn write_address(&mut self, v: u8) { self.address = v & 0x0F; }
 
     /// Write the selected register. Returns Some(value) when port B (register 15)

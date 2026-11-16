@@ -308,6 +308,9 @@ pub struct Renderer<'a> {
     /// deferred opaque shading: the strips and triangles of the depth pass
     dstrips: Vec<StripInfo>,
     dtris: Vec<TriSetup>,
+    /// each polygon's rows (lowest and highest vertex y), worked out once for all bands:
+    /// a band skips the polygons that can't reach it
+    yr: &'a [(f32, f32)],
 }
 
 #[inline]
@@ -479,6 +482,13 @@ fn span(e: &[(f32, f32, f32); 3], py: f32, x0: i32, x1: i32) -> Option<(i32, i32
     if sx0 > sx1 { None } else { Some((sx0, sx1)) }
 }
 
+/// Can polygon `n` (rows `yr[n]`) have a pixel in the band of rows top..bot? (`bounds`
+/// drops every triangle of one that can't: all its vertices above or below the band.)
+#[inline]
+fn reaches(yr: &[(f32, f32)], top: f32, bot: f32, n: usize) -> bool {
+    yr.get(n).is_none_or(|&(lo, hi)| hi >= top && lo < bot)
+}
+
 /// The depth pass's arguments: edges, edge ownership, z plane, bounds x0 x1 y0 y1, z write,
 /// strip id, triangle number.
 type DepthArgs = ([(f32, f32, f32); 3], [bool; 3], Plane, i32, i32, i32, i32, bool, u32, u32);
@@ -522,7 +532,7 @@ impl<'a> Renderer<'a> {
         let n = w * h;
         let d = r(regs, FOG_DENSITY);
         Self {
-            regs, vram, w, y0, h, cache, stats: Stats::default(), local: Default::default(), dstrips: Vec::new(), dtris: Vec::new(),
+            regs, vram, w, y0, h, cache, stats: Stats::default(), local: Default::default(), dstrips: Vec::new(), dtris: Vec::new(), yr: &[],
             fog_den: (d >> 8 & 0xFF) as f32 / 128.0 * 2f32.powi((d & 0xFF) as i8 as i32),
             b: Bufs { col: vec![0; n], col2: vec![0; n], z: vec![0.0; n], id: vec![0; n], tid: vec![0; n], mask: Vec::new(), sorting: false, tlast: Vec::new(), inorder: true, tfrags: Vec::new() },
         }
@@ -582,7 +592,6 @@ impl<'a> Renderer<'a> {
     /// at an ISP word, TSP, TCW and three vertices of 3 + skip words.
     fn background(&mut self) {
         let t = self.reg(ISP_BACKGND_T);
-        let depth = f32::from_bits(self.reg(ISP_BACKGND_D));
         let base = (self.reg(PARAM_BASE) & 0xF0_0000) + ((t & 0xFF_FFF8) >> 1);
         let skip = t >> 24 & 7;
         let rd = |k: u32| read32(self.vram, base + 4 * k);
@@ -615,7 +624,6 @@ impl<'a> Renderer<'a> {
         }
         let p = Poly { list: LIST_OPAQUE, isp: isp | 7 << 29, tsp, tcw, first: 0, count: 3, clip: [0; 4], clip_mode: 0, pcw: 0, tsp1: 0, tcw1: 0 };
         let m = self.mode(&p, false);
-        self.b.col.fill(0);
         let p3 = [(v[0].x, v[0].y), (v[1].x, v[1].y), (v[2].x, v[2].y)];
         if area(p3[0], p3[1], p3[2]).abs() > 1e-12 {
             self.tri(&m, [&v[0], &v[1], &v[2]], None, true, Pass::Draw(0), &mut None);
@@ -623,8 +631,18 @@ impl<'a> Renderer<'a> {
             // a degenerate background: flat colour
             let tex = self.texture(&m).map(|t| self.decoded(&m, t, 0));
             let c = self.shade(&m, tex.as_ref().map(|(t, d)| (t, &d[..])), v[0].base, v[0].off, v[0].u, v[0].v, v[0].z);
-            self.b.col.fill(pack(c));
+            let c = pack(c);
+            for (k, px) in self.b.col.iter_mut().enumerate() { if self.b.tid[k] == 0 { *px = c; } }
         }
+    }
+
+    /// The buffers at the background plane's depth, nothing drawn. ISP_BACKGND_D's low 4
+    /// bits are not part of the depth: Windows CE's DirectDraw draws its full-screen movie
+    /// quad (4x4 Evo) at exactly the register's value with depth mode "greater", which
+    /// passes only against the truncated background.
+    fn clear(&mut self) {
+        let depth = f32::from_bits(self.reg(ISP_BACKGND_D) & !0xF);
+        self.b.col.fill(0);
         self.b.z.fill(depth);
         self.b.id.fill(0);
         self.b.tid.fill(0);
@@ -632,13 +650,17 @@ impl<'a> Renderer<'a> {
 
     /// Draw a scene.
     pub fn draw(&mut self, scene: Option<&Scene>) {
-        self.background();
-        let Some(s) = scene else { return };
+        self.clear();
+        let Some(s) = scene else { self.background(); return };
         let presort = self.reg(ISP_FEED_CFG) & 1 != 0;
-        // opaque, deferred as on the chip: depth first, then each visible pixel shaded once
-        for (n, p) in s.polys.iter().enumerate().filter(|(_, p)| p.list == LIST_OPAQUE) { self.strip(s, p, Pass::Depth(n as u32 + 1)); }
+        let (yr, top, bot) = (self.yr, self.y0 as f32, (self.y0 + self.h) as f32);
+        let reach = move |n: usize| reaches(yr, top, bot, n);
+        // opaque, deferred as on the chip: depth first, then each visible pixel shaded once,
+        // the background plane where no opaque triangle is
+        for (n, p) in s.polys.iter().enumerate().filter(|&(n, p)| p.list == LIST_OPAQUE && reach(n)) { self.strip(s, p, Pass::Depth(n as u32 + 1)); }
+        self.background();
         self.shade_deferred();
-        for (n, p) in s.polys.iter().enumerate().filter(|(_, p)| p.list == LIST_PUNCH) { self.strip(s, p, Pass::Draw(n as u32 + 1)); }
+        for (n, p) in s.polys.iter().enumerate().filter(|&(n, p)| p.list == LIST_PUNCH && reach(n)) { self.strip(s, p, Pass::Draw(n as u32 + 1)); }
         self.modifiers(s);
         // auto-sort: collect the fragments, then blend each pixel's back to front
         self.b.sorting = !presort;
@@ -647,9 +669,12 @@ impl<'a> Renderer<'a> {
             self.b.tlast.resize(self.w * self.h, f32::NEG_INFINITY);
             self.b.inorder = true;
         }
-        for (n, p) in s.polys.iter().enumerate().filter(|(_, p)| p.list == LIST_TRANS) { self.strip(s, p, Pass::Draw(n as u32 + 1)); }
+        for (n, p) in s.polys.iter().enumerate().filter(|&(n, p)| p.list == LIST_TRANS && reach(n)) { self.strip(s, p, Pass::Draw(n as u32 + 1)); }
         if self.b.sorting { self.resolve(); }
     }
+
+    #[inline]
+    fn reaches(&self, n: usize) -> bool { reaches(self.yr, self.y0 as f32, (self.y0 + self.h) as f32, n) }
 
     /// Blend the collected translucent fragments: per pixel, farthest (smallest 1/w) first,
     /// equal depths in the order sent (the sort is stable).
@@ -710,7 +735,7 @@ impl<'a> Renderer<'a> {
         }
         self.b.mask = mask;
         for (k, p) in s.polys.iter().enumerate() {
-            if p.pcw & 0x80 != 0 && (p.list == LIST_OPAQUE || p.list == LIST_PUNCH) {
+            if p.pcw & 0x80 != 0 && (p.list == LIST_OPAQUE || p.list == LIST_PUNCH) && self.reaches(k) {
                 self.strip(s, p, Pass::Modify(k as u32 + 1));
             }
         }
@@ -733,12 +758,16 @@ impl<'a> Renderer<'a> {
         let cull = p.isp >> 27 & 3;
         let cull_val = f32::from_bits(self.reg(FPU_CULL_VAL)).abs();
         let count = matches!(pass, Pass::Draw(_) | Pass::Depth(_));
-        if count { self.stats.polys += 1; }
         // the texture levels, decoded when a triangle first lands in this band
         let mut levels = None;
         if let Pass::Depth(_) = pass { self.dstrips.push(StripInfo { m: m.clone(), levels: None }); }
+        let (wf, top, bot) = (self.w as f32, self.y0 as f32, (self.y0 + self.h) as f32);
         for k in 0..v.len().saturating_sub(2) {
             let tv = [&v[k], &v[k + 1], &v[k + 2]];
+            // outside the band: `bounds` would drop it (the same test), so skip the area
+            let (minx, maxx) = (tv[0].x.min(tv[1].x).min(tv[2].x), tv[0].x.max(tv[1].x).max(tv[2].x));
+            let (miny, maxy) = (tv[0].y.min(tv[1].y).min(tv[2].y), tv[0].y.max(tv[1].y).max(tv[2].y));
+            if !(maxx >= 0.0 && maxy >= top && minx < wf && miny < bot) { continue; }
             if cull != 0 {
                 let mut ar = tri_area(tv);
                 if k & 1 != 0 { ar = -ar; }
@@ -751,24 +780,26 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    /// One triangle. `fill` covers the whole band (the background plane).
+    /// One triangle. `fill` covers the whole band (the background plane) where no opaque
+    /// triangle won the depth pass.
     fn tri(&mut self, m: &Mode, v: [&Vert; 3], clip: Option<([u16; 4], bool)>, fill: bool, pass: Pass,
            levels: &mut Option<Vec<(Tex, Texels)>>) {
         let shading = !matches!(pass, Pass::Depth(_));
         let p = [(v[0].x, v[0].y), (v[1].x, v[1].y), (v[2].x, v[2].y)];
-        let ar = tri_area(v);
-        if !(ar.abs() > 1e-12) { return; }
         let w = self.w;
         let (x0, x1, ya, yb) = if fill {
             (0, w as i32 - 1, self.y0 as i32, (self.y0 + self.h) as i32 - 1)
         } else {
             match bounds(p, w, self.y0, self.h, clip) { Some(b) => b, None => return }
         };
+        // (as `tri_area`, keeping the homogeneous set-up for the planes)
+        let hom = homogeneous(v);
+        let ar = match &hom { Some((_, _, a)) => *a as f32, None => area(p[0], p[1], p[2]) };
+        if !(ar.abs() > 1e-12) { return; }
         let tex = self.texture(m);
         if shading && levels.is_none() { *levels = Some(self.levels(m)); }
         let levels: &[(Tex, Texels)] = levels.as_deref().unwrap_or(&[]);
         // barycentric gradients, then planes of z (= 1/w) and of attribute × z
-        let hom = homogeneous(v);
         let dx = [(p[1].1 - p[2].1) / ar, (p[2].1 - p[0].1) / ar, (p[0].1 - p[1].1) / ar];
         let dy = [(p[2].0 - p[1].0) / ar, (p[0].0 - p[2].0) / ar, (p[1].0 - p[0].0) / ar];
         let z3 = [v[0].z, v[1].z, v[2].z];
@@ -854,7 +885,9 @@ impl<'a> Renderer<'a> {
             for x in x0..=x1 {
                 let cur = ev;
                 ev[0] += e[0].0; ev[1] += e[1].0; ev[2] += e[2].0;
-                if !fill {
+                if fill {
+                    if self.b.tid[row + x as usize] != 0 { continue; }
+                } else {
                     if cur[0] < 0.0 || cur[1] < 0.0 || cur[2] < 0.0 { continue; }
                     if (cur[0] == 0.0 && !own[0]) || (cur[1] == 0.0 && !own[1]) || (cur[2] == 0.0 && !own[2]) { continue; }
                     if let Some((cr, false)) = clip {
@@ -944,7 +977,8 @@ impl<'a> Renderer<'a> {
             let (dudy, dvdy) = ((pu.b - u * pz.b) * inv, (pv.b - vv * pz.b) * inv);
             let size = levels[0].0.sx as f32;
             let adjust = match m.tsp >> 8 & 0xF { 0 => 1.0, d => d as f32 / 4.0 };
-            let rho = dudx.hypot(dvdx).max(dudy.hypot(dvdy)) * size * adjust;
+            // (no overflow to guard against here: plain square roots, not libm's hypot)
+            let rho = (dudx * dudx + dvdx * dvdx).sqrt().max((dudy * dudy + dvdy * dvdy).sqrt()) * size * adjust;
             let k = if rho > 1.0 { (rho.log2().round() as usize).min(levels.len() - 1) } else { 0 };
             levels.get(k)
         };
@@ -962,7 +996,8 @@ impl<'a> Renderer<'a> {
             let ts = &tris[t as usize - 1];
             let st = &mut strips[ts.strip as usize];
             if st.levels.is_none() { st.levels = Some(self.levels(&st.m)); }
-            let (px, py) = ((i % w) as f32 + 0.5, (self.y0 + i / w) as f32 + 0.5);
+            let (row, col) = (i / w, i - i / w * w);
+            let (px, py) = (col as f32 + 0.5, (self.y0 + row) as f32 + 0.5);
             let mut cz = [0f32; 8];
             if st.m.gouraud { for ch in 0..8 { cz[ch] = ts.pc[ch].at(px, py); } }
             let col = self.frag(&st.m, ts, st.levels.as_deref().unwrap_or(&[]), ts.pz.at(px, py), ts.pu.at(px, py), ts.pv.at(px, py), &cz);
@@ -1211,6 +1246,13 @@ impl Drawn {
 
     /// Write the tiles to the framebuffer; the video RAM range written.
     pub fn write(&self, vram: &mut [u8]) -> Option<(usize, usize)> { write_out(&self.regs, &self.col, self.w, self.h, &self.tiles, vram) }
+
+    /// The framebuffer settings the write-out uses (debug logs).
+    pub fn describe_out(&self) -> String {
+        let reg = |o: u32| r(&self.regs, o);
+        format!("{}x{} tiles {}, FB_W_CTRL {:X} SOF1 {:08X} SOF2 {:08X} LINESTRIDE {:X} X_CLIP {:08X} Y_CLIP {:08X} SCALER_CTL {:X}",
+            self.w, self.h, self.tiles.len(), reg(FB_W_CTRL), reg(FB_W_SOF1), reg(FB_W_SOF2), reg(FB_W_LINESTRIDE), reg(FB_X_CLIP), reg(FB_Y_CLIP), reg(SCALER_CTL))
+    }
 }
 
 /// Draw the scene PARAM_BASE names (STARTRENDER). The buffer is split into horizontal bands
@@ -1252,6 +1294,9 @@ impl FrameDump {
 }
 
 /// Test tool: draw nothing (profiling the CPU side of a save state).
+/// Tests: render threads (0: as many as the host has, less one).
+#[cfg(test)]
+pub static THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
 pub static SKIP_DRAW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -1266,11 +1311,18 @@ pub fn draw(regs: &[u32], scene: Option<&Scene>, vram: &[u8], cache: &TexCache) 
         h = h.max(ty as usize * 32 + 32);
     }
     let (w, h) = (w.min(MAX_W), h.min(MAX_H));
-    // 32-row bands handed out to the threads as they finish (a busy band does not hold the
+    // 16-row bands handed out to the threads as they finish (a busy band does not hold the
     // others up); one core is left for the CPU
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).saturating_sub(1).clamp(1, 12);
-    const BAND: usize = 32;
+    #[cfg(test)]
+    let threads = match THREADS.load(std::sync::atomic::Ordering::Relaxed) { 0 => threads, n => n };
+    const BAND: usize = 16;
     let nb = h.div_ceil(BAND);
+    // each polygon's rows, for the bands to skip what can't reach them
+    let yr: Vec<(f32, f32)> = scene.map_or(Vec::new(), |s| s.polys.iter().map(|p| {
+        let v = &s.verts[(p.first as usize).min(s.verts.len())..((p.first + p.count) as usize).min(s.verts.len())];
+        v.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), q| (lo.min(q.y), hi.max(q.y)))
+    }).collect());
     let next = std::sync::atomic::AtomicUsize::new(0);
     let done: Vec<Mutex<Option<(Vec<u32>, Stats)>>> = (0..nb).map(|_| Mutex::new(None)).collect();
     std::thread::scope(|sc| {
@@ -1280,19 +1332,23 @@ pub fn draw(regs: &[u32], scene: Option<&Scene>, vram: &[u8], cache: &TexCache) 
                 if k >= nb { break; }
                 let y0 = k * BAND;
                 let mut rd = Renderer::new(regs, vram, cache, w, y0, BAND.min(h - y0));
+                rd.yr = &yr;
                 rd.draw(scene);
                 *done[k].lock().unwrap() = Some((std::mem::take(&mut rd.b.col), rd.stats));
             });
         }
     });
     let mut col = Vec::with_capacity(w * h);
-    let mut stats = Stats { tiles: tiles.len() as u32, ..Stats::default() };
+    let polys = scene.map_or(0, |s| s.polys.iter().filter(|p| matches!(p.list, LIST_OPAQUE | LIST_PUNCH | LIST_TRANS)).count());
+    let mut stats = Stats { tiles: tiles.len() as u32, polys: polys as u32, ..Stats::default() };
     for (k, d) in done.into_iter().enumerate() {
         let (c, st) = d.into_inner().unwrap().expect("render band");
         col.extend_from_slice(&c);
         stats.pixels += st.pixels;
         stats.trans += st.trans;
-        if k == 0 { stats.polys = st.polys; stats.culled = st.culled; stats.volumes = st.volumes; }
+        // culled: triangles dropped, counted in each band they'd reach
+        stats.culled += st.culled;
+        if k == 0 { stats.volumes = st.volumes; }
     }
     Drawn { col, w, h, tiles, regs: regs.to_vec(), stats, took: t0.elapsed() }
 }
@@ -1305,19 +1361,35 @@ pub fn render(regs: &[u32], scene: Option<&Scene>, vram: &mut [u8]) -> Stats {
     d.stats
 }
 
+/// The frame buffer addresses (32-bit view, within 8 MB) a render may write: from the
+/// lower of FB_W_SOF1 / 2 to the higher plus the lines up to FB_Y_CLIP's bottom.
+pub fn target_range(regs: &[u32]) -> (u32, u32) {
+    let reg = |o: u32| r(regs, o);
+    let stride = (reg(FB_W_LINESTRIDE) & 0x1FF) * 8;
+    let rows = (reg(FB_Y_CLIP) >> 16 & 0x3FF) + 1;
+    let (a, b) = (reg(FB_W_SOF1) & 0x7F_FFFF, reg(FB_W_SOF2) & 0x7F_FFFF);
+    (a.min(b), a.max(b) + stride.max(4) * rows)
+}
+
 /// A render running on its own thread (with copies of the registers, scene and video RAM)
 /// while the CPU carries on. Not saved or cloned: a state is taken after it finished.
 #[derive(Default)]
-pub struct RenderJob(pub Option<std::thread::JoinHandle<(Drawn, Vec<u8>)>>);
+pub struct RenderJob(pub Option<std::thread::JoinHandle<(Drawn, Vec<u8>)>>, pub (u32, u32));
 
 impl Clone for RenderJob {
-    fn clone(&self) -> Self { RenderJob(None) }
+    fn clone(&self) -> Self { RenderJob(None, (0, 0)) }
 }
 
 impl RenderJob {
     /// The copy of video RAM comes back with the picture, to be brought up to date for
     /// the next render.
     pub fn start(regs: Vec<u32>, scene: Option<Scene>, vram: Vec<u8>, cache: Arc<TexCache>) -> Self {
-        RenderJob(Some(std::thread::spawn(move || { let d = draw(&regs, scene.as_ref(), &vram, &cache); (d, vram) })))
+        let target = target_range(&regs);
+        RenderJob(Some(std::thread::spawn(move || { let d = draw(&regs, scene.as_ref(), &vram, &cache); (d, vram) })), target)
+    }
+
+    /// Still drawing, into frame buffer addresses overlapping `lo..hi`?
+    pub fn busy_over(&self, (lo, hi): (u32, u32)) -> bool {
+        self.0.as_ref().is_some_and(|h| !h.is_finished()) && self.1.0 < hi && lo < self.1.1
     }
 }

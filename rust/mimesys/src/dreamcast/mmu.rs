@@ -14,6 +14,9 @@
 //! - LDTLB writes the entry at MMUCR.URC, then URC moves on (round robin up to URB), so
 //!   a miss handler that only calls LDTLB doesn't keep replacing one entry.
 //! - The UTLB is also reachable as memory: address array F6000000, data array F7000000.
+//! - A soft TLB in front (1 KB pages, direct-mapped by address, tagged with the ASID, SR.MD
+//!   and MMUCR.SV) remembers recent translations and what they allow; any UTLB change
+//!   empties it (an epoch count).
 
 use serde::{Deserialize, Serialize};
 
@@ -76,8 +79,23 @@ impl TlbEntry {
     }
 }
 
+/// One soft-TLB entry: `tag` = the 1 KB page | ASID | MD << 8 | SV << 9, valid while `epoch`
+/// is the MMU's; `pa` = the physical page; `ok` bit 0 reads / fetches allowed, bit 1
+/// writes.
+#[derive(Clone, Copy, Default)]
+struct Soft { tag: u32, epoch: u32, pa: u32, ok: u8 }
+
+const SOFT: usize = 1024;
+
+fn soft_new() -> Vec<Soft> { vec![Soft::default(); SOFT] }
+fn one() -> u32 { 1 }
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Mmu {
+    #[serde(skip, default = "soft_new")]
+    soft: Vec<Soft>,
+    #[serde(skip, default = "one")]
+    epoch: u32,
     pub utlb: Vec<TlbEntry>,
     /// the instruction running faulted: its EXPEVT (taken by the CPU after it)
     #[serde(skip)]
@@ -104,16 +122,44 @@ impl Default for Mmu {
 
 impl Mmu {
     pub fn new() -> Self {
-        Self { utlb: vec![TlbEntry::default(); 64], fault: None, md: true, last: 0, misses: 0, loads: 0, miss_pages: Default::default() }
+        Self { soft: soft_new(), epoch: 1, utlb: vec![TlbEntry::default(); 64], fault: None, md: true, last: 0, misses: 0, loads: 0, miss_pages: Default::default() }
     }
 
     /// MMUCR.TI: every entry invalid.
-    pub fn flush(&mut self) { for e in self.utlb.iter_mut() { e.v = false; } }
+    pub fn flush(&mut self) { for e in self.utlb.iter_mut() { e.v = false; } self.invalidate(); }
+
+    /// The UTLB changed: forget the soft TLB.
+    pub fn invalidate(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 { self.soft.fill(Soft::default()); self.epoch = 1; }
+    }
+
+    #[inline(always)]
+    fn soft_tag(va: u32, asid: u8, md: bool, mmucr: u32) -> u32 {
+        va & 0xFFFF_FC00 | asid as u32 | (md as u32) << 8 | (mmucr >> 8 & 1) << 9
+    }
+
+    /// The soft TLB's physical address for `va`, if it has the page and allows the access.
+    #[inline(always)]
+    fn soft_get(&self, va: u32, tag: u32, write: bool) -> Option<u32> {
+        let e = &self.soft[(va >> 10) as usize & (SOFT - 1)];
+        if e.tag == tag && e.epoch == self.epoch && e.ok >> write as u32 & 1 != 0 { Some(e.pa | va & 0x3FF) } else { None }
+    }
+
+    /// Remember UTLB entry `e`'s translation of `va`'s 1 KB page.
+    fn soft_put(&mut self, va: u32, tag: u32, e: TlbEntry) {
+        let m = e.mask();
+        let read = self.md || e.pr >= 2;
+        let write = read && e.pr & 1 != 0 && e.d;
+        let epoch = self.epoch;
+        self.soft[(va >> 10) as usize & (SOFT - 1)] = Soft { tag, epoch, pa: (e.ppn & !m | va & m) & !0x3FF, ok: read as u8 | (write as u8) << 1 };
+    }
 
     /// LDTLB: PTEH / PTEL into the entry MMUCR.URC names; returns MMUCR with URC moved on.
     pub fn ldtlb(&mut self, pteh: u32, ptel: u32, mmucr: u32) -> u32 {
         let urc = (mmucr >> 10 & 63) as usize;
         self.utlb[urc] = TlbEntry::load(pteh, ptel);
+        self.invalidate();
         self.loads += 1;
         let urb = (mmucr >> 18 & 63) as usize;
         let next = if urb != 0 && urc + 1 >= urb { 0 } else { (urc + 1) & 63 };
@@ -127,6 +173,8 @@ impl Mmu {
         if self.fault.is_some() { return None; }
         if va >= 0x8000_0000 && !(0xC000_0000..0xE000_0000).contains(&va) { return Some(va); }
         let asid = *pteh as u8;
+        let tag = Self::soft_tag(va, asid, self.md, mmucr);
+        if let Some(p) = self.soft_get(va, tag, acc == Access::Write) { return Some(p); }
         let any = self.md && mmucr & 0x100 != 0;
         let hit = if self.utlb[self.last].hits(va, asid, any) { Some(self.last) } else {
             self.utlb.iter().position(|e| e.hits(va, asid, any))
@@ -146,6 +194,7 @@ impl Mmu {
                 } else if write && !e.d {
                     EXP_INITIAL_WRITE
                 } else {
+                    self.soft_put(va, tag, e);
                     let m = e.mask();
                     return Some(e.ppn & !m | va & m);
                 }
@@ -155,6 +204,23 @@ impl Mmu {
         *tea = va;
         *pteh = *pteh & 0x3FF | va & 0xFFFF_FC00;
         None
+    }
+
+    /// Where an instruction fetch at `va` (translated: U0 / P3) goes, when the UTLB has it
+    /// and allows it; nothing is recorded either way (the recompiler's lookup).
+    pub fn probe_fetch(&mut self, va: u32, asid: u8, md: bool, mmucr: u32) -> Option<u32> {
+        let tag = Self::soft_tag(va, asid, md, mmucr);
+        if let Some(p) = self.soft_get(va, tag, false) { return Some(p); }
+        let any = md && mmucr & 0x100 != 0;
+        let i = if self.utlb[self.last].hits(va, asid, any) { self.last } else {
+            self.utlb.iter().position(|e| e.hits(va, asid, any))?
+        };
+        let e = self.utlb[i];
+        if !md && e.pr < 2 { return None; }
+        self.last = i;
+        if md == self.md { self.soft_put(va, tag, e); }
+        let m = e.mask();
+        Some(e.ppn & !m | va & m)
     }
 
     /// A store-queue flush with the MMU on: the SQ address goes through the UTLB.
@@ -186,6 +252,7 @@ impl Mmu {
     }
 
     pub fn array_write(&mut self, a: u32, v: u32, pteh: u32, mmucr: u32) {
+        self.invalidate();
         let i = (a >> 8 & 63) as usize;
         match a >> 24 {
             0xF6 if a & 0x80 != 0 => {

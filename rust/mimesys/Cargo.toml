@@ -18,6 +18,10 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_bytes = "0.11"
 bincode = { version = "2.0", features = ["serde"] }
 chd = "0.4"
+cranelift-codegen = "0.137"
+cranelift-frontend = "0.137"
+cranelift-jit = "0.137"
+cranelift-module = "0.137"
 
 [dev-dependencies]
 chd = { version = "0.4", features = ["encode"] }

@@ -249,7 +249,16 @@ impl Tex {
             let (mx, my) = (sx as i32 - 1, sy as i32 - 1);
             return self.sample_with(u, v, |x, y| d[((y & my) as u32 * sx + (x & mx) as u32) as usize]);
         }
-        self.sample_with(u, v, |x, y| d[(wv.apply(y, sy) * sx + wu.apply(x, sx)) as usize])
+        if !self.bilinear {
+            return self.sample_with(u, v, |x, y| d[(wv.apply(y, sy) * sx + wu.apply(x, sx)) as usize]);
+        }
+        // bilinear: each wrapped coordinate once (the same texels as `sample_with`)
+        let (fu, fv) = (u * sx as f32 - 0.5, v * sy as f32 - 0.5);
+        let (x0, y0) = (ffloor(fu), ffloor(fv));
+        let (ax, ay) = (((fu - x0 as f32) * 256.0) as u32, ((fv - y0 as f32) * 256.0) as u32);
+        let (xa, xb) = (wu.apply(x0, sx) as usize, wu.apply(x0 + 1, sx) as usize);
+        let (ra, rb) = ((wv.apply(y0, sy) * sx) as usize, (wv.apply(y0 + 1, sy) * sx) as usize);
+        bilerp(d[ra + xa], d[ra + xb], d[rb + xa], d[rb + xb], ax, ay)
     }
 
     #[inline]
@@ -262,20 +271,22 @@ impl Tex {
         let (fu, fv) = (fu - 0.5, fv - 0.5);
         let (x0, y0) = (ffloor(fu), ffloor(fv));
         let (ax, ay) = (((fu - x0 as f32) * 256.0) as u32, ((fv - y0 as f32) * 256.0) as u32);
-        let c00 = texel(x0, y0);
-        let c10 = texel(x0 + 1, y0);
-        let c01 = texel(x0, y0 + 1);
-        let c11 = texel(x0 + 1, y0 + 1);
-        if c00 == c10 && c00 == c01 && c00 == c11 { return c00; }
-        let mut out = 0;
-        for s in [0u32, 8, 16, 24] {
-            let ch = |c: u32| c >> s & 0xFF;
-            let top = ch(c00) * (256 - ax) + ch(c10) * ax;
-            let bot = ch(c01) * (256 - ax) + ch(c11) * ax;
-            out |= ((top * (256 - ay) + bot * ay) >> 16) << s;
-        }
-        out
+        bilerp(texel(x0, y0), texel(x0 + 1, y0), texel(x0, y0 + 1), texel(x0 + 1, y0 + 1), ax, ay)
     }
+}
+
+/// Four texels (row 0 then row 1) mixed by the fractions ax, ay (0-255 of 256).
+#[inline(always)]
+fn bilerp(c00: u32, c10: u32, c01: u32, c11: u32, ax: u32, ay: u32) -> u32 {
+    if c00 == c10 && c00 == c01 && c00 == c11 { return c00; }
+    let mut out = 0;
+    for s in [0u32, 8, 16, 24] {
+        let ch = |c: u32| c >> s & 0xFF;
+        let top = ch(c00) * (256 - ax) + ch(c10) * ax;
+        let bot = ch(c01) * (256 - ax) + ch(c11) * ax;
+        out |= ((top * (256 - ay) + bot * ay) >> 16) << s;
+    }
+    out
 }
 
 /// floor() without the library call (values well inside i32).

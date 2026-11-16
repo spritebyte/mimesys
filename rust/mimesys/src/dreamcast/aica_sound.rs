@@ -127,12 +127,12 @@ struct Lfo {
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Slot {
     pub active: bool,
-    cur: u32,
+    pub cur: u32,
     nxt: u32,
     step: u32,
     backwards: bool,
-    eg_state: u8,
-    eg_vol: i32,
+    pub eg_state: u8,
+    pub eg_vol: i32,
     ar: i32,
     d1r: i32,
     d2r: i32,

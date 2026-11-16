@@ -75,6 +75,16 @@ fn lfo_pm_phase_adjustment(fnum_bits: u32, pm_sens: u32, lfo_raw_pm: i32) -> i32
 
 fn dac_discontinuity(v: i32) -> i32 { if v < 0 { v - 3 } else { v + 4 } }
 
+/// ymfm roundtrip_fp: a value through the OPN's 3.10 floating-point DAC (the bits below
+/// the mantissa lost).
+pub fn roundtrip_fp(value: i32) -> i32 {
+    if value < -32768 { return -32768; }
+    if value > 32767 { return 32767; }
+    let scan = value ^ (value >> 31);
+    let exponent = (7 - ((scan << 17) as u32).leading_zeros() as i32).max(1) - 1;
+    value & !((1 << exponent) - 1)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Ym2612 {
     regs: Vec<u8>,
@@ -93,6 +103,10 @@ pub struct Ym2612 {
     address: u16,
     dac_data: u16,
     dac_enable: bool,
+    /// OPN (YM2203's FM part, ymfm opn_registers_base<false>): 3 channels, one bank, no
+    /// LFO, one (mono) output
+    #[serde(default)]
+    opn: bool,
 }
 
 impl Default for Ym2612 { fn default() -> Self { Self::new() } }
@@ -111,7 +125,7 @@ impl Ym2612 {
             regs: vec![0; 0x200], lfo_counter: 0, lfo_am: 0, ops, chans: Default::default(),
             env_counter: 0, status: 0, timer_running: [false; 2], timer_left: [0; 2], total_clocks: 0,
             active_channels: 0x3F, modified_channels: 0x3F, prepare_count: 0,
-            address: 0, dac_data: 0, dac_enable: false,
+            address: 0, dac_data: 0, dac_enable: false, opn: false,
         };
         for c in 0..6u32 {
             for o in Self::ch_ops(c as usize) { y.ops[o].choffs = channel_offset(c); }
@@ -119,6 +133,17 @@ impl Ym2612 {
         y.reset();
         y
     }
+
+    /// The YM2203's FM part (see `opn`); the YM2203 itself is ym2203.rs.
+    pub fn new_opn() -> Self {
+        let mut y = Self::new();
+        y.opn = true;
+        y.active_channels = 7;
+        y.modified_channels = 7;
+        y
+    }
+
+    fn channels(&self) -> usize { if self.opn { 3 } else { 6 } }
 
     pub fn reset(&mut self) {
         self.status = 0;
@@ -143,7 +168,7 @@ impl Ym2612 {
 
     // ---- register fields ----
     fn byte(&self, off: u32, start: u32, len: u32, extra: u32) -> u32 { bf(self.regs[(off + extra) as usize] as u32, start, len) }
-    fn lfo_enable(&self) -> bool { self.byte(0x22, 3, 1, 0) != 0 }
+    fn lfo_enable(&self) -> bool { !self.opn && self.byte(0x22, 3, 1, 0) != 0 }
     fn lfo_rate(&self) -> usize { self.byte(0x22, 0, 3, 0) as usize }
     fn timer_a_value(&self) -> i64 { ((self.regs[0x24] as i64) << 2) | (self.regs[0x25] & 3) as i64 }
     fn timer_b_value(&self) -> i64 { self.regs[0x26] as i64 }
@@ -153,11 +178,11 @@ impl Ym2612 {
     fn ch_block_freq(&self, c: u32) -> u32 { (self.byte(0xA4, 0, 6, c) << 8) | self.byte(0xA0, 0, 8, c) }
     fn ch_feedback(&self, c: u32) -> u32 { self.byte(0xB0, 3, 3, c) }
     fn ch_algorithm(&self, c: u32) -> u32 { self.byte(0xB0, 0, 3, c) }
-    fn ch_output_0(&self, c: u32) -> bool { self.byte(0xB4, 7, 1, c) != 0 }
-    fn ch_output_1(&self, c: u32) -> bool { self.byte(0xB4, 6, 1, c) != 0 }
-    fn ch_am_sens(&self, c: u32) -> u32 { self.byte(0xB4, 4, 2, c) }
-    fn ch_pm_sens(&self, c: u32) -> u32 { self.byte(0xB4, 0, 3, c) }
-    fn op_lfo_am_enable(&self, o: u32) -> bool { self.byte(0x60, 7, 1, o) != 0 }
+    fn ch_output_0(&self, c: u32) -> bool { self.opn || self.byte(0xB4, 7, 1, c) != 0 }
+    fn ch_output_1(&self, c: u32) -> bool { !self.opn && self.byte(0xB4, 6, 1, c) != 0 }
+    fn ch_am_sens(&self, c: u32) -> u32 { if self.opn { 0 } else { self.byte(0xB4, 4, 2, c) } }
+    fn ch_pm_sens(&self, c: u32) -> u32 { if self.opn { 0 } else { self.byte(0xB4, 0, 3, c) } }
+    fn op_lfo_am_enable(&self, o: u32) -> bool { !self.opn && self.byte(0x60, 7, 1, o) != 0 }
     fn op_ssg_eg_enable(&self, o: u32) -> bool { self.byte(0x90, 3, 1, o) != 0 }
     fn op_ssg_eg_mode(&self, o: u32) -> u32 { self.byte(0x90, 0, 3, o) }
 
@@ -219,7 +244,7 @@ impl Ym2612 {
     fn clock_lfo(&mut self) -> i32 {
         if !self.lfo_enable() {
             self.lfo_counter = 0;
-            self.lfo_am = 0x3F;
+            self.lfo_am = if self.opn { 0 } else { 0x3F };
             return 0;
         }
         let sub = self.lfo_counter as u8 as u32;
@@ -342,8 +367,10 @@ impl Ym2612 {
 
     fn op_phase(&self, i: usize) -> u32 { self.ops[i].phase >> 10 }
 
-    /// Channel c's output (9 bits: rshift 5, clip 256), added to `out` where enabled.
+    /// Channel c's output, added to `out` where enabled: YM2612 9 bits (rshift 5, clip
+    /// 256), OPN the full 14 (rshift 0, clip 32767).
     fn channel_output(&mut self, c: usize, out: &mut [i32; 2]) {
+        let (rshift, clipmax) = if self.opn { (0, 32767) } else { (5, 256) };
         let ops = Self::ch_ops(c);
         let co = channel_offset(c as u32);
         let am = self.lfo_am_offset(co);
@@ -368,11 +395,11 @@ impl Ym2612 {
         opout[6] = opout[1].wrapping_add(opout[3]);
         opout[7] = opout[2].wrapping_add(opout[3]);
         let m = (opout[bf(a, 4, 3) as usize] as i32) >> 1;
-        let mut result = self.compute_volume(ops[3], self.op_phase(ops[3]).wrapping_add(m as u32), am) >> 5;
-        let (clipmax, clipmin) = (256, -257);
-        if bf(a, 7, 1) != 0 { result = (result + (opout[1] as i32 >> 5)).clamp(clipmin, clipmax); }
-        if bf(a, 8, 1) != 0 { result = (result + (opout[2] as i32 >> 5)).clamp(clipmin, clipmax); }
-        if bf(a, 9, 1) != 0 { result = (result + (opout[3] as i32 >> 5)).clamp(clipmin, clipmax); }
+        let mut result = self.compute_volume(ops[3], self.op_phase(ops[3]).wrapping_add(m as u32), am) >> rshift;
+        let clipmin = -clipmax - 1;
+        if bf(a, 7, 1) != 0 { result = (result + (opout[1] as i32 >> rshift)).clamp(clipmin, clipmax); }
+        if bf(a, 8, 1) != 0 { result = (result + (opout[2] as i32 >> rshift)).clamp(clipmin, clipmax); }
+        if bf(a, 9, 1) != 0 { result = (result + (opout[3] as i32 >> rshift)).clamp(clipmin, clipmax); }
         if self.ch_output_0(co) { out[0] += result; }
         if self.ch_output_1(co) { out[1] += result; }
     }
@@ -384,7 +411,7 @@ impl Ym2612 {
         self.prepare_count += 1;
         if self.modified_channels != 0 || pc >= 4096 {
             self.active_channels = 0;
-            for c in 0..6 {
+            for c in 0..self.channels() {
                 let mut active = false;
                 for &o in &Self::ch_ops(c) { if self.op_prepare(o) { active = true; } }
                 if active { self.active_channels |= 1 << c; }
@@ -396,7 +423,7 @@ impl Ym2612 {
         if bf(self.env_counter, 0, 2) == 3 { self.env_counter = self.env_counter.wrapping_add(1); }
         let pm = self.clock_lfo();
         let ec = self.env_counter;
-        for c in 0..6 {
+        for c in 0..self.channels() {
             let ch = &mut self.chans[c];
             ch.feedback[0] = ch.feedback[1];
             ch.feedback[1] = ch.feedback_in;
@@ -422,6 +449,18 @@ impl Ym2612 {
             total[1] += if self.ch_output_1(0x102) { dac } else { dac_discontinuity(0) };
         }
         ((total[0] * 128) * 64 / (6 * 65), (total[1] * 128) * 64 / (6 * 65))
+    }
+
+    /// One OPN (YM2203) FM sample: the channels summed at full precision, through the
+    /// chip's 10.3 floating-point DAC (ymfm ym2203::clock_fm, roundtrip_fp).
+    pub fn generate_opn(&mut self) -> i32 {
+        self.clock_timers();
+        self.engine_clock();
+        let mut total = [0i32; 2];
+        for c in 0..3 {
+            if self.active_channels & (1 << c) != 0 { self.channel_output(c, &mut total); }
+        }
+        roundtrip_fp(total[0])
     }
 
     fn clock_timers(&mut self) {
@@ -456,7 +495,7 @@ impl Ym2612 {
     }
 
     fn mode_write(&mut self, data: u8) {
-        self.modified_channels = 0x3F;
+        self.modified_channels = if self.opn { 7 } else { 0x3F };
         self.regs[0x27] = data;
         let mut reset = 0u8;
         if data & 0x20 != 0 { reset |= STATUS_TIMERB; }
@@ -469,7 +508,7 @@ impl Ym2612 {
 
     fn write_reg(&mut self, index: u16, data: u8) {
         if index == 0x27 { self.mode_write(data); return; }
-        self.modified_channels = 0x3F;
+        self.modified_channels = if self.opn { 7 } else { 0x3F };
         let i = index as usize;
         if index & 0xF0 == 0xA0 {
             if bf(index as u32, 0, 2) == 3 { return; }
@@ -487,7 +526,7 @@ impl Ym2612 {
         if index == 0x28 {
             let mut ch = bf(data as u32, 0, 2) as usize;
             if ch == 3 { return; }
-            ch += bf(data as u32, 2, 1) as usize * 3;
+            if !self.opn { ch += bf(data as u32, 2, 1) as usize * 3; }
             let mask = bf(data as u32, 4, 4);
             for (k, &o) in Self::ch_ops(ch).iter().enumerate() {
                 let on = bf(mask, k as u32, 1) as u8;
@@ -518,6 +557,9 @@ impl Ym2612 {
             }
         }
     }
+
+    /// OPN register write (YM2203: 0x10-0xFF; the wrapper takes 0x00-0x0F, the SSG).
+    pub fn write_opn(&mut self, index: u8, data: u8) { self.write_reg(index as u16, data); }
 
     /// Status: timer flags (never busy).
     pub fn status(&self) -> u8 { self.status }

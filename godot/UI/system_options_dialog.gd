@@ -263,7 +263,7 @@ func _rebuild() -> void:
 		bcast.item_selected.connect(func(i): _put("dc_broadcast", bcasts[i][0]))
 		_row("TV standard (next load)", bcast)
 		var ratio := OptionButton.new()
-		var ratios := [["1", "1 cycle an instruction (most CPU time, slowest)"], ["1.5", "1.5 cycles an instruction (default)"], ["2", "2 cycles an instruction (faster; Sonic Adventure, Crazy Taxi stall)"], ["3", "3 cycles an instruction (fastest)"]]
+		var ratios := [["1", "1 cycle an instruction (default)"], ["1.5", "1.5 cycles an instruction (a little faster; Evolution stalls)"], ["2", "2 cycles an instruction (faster; Sonic Adventure, Crazy Taxi stall)"], ["3", "3 cycles an instruction (fastest)"]]
 		for r in ratios:
 			ratio.add_item(r[1])
 		ratio.select(max(0, ratios.map(func(r): return r[0]).find(str(_opt("dc_cpu_ratio")))))
@@ -279,6 +279,11 @@ func _rebuild() -> void:
 		rthr.button_pressed = _opt("dc_render_thread")
 		rthr.toggled.connect(func(on): _put("dc_render_thread", on))
 		_row("", rthr)
+		var jit := CheckBox.new()
+		jit.text = "Recompile the CPU's code (JIT: faster, new; untick if a game misbehaves)"
+		jit.button_pressed = _opt("dc_jit")
+		jit.toggled.connect(func(on): _put("dc_jit", on))
+		_row("", jit)
 		var fpx := CheckBox.new()
 		fpx.text = "Exact FPU rounding (slower; try if physics or geometry look off)"
 		fpx.button_pressed = _opt("dc_fpu_exact")

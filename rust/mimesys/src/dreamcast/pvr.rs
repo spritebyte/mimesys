@@ -165,7 +165,10 @@ impl Pvr {
         let il = self.interlaced() as u32;
         let vbi = self.reg(SPG_VBLANK_INT);
         let (vbin, vbout) = ((vbi & 0x3FF) << il, (vbi >> 16 & 0x3FF) << il);
-        if vbin >= 1 + il && self.vpos == vbin - (1 + il) { ev.maple = true; }
+        // the Maple bus's vblank trigger, a line or two before vblank-in (counted round the
+        // field: Windows CE puts vblank-in at line 0)
+        let n = self.lines();
+        if n > 1 + il && self.vpos == (vbin + n - (1 + il)) % n { ev.maple = true; }
         if self.vpos == vbin {
             ev.ist |= IST_VBL_IN;
             ev.vblank = true;
@@ -181,6 +184,17 @@ impl Pvr {
             _ => ev.ist |= IST_HBL_IN,
         }
         ev
+    }
+
+    /// The frame buffer addresses (32-bit view, within 8 MB) `output` reads.
+    pub fn display_range(&self) -> (u32, u32) {
+        let size = self.reg(FB_R_SIZE);
+        let words = (size & 0x3FF) + 1;
+        let lines = (size >> 10 & 0x3FF) + 1;
+        let modulus = size >> 20 & 0x3FF;
+        let stride = (words + modulus).saturating_sub(1) * 4;
+        let (a, b) = (self.reg(FB_R_SOF1) & 0x7F_FFFF, self.reg(FB_R_SOF2) & 0x7F_FFFF);
+        (a.min(b), a.max(b) + stride.max(4) * lines)
     }
 
     /// The picture the framebuffer registers point at, as RGBA (OUT_W x OUT_H).

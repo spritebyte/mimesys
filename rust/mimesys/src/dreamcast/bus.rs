@@ -14,6 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use crate::common::cpu::sh4::CODE_SHIFT;
 
 use super::aica::Aica;
 use super::flash::Flash;
@@ -119,6 +120,14 @@ pub struct Dc {
     /// when the running GD-ROM DMA ends
     #[serde(default)]
     gd_dma_end: Option<u64>,
+    /// debug (with the speed log): the last GD-ROM events (cycle, what), for the report
+    /// when the drive goes quiet
+    #[serde(skip)]
+    pub gd_trace: std::collections::VecDeque<(u64, String)>,
+    #[serde(skip)]
+    pub gd_trace_on: bool,
+    #[serde(skip)]
+    gd_irq_seen: bool,
     ta_buf: [u32; 8],
     ta_fill: usize,
     /// a field ended since the frontend last looked
@@ -145,6 +154,13 @@ pub struct Dc {
     pub trace_yuv: u64,
     #[serde(skip)]
     pub trace_ch2: (u32, u64, u32),
+    /// During a channel-2 DMA: cycles from its start until the word being written would
+    /// arrive (a DMA is copied at once but its data lands over time; see ch2_dma)
+    ch2_at: u64,
+    /// Debug log lines left for interrupt-mask writes and TLB loads (Windows CE start-up)
+    setup_log: u32,
+    /// Debug log lines left for unusual exceptions
+    exc_log: u32,
     #[serde(skip)]
     pub trace_g1: (u32, u64),
     /// SB_SFRES: the program asked for a reset
@@ -164,6 +180,17 @@ pub struct Dc {
     pub trace_regs: bool,
     #[serde(skip)]
     pub reg_log: Vec<String>,
+    /// ... and the last 1500 after those (timer and MMU accesses left out), with how many fell out
+    #[serde(skip)]
+    pub reg_tail: std::collections::VecDeque<String>,
+    #[serde(skip)]
+    pub reg_dropped: u64,
+    /// debug: Windows CE system calls (API set, method, count, last cycle), the last 2000
+    /// debug: interrupts taken since the last report, by INTEVT code
+    #[serde(skip)]
+    pub int_counts: BTreeMap<u32, u64>,
+    #[serde(skip)]
+    pub ce_calls: std::collections::VecDeque<(u32, u32, u32, u64)>,
     /// debug: the instruction running
     #[serde(skip)]
     pub cur_pc: u32,
@@ -176,16 +203,24 @@ pub struct Dc {
     /// and `remap`
     #[serde(skip)]
     pub attn: bool,
+    /// one byte per 4 KB RAM page: translated (JIT) code comes from it, so writes there
+    /// are reported (`code_dirty`) and those blocks dropped
+    #[serde(skip, default = "code_pages")]
+    pub code: Vec<u8>,
+    #[serde(skip)]
+    pub code_dirty: Vec<u32>,
 }
+
+fn code_pages() -> Vec<u8> { vec![0; RAM_SIZE >> CODE_SHIFT] }
 
 impl Dc {
     pub fn new(bios: Vec<u8>, flash: &[u8], unix_now: u64) -> Self {
         let mut d = Self {
             bios, flash: Flash::new(flash), ram: vec![0; RAM_SIZE], vram: vec![0; VRAM_SIZE],
             aica: Aica::new(unix_now), holly: Holly::new(), pvr: Pvr::new(), gd: Gdrom::new(), chip: OnChip::new(),
-            now: 0, next_line: 0, events: Vec::new(), t_render: Default::default(), t_sound: Default::default(), t_arm: Default::default(), t_render_wait: Default::default(), render_async: false, render_job: Default::default(), rcache: Default::default(), snd_io: [0; 4], g2_last: [0; 4], snd_log: Vec::new(), dma_log: Vec::new(), r_sum: (0, 0, 0, 0), gd_dma_end: None, yuv: Yuv::default(), arm: Arm7tdmi::new(), arm_now: 0, arm_acc: 0, arm_running: false, arm_steps: 0, arm_pcs: Default::default(), ta_buf: [0; 8], ta_fill: 0, vblank: false, irq: None,
-            pads: [Some(DcPad::default()), Some(DcPad::default()), None, None], vmu: Vmu::new(), vmu_on: true, dump_frame: false, trace_yuv: 0, trace_ch2: (0, 0, 0), trace_g1: (0, 0), soft_reset: false,
-            unknown: BTreeMap::new(), maple_dmas: 0, maple_log: BTreeMap::new(), trace_regs: false, reg_log: Vec::new(), cur_pc: 0, direct: 0, attn: true,
+            now: 0, next_line: 0, events: Vec::new(), t_render: Default::default(), t_sound: Default::default(), t_arm: Default::default(), t_render_wait: Default::default(), render_async: false, render_job: Default::default(), rcache: Default::default(), snd_io: [0; 4], g2_last: [0; 4], snd_log: Vec::new(), dma_log: Vec::new(), r_sum: (0, 0, 0, 0), gd_dma_end: None, gd_trace: Default::default(), gd_trace_on: false, gd_irq_seen: false, yuv: Yuv::default(), arm: Arm7tdmi::new(), arm_now: 0, arm_acc: 0, arm_running: false, arm_steps: 0, arm_pcs: Default::default(), ta_buf: [0; 8], ta_fill: 0, vblank: false, irq: None,
+            pads: [Some(DcPad::default()), Some(DcPad::default()), None, None], vmu: Vmu::new(), vmu_on: true, dump_frame: false, trace_yuv: 0, trace_ch2: (0, 0, 0), ch2_at: 0, setup_log: 200, exc_log: 64, trace_g1: (0, 0), soft_reset: false,
+            unknown: BTreeMap::new(), maple_dmas: 0, maple_log: BTreeMap::new(), trace_regs: false, reg_log: Vec::new(), reg_tail: Default::default(), reg_dropped: 0, ce_calls: Default::default(), int_counts: BTreeMap::new(), cur_pc: 0, direct: 0, attn: true, code: code_pages(), code_dirty: Vec::new(),
         };
         d.next_line = d.pvr.line_cycles();
         d.remap();
@@ -227,10 +262,51 @@ impl Dc {
             (Some(a), Some(b)) => Some(if b.0 > a.0 { b } else { a }),
             (a, b) => a.or(b),
         };
-        self.attn = self.irq.is_some() || self.mmu_on();
+        self.attn = self.irq.is_some() || self.mmu_on() || !self.code_dirty.is_empty();
+    }
+
+    /// RAM at `i` was written (a byte to a word, in the word at `i & !3`): if translated
+    /// code came from its line, report it. (The line stays marked: the JIT unmarks it once
+    /// no block comes from it.)
+    #[inline(always)]
+    fn code_check(&mut self, i: usize) {
+        let p = (i >> CODE_SHIFT) & ((RAM_SIZE >> CODE_SHIFT) - 1);
+        if self.code[p] != 0 { self.code_hit((i & (RAM_SIZE - 1) & !3) as u32); }
+    }
+
+    /// RAM bytes `i`..`i + len` were written (DMA).
+    fn code_check_range(&mut self, i: usize, len: usize) {
+        if len == 0 { return; }
+        let (a, b) = (i >> CODE_SHIFT, (i + len - 1) >> CODE_SHIFT);
+        for p in a..=b.min(a + (RAM_SIZE >> CODE_SHIFT)) {
+            let p = p & ((RAM_SIZE >> CODE_SHIFT) - 1);
+            if self.code[p] != 0 { self.code_hit((p << CODE_SHIFT) as u32 | 1); }
+        }
+    }
+
+    #[inline(never)]
+    fn code_hit(&mut self, e: u32) {
+        self.code_dirty.push(e);
+        self.attn = true;
     }
 
     fn raise_later(&mut self, delay: u64, bits: u32) { self.events.push((self.now + delay, bits)); }
+
+    /// Note a GD-ROM event (and the drive's own notes, and its interrupt line changing).
+    fn gd_ev(&mut self, s: Option<String>) {
+        if !self.gd_trace_on { self.gd.ev.clear(); return; }
+        let now = self.now;
+        let mut add = |t: &mut std::collections::VecDeque<(u64, String)>, e: String| {
+            if t.len() >= 300 { t.pop_front(); }
+            t.push_back((now, e));
+        };
+        for e in std::mem::take(&mut self.gd.ev) { add(&mut self.gd_trace, e); }
+        if let Some(e) = s { add(&mut self.gd_trace, e); }
+        if self.gd.irq != self.gd_irq_seen {
+            self.gd_irq_seen = self.gd.irq;
+            add(&mut self.gd_trace, format!("INTRQ {} (status {:02X} error {:02X})", if self.gd.irq { "on" } else { "off" }, self.gd.status, self.gd.error));
+        }
+    }
 
     /// Catch up with time: lines, timers, delayed interrupts.
     pub fn service(&mut self) {
@@ -255,6 +331,7 @@ impl Dc {
             self.holly.raise(holly::IST_DMA_GDROM);
             self.gd.dma_finish();
             self.holly.set_ext(holly::EXT_GDROM, self.gd.irq);
+            if self.gd_trace_on { let e = format!("G1 DMA end; drive {}", self.gd.describe()); self.gd_ev(Some(e)); }
         }
         self.update_irq();
     }
@@ -276,12 +353,35 @@ impl Dc {
 
     /// Wait for a render running on its own thread and write its picture to video RAM
     /// (before the next render, the picture output, a save state).
+    /// Write a finished render to video RAM (with DC_VRAM_WATCH: log it if it changed
+    /// anything in the watched range, with its framebuffer settings).
+    fn write_render(&mut self, d: &render::Drawn) {
+        let watch = vwatch_range();
+        let before = watch.map(|(a, b)| self.vram[a.min(b)..b.min(self.vram.len())].to_vec());
+        if let Some((lo, hi)) = d.write(&mut self.vram) { self.rcache.mark(lo, hi); }
+        if let (Some((a, b)), Some(before)) = (watch, before) {
+            let now = &self.vram[a.min(b)..b.min(self.vram.len())];
+            let changed: Vec<usize> = (0..now.len()).filter(|&k| now[k] != before[k]).collect();
+            if let (Some(&f), Some(&l)) = (changed.first(), changed.last()) {
+                vwatch_log(&format!("render: {} bytes changed, offsets {:06X}-{:06X}; {}", changed.len(), a + f, a + l, d.describe_out()));
+            }
+        }
+    }
+
+    /// One debug-log line about how the system is set up (interrupt masks, TLB loads), the
+    /// first 200 only (TLB loads: 32), with the PC (exact with the debug log on) and the cycle.
+    fn setup_note(&mut self, what: String) {
+        if self.setup_log == 0 { return; }
+        self.setup_log -= 1;
+        crate::dlog!("Dreamcast setup: {what} at PC {:08X}, cycle {}{}", self.cur_pc, self.now, if self.setup_log == 0 { " (no more of these)" } else { "" });
+    }
+
     pub fn finish_render(&mut self) {
         if let Some(h) = self.render_job.0.take() {
             let t = std::time::Instant::now();
             let (d, snap) = h.join().expect("render thread");
             self.rcache.snap = Some(snap);
-            if let Some((lo, hi)) = d.write(&mut self.vram) { self.rcache.mark(lo, hi); }
+            self.write_render(&d);
             self.pvr.last_render = d.stats;
             self.count_render();
             self.t_render += d.took;
@@ -346,12 +446,17 @@ impl Dc {
         self.trace_g1.1 += data.len() as u64;
         if dst >> 24 & 0x1C == 0x0C {
             for (k, b) in data.iter().enumerate() { self.ram[(dst as usize + k) & (RAM_SIZE - 1)] = *b; }
+            self.code_check_range(dst as usize & (RAM_SIZE - 1), data.len());
         } else {
             for (k, b) in data.iter().enumerate() { self.write(dst + k as u32, *b as u32, 1); }
         }
         self.holly.g1[G1_GDSTARD] = dst + data.len() as u32;
         self.holly.g1[G1_GDLEND] = data.len() as u32;
         self.gd_dma_end = Some(self.now + 2_000 + data.len() as u64 * 10);
+        if self.gd_trace_on {
+            let e = format!("G1 DMA {len:X} bytes to {dst:08X}: {:X} given; drive {}", data.len(), self.gd.describe());
+            self.gd_ev(Some(e));
+        }
     }
 
     fn maple_dma(&mut self) {
@@ -379,16 +484,64 @@ impl Dc {
             let w: Vec<u32> = (0..len.min(64)).step_by(4).map(|k| self.read(src.wrapping_add(k), 4)).collect();
             println!("ch2 {src:08X} -> {dst:08X} len {len}: {w:08X?}");
         }
+        // The copy happens at once, but a word reaches the TA about k/4 cycles in: a list
+        // end it carries is raised after that, so the DMA-end interrupt (at len/4) comes
+        // first, as on the hardware. NBA 2K2's list-end handler waits for the DMA-end
+        // handler's flag with interrupts masked; the other order hangs it.
         for k in (0..len).step_by(4) {
             let v = self.read(src.wrapping_add(k), 4);
+            self.ch2_at = k as u64 / 4;
             self.write(if texture { dst.wrapping_add(k) } else { dst }, v, 4);
         }
+        self.ch2_at = 0;
         let dar = self.chip.dma[2].dar;
         self.chip.dma_done(2, src.wrapping_add(len), dar);
         self.holly.sb[0] = if texture { dst.wrapping_add(len) } else { dst };
         self.holly.sb[1] = 0;
         self.holly.sb[2] = 0;
         self.raise_later((len as u64 / 4).max(100), holly::IST_DMA_CH2);
+    }
+
+    /// Sort DMA: polygon blocks gathered from main RAM by link addresses and fed to the TA
+    /// (Windows CE's DirectDraw HAL draws with it - Resident Evil 2). A start table at
+    /// SDSTAW holds 16- or 32-bit link addresses (SDWLT bit 0), each the first of a chain;
+    /// a block sits at SDBAAW + link (x 32 when SDLAS bit 0 is set), starts with a global
+    /// parameter whose words 6 and 7 are its length in 32-byte units and the next link;
+    /// link 1 ends a chain (the next start-table entry follows), link 2 ends the DMA.
+    /// Facts from the Holly documentation and flycast's pvr_do_sort_dma (behaviour only).
+    fn sort_dma(&mut self) {
+        let table = self.holly.r(holly::SB_SDSTAW) & 0x0FFF_FFE0;
+        let base = self.holly.r(holly::SB_SDBAAW) & 0x0FFF_FFE0;
+        let wide = self.holly.r(holly::SB_SDWLT) & 1 != 0;
+        let shift = if self.holly.r(holly::SB_SDLAS) & 1 != 0 { 5 } else { 0 };
+        let mut entry = 0u32;
+        let mut start = |d: &mut Self| -> u32 {
+            let v = if wide { d.read(0x8000_0000 | table.wrapping_add(4 * entry), 4) } else { d.read(0x8000_0000 | table.wrapping_add(2 * entry), 2) };
+            entry += 1;
+            v
+        };
+        let mut link = start(self);
+        let mut bytes = 0u64;
+        // a broken table can't hang the emulator: at most 64 K blocks / 16 MB
+        for _ in 0..1 << 16 {
+            if link == 2 || bytes >= 0x100_0000 { break; }
+            if link == 1 { link = start(self); continue; }
+            let a = 0x8000_0000 | base.wrapping_add(link << shift) & 0x1FFF_FFE0;
+            let size = self.read(a + 24, 4);
+            let next = self.read(a + 28, 4);
+            let n = if size == 0 { 0x100 } else { size.min(0x1_0000) } * 8;
+            for k in 0..n {
+                let v = self.read(a.wrapping_add(4 * k), 4);
+                // the word lands about bytes/4 cycles in (as channel 2): its list end after
+                self.ch2_at = bytes / 4;
+                self.write(0x1000_0000, v, 4);
+                bytes += 4;
+            }
+            link = next;
+        }
+        self.ch2_at = 0;
+        self.trace_ch2.1 += bytes;
+        self.raise_later((bytes / 4).max(100), holly::IST_DMA_SORT);
     }
 
     fn run_job(&mut self, j: DmaJob) {
@@ -491,12 +644,19 @@ impl Dc {
 
     fn trace(&mut self, a: u32, v: u32, size: u32, write: bool) {
         let line = format!("{:08X} {} {a:08X}{} {v:0w$X}", self.cur_pc, if write { "W" } else { "R" }, [".b", ".w", "", ".l"][size.min(4) as usize - 1], w = size as usize * 2);
+        // the timers are read all the time (Windows CE's idle loop), and its TLB-miss handler
+        // uses the MMU registers: leave them out
+        if (0xFFD8_0000..0xFFD8_0030).contains(&a) || (0x1FD8_0000..0x1FD8_0030).contains(&a) || (0xFF00_0000..0xFF00_0040).contains(&a) { return; }
         // a polling loop repeats itself: count it instead
-        if let Some(last) = self.reg_log.last_mut() {
+        let full = self.reg_log.len() >= 400;
+        let last = if full { self.reg_tail.back_mut() } else { self.reg_log.last_mut() };
+        if let Some(last) = last {
             let (body, n) = match last.rsplit_once(" x") { Some((b, n)) if n.parse::<u32>().is_ok() => (b.to_string(), n.parse::<u32>().unwrap()), _ => (last.clone(), 1) };
             if body == line { *last = format!("{body} x{}", n + 1); return; }
         }
-        if self.reg_log.len() < 400 { self.reg_log.push(line); }
+        if !full { self.reg_log.push(line); return; }
+        self.reg_tail.push_back(line);
+        if self.reg_tail.len() > 1500 { self.reg_tail.pop_front(); self.reg_dropped += 1; }
     }
 
     pub fn read(&mut self, a: u32, size: u32) -> u32 {
@@ -519,6 +679,9 @@ impl Dc {
             return Self::le(&self.chip.ocram, i, size);
         }
         let p = a & 0x1FFF_FFFF;
+        // area 7's top 16 MB is the on-chip registers again (P4), reached through the TLB:
+        // Windows CE drivers map the timers and the serial port this way
+        if p >= 0x1F00_0000 { return self.read_inner(0xE000_0000 | p, size); }
         match p >> 26 {
             3 => Self::le(&self.ram, (p & 0xFF_FFFF) as usize, size),
             0 => self.area0_read(p, size),
@@ -545,6 +708,7 @@ impl Dc {
             0x5F_7000..=0x5F_70FF => {
                 let v = self.gd.read(r - 0x5F_7000);
                 self.update_irq();
+                if self.gd_trace_on && self.gd.irq != self.gd_irq_seen { self.gd_ev(Some(format!("read {:02X} -> {v:02X}", r - 0x5F_7000))); }
                 v
             }
             0x5F_7400..=0x5F_74FF => self.holly.g1[((r - 0x5F_7400) / 4) as usize],
@@ -594,10 +758,11 @@ impl Dc {
             return Self::put(&mut self.chip.ocram, i, v, size);
         }
         let p = a & 0x1FFF_FFFF;
+        if p >= 0x1F00_0000 { return self.write_inner(0xE000_0000 | p, v, size); }
         match p >> 26 {
-            3 => Self::put(&mut self.ram, (p & 0xFF_FFFF) as usize, v, size),
+            3 => { self.code_check((p & 0xFF_FFFF) as usize); Self::put(&mut self.ram, (p & 0xFF_FFFF) as usize, v, size) }
             0 => self.area0_write(p, v, size),
-            1 => { let i = Self::vram_index(p); self.rcache.mark(i, i + size as usize - 1); Self::put(&mut self.vram, i, v, size) }
+            1 => { let i = Self::vram_index(p); vwatch("CPU area 1", p, i, v, size, || String::new()); self.rcache.mark(i, i + size as usize - 1); Self::put(&mut self.vram, i, v, size) }
             4 => self.ta_write(p, v, size),
             _ => self.note(a, true),
         }
@@ -612,8 +777,22 @@ impl Dc {
                 for k in 0..size { self.flash.write(q - 0x20_0000 + k, (v >> (8 * k)) as u8); }
             }
             0x5F_6800..=0x5F_69FF => {
+                if self.gd_trace_on && r == 0x5F_6900 && v & holly::IST_DMA_GDROM != 0 { self.gd_ev(Some("ISTNRM: the GD DMA end acknowledged".into())); }
+                if (0x5F_6810..=0x5F_6820).contains(&r) {
+                    let kind = ["SDSTAW (sort DMA link table)", "SDBAAW (sort DMA link base)", "SDWLT", "SDLAS", "SDST (sort DMA start)"][(r as usize - 0x5F_6810) / 4];
+                    // its own budget: the interrupt masks use up the shared one before games start
+                    static SORT_LINES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(64);
+                    if SORT_LINES.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |n| n.checked_sub(1)).is_ok() {
+                        crate::dlog!("Dreamcast setup: {kind} = {v:08X} at PC {:08X}, cycle {}", self.cur_pc, self.now);
+                    }
+                }
+                if (0x5F_6910..0x5F_6940).contains(&r) {
+                    let kind = ["IML2NRM", "IML2EXT", "IML2ERR", "?", "IML4NRM", "IML4EXT", "IML4ERR", "?", "IML6NRM", "IML6EXT", "IML6ERR", "?"][(r as usize - 0x5F_6910) / 4];
+                    self.setup_note(format!("{kind} = {v:08X} (address {p:08X}, size {size})"));
+                }
                 match self.holly.write_sb(r - 0x5F_6800, v) {
                     SbAction::Ch2Dma => self.ch2_dma(),
+                    SbAction::SortDma => self.sort_dma(),
                     SbAction::SoftReset => self.soft_reset = true,
                     SbAction::None => {}
                 }
@@ -625,7 +804,11 @@ impl Dc {
                 // SB_MDST: start (software trigger, enabled)
                 if i == 6 && v & 1 != 0 && self.holly.maple[5] & 1 != 0 && self.holly.maple[4] & 1 == 0 { self.maple_dma(); }
             }
-            0x5F_7000..=0x5F_70FF => { self.gd.write(r - 0x5F_7000, v); self.update_irq(); }
+            0x5F_7000..=0x5F_70FF => {
+                self.gd.write(r - 0x5F_7000, v);
+                self.update_irq();
+                if self.gd_trace_on { self.gd_ev(None); }
+            }
             0x5F_7400..=0x5F_74FF => {
                 let i = ((r - 0x5F_7400) / 4) as usize;
                 self.holly.g1[i] = v;
@@ -666,7 +849,7 @@ impl Dc {
                         self.rcache.tex.invalidate(&self.rcache.tex_dirty);
                         self.rcache.tex_dirty = Default::default();
                         let d = render::draw(&self.pvr.regs, scene, &self.vram, &self.rcache.tex);
-                        if let Some((lo, hi)) = d.write(&mut self.vram) { self.rcache.mark(lo, hi); }
+                        self.write_render(&d);
                         self.pvr.last_render = d.stats;
                         self.count_render();
                         self.t_render += t.elapsed();
@@ -696,6 +879,7 @@ impl Dc {
             let mode = self.holly.r(if p & 0x0200_0000 != 0 { holly::SB_LMMODE1 } else { holly::SB_LMMODE0 }) & 1;
             let i = if mode == 0 { (o & 0x7F_FFFF) as usize } else { pvr::map32(o & 0x7F_FFFF) };
             self.rcache.mark(i, i + size as usize - 1);
+            vwatch("direct texture path", p, i, v, size, || format!("LMMODE0 {} LMMODE1 {}; channel-2 DMA to {:08X} from {:08X}", self.holly.r(holly::SB_LMMODE0), self.holly.r(holly::SB_LMMODE1), self.trace_ch2.2, self.chip.dma[2].sar));
             return Self::put(&mut self.vram, i, v, size);
         }
         if o >= 0x80_0000 {
@@ -714,7 +898,7 @@ impl Dc {
         if self.ta_fill == 8 {
             self.ta_fill = 0;
             let bits = self.pvr.ta.block(&self.ta_buf);
-            if bits != 0 { self.raise_later(400, bits); }
+            if bits != 0 { self.raise_later(400 + self.ch2_at, bits); }
         }
     }
 }
@@ -733,7 +917,7 @@ impl Dc {
             let (top, sub) = (r >> 3, r & 7);
             if sub == 3 && top != 7 && (!mmu || top == 4 || top == 5) { self.direct |= 1 << r; }
         }
-        self.attn = mmu || self.irq.is_some();
+        self.attn = mmu || self.irq.is_some() || !self.code_dirty.is_empty();
     }
 
     /// The MMU is on (MMUCR.AT).
@@ -790,6 +974,8 @@ impl Dc {
         mmu!(self, a, Access::Write, ());
         if is_ram(a) && a & 0xFF_FFF8 != 0xFF_FFF8 {
             let i = (a & 0xFF_FFFC) as usize;
+            self.code_check(i);
+            self.code_check(i + 7);
             return self.ram[i..i + 8].copy_from_slice(&v.to_le_bytes());
         }
         self.write32(a, v as u32);
@@ -809,14 +995,14 @@ impl Dc {
     #[inline(never)]
     fn write8_slow(&mut self, a: u32, v: u8) {
         mmu!(self, a, Access::Write, ());
-        if is_ram(a) { self.ram[(a & 0xFF_FFFF) as usize] = v; return; }
+        if is_ram(a) { self.code_check((a & 0xFF_FFFF) as usize); self.ram[(a & 0xFF_FFFF) as usize] = v; return; }
         self.write(a, v as u32, 1)
     }
 
     #[inline(never)]
     fn write16_slow(&mut self, a: u32, v: u16) {
         mmu!(self, a, Access::Write, ());
-        if is_ram(a) { let i = (a & 0xFF_FFFE) as usize; return self.ram[i..i + 2].copy_from_slice(&v.to_le_bytes()); }
+        if is_ram(a) { let i = (a & 0xFF_FFFE) as usize; self.code_check(i); return self.ram[i..i + 2].copy_from_slice(&v.to_le_bytes()); }
         self.write(a, v as u32, 2)
     }
 
@@ -825,6 +1011,7 @@ impl Dc {
         mmu!(self, a, Access::Write, ());
         if a & 0xE000_0000 != 0xE000_0000 && (a >> 26) & 7 == 3 {
             let i = (a & 0xFF_FFFC) as usize;
+            self.code_check(i);
             return self.ram[i..i + 4].copy_from_slice(&v.to_le_bytes());
         }
         self.write(a, v, 4)
@@ -868,6 +1055,8 @@ impl Sh4Bus for Dc {
     fn write64(&mut self, a: u32, v: u64) {
         if self.direct >> (a >> 26) & 1 != 0 {
             let i = (a & 0xFF_FFFC) as usize;
+            self.code_check(i);
+            self.code_check(i + 4);
             if let Some(b) = self.ram.get_mut(i..i + 8) { b.copy_from_slice(&v.to_le_bytes()); return; }
         }
         self.write64_slow(a, v)
@@ -882,13 +1071,14 @@ impl Sh4Bus for Dc {
     }
     #[inline(always)]
     fn write8(&mut self, a: u32, v: u8) {
-        if self.direct >> (a >> 26) & 1 != 0 { self.ram[(a & 0xFF_FFFF) as usize] = v; return; }
+        if self.direct >> (a >> 26) & 1 != 0 { self.code_check((a & 0xFF_FFFF) as usize); self.ram[(a & 0xFF_FFFF) as usize] = v; return; }
         self.write8_slow(a, v)
     }
     #[inline(always)]
     fn write16(&mut self, a: u32, v: u16) {
         if self.direct >> (a >> 26) & 1 != 0 {
             let i = (a & 0xFF_FFFE) as usize;
+            self.code_check(i);
             if let Some(b) = self.ram.get_mut(i..i + 2) { b.copy_from_slice(&v.to_le_bytes()); return; }
         }
         self.write16_slow(a, v)
@@ -897,6 +1087,7 @@ impl Sh4Bus for Dc {
     fn write32(&mut self, a: u32, v: u32) {
         if self.direct >> (a >> 26) & 1 != 0 {
             let i = (a & 0xFF_FFFC) as usize;
+            self.code_check(i);
             if let Some(b) = self.ram.get_mut(i..i + 4) { b.copy_from_slice(&v.to_le_bytes()); return; }
         }
         self.write32_slow(a, v)
@@ -921,17 +1112,51 @@ impl Sh4Bus for Dc {
         for (k, w) in data.iter().enumerate() { self.write(dest + 4 * k as u32, *w, 4); }
     }
     fn ldtlb(&mut self) {
+        let (pteh, ptel, mmucr) = (self.chip.pteh, self.chip.ptel, self.chip.mmucr);
+        // the first 32 only: Windows CE loads thousands, which would crowd out the rest
+        static LDTLB_LINES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(32);
+        if LDTLB_LINES.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |n| n.checked_sub(1)).is_ok() {
+            self.setup_note(format!("LDTLB PTEH {pteh:08X} PTEL {ptel:08X} MMUCR {mmucr:08X}"));
+        }
         let c = &mut self.chip;
         c.mmucr = c.mmu.ldtlb(c.pteh, c.ptel, c.mmucr);
     }
     #[inline(always)]
     fn mmu(&self) -> bool { self.mmu_on() }
+    fn jit_mem(&mut self) -> Option<crate::common::cpu::sh4::JitMem> {
+        Some(crate::common::cpu::sh4::JitMem { ram: self.ram.as_mut_ptr(), direct: self.direct, code: self.code.as_ptr() })
+    }
+    fn jit_code(&mut self, line: u32) { self.code[line as usize & ((RAM_SIZE >> CODE_SHIFT) - 1)] = 1; }
+    fn jit_attn(&self) -> *const u8 { &self.attn as *const bool as *const u8 }
+    fn jit_uncode(&mut self, line: u32) { self.code[line as usize & ((RAM_SIZE >> CODE_SHIFT) - 1)] = 0; }
+    fn jit_dirty(&mut self, out: &mut Vec<u32>) {
+        out.append(&mut self.code_dirty);
+        self.attn = self.irq.is_some() || self.mmu_on();
+    }
     #[inline(always)]
     fn attention(&self) -> bool { self.attn }
     #[inline]
     fn mmu_priv(&mut self, md: bool) { self.chip.mmu.md = md; }
     #[inline]
     fn mmu_fault(&mut self) -> Option<u32> { self.chip.mmu.fault.take() }
+    #[inline]
+    fn mmu_faulted(&self) -> bool { self.chip.mmu.fault.is_some() }
+    #[inline]
+    fn jit_any_dirty(&self) -> bool { !self.code_dirty.is_empty() }
+    fn jit_fetch_pa(&mut self, va: u32, md: bool) -> Option<u32> {
+        if !md && va >= 0x8000_0000 { return None; }
+        let pa = match va >> 29 {
+            4 | 5 => va & 0x1FFF_FFFF,
+            7 => return None,
+            _ => {
+                let c = &mut self.chip;
+                c.mmu.probe_fetch(va, c.pteh as u8, md, c.mmucr)?
+            }
+        };
+        // RAM only (area 3)
+        if (pa >> 26) & 7 != 3 { return None; }
+        Some(pa)
+    }
     #[inline]
     fn irq(&self) -> Option<(u32, u32)> { self.irq }
     #[inline]
@@ -941,8 +1166,90 @@ impl Sh4Bus for Dc {
     fn event(&mut self, reg: Event, v: u32) {
         match reg {
             Event::Tra => self.chip.tra = v,
-            Event::Expevt => self.chip.expevt = v,
-            Event::Intevt => self.chip.intevt = v,
+            Event::Expevt => {
+                self.chip.expevt = v;
+                // the debug log: exceptions other than TLB misses / first writes and Windows
+                // CE's system calls (address errors at FFFFxxxx) - a program crashing
+                let api = v == 0x0E0 && self.chip.tea >= 0xFFFF_0000;
+                if api && self.trace_regs {
+                    // FIRST_METHOD FFFFFE01, 2 bytes a call: set = index >> 8, method = index & FF
+                    let idx = 0xFFFF_FE01u32.wrapping_sub(self.chip.tea) / 2;
+                    let (set, m) = (idx >> 8, idx & 0xFF);
+                    match self.ce_calls.back_mut() {
+                        Some(l) if l.0 == set && l.1 == m => { l.2 += 1; l.3 = self.now; }
+                        _ => {
+                            self.ce_calls.push_back((set, m, 1, self.now));
+                            if self.ce_calls.len() > 2000 { self.ce_calls.pop_front(); }
+                        }
+                    }
+                }
+                if !matches!(v, 0x040 | 0x060 | 0x080) && !api && self.exc_log > 0 {
+                    self.exc_log -= 1;
+                    let what = match v {
+                        0x0A0 | 0x0C0 => "TLB protection", 0x0E0 => "address error (read / fetch)", 0x100 => "address error (write)",
+                        0x160 => "TRAPA", 0x180 => "illegal instruction", 0x1A0 => "illegal slot instruction",
+                        0x120 => "FPU exception", 0x800 | 0x820 => "FPU disabled", 0x1E0 => "user break", _ => "?",
+                    };
+                    crate::dlog!("Dreamcast exception {v:03X} {what} at PC {:08X}, TEA {:08X}, TRA {:08X}, cycle {}", self.cur_pc, self.chip.tea, self.chip.tra, self.now);
+                }
+            }
+            Event::Intevt => { self.chip.intevt = v; *self.int_counts.entry(v).or_insert(0) += 1; }
+            Event::Tea => self.chip.tea = v,
         }
+    }
+}
+
+/// debug: video RAM writes landing in a watched range (environment variable
+/// DC_VRAM_WATCH=lo,hi: 64-bit-view offsets in hex), logged with the path they took
+pub static VWATCH: std::sync::Mutex<(usize, usize, u32)> = std::sync::Mutex::new((0, 0, 0));
+static VWATCH_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Read DC_VRAM_WATCH once.
+pub fn vwatch_init() {
+    if let Ok(w) = std::env::var("DC_VRAM_WATCH") {
+        let v: Vec<usize> = w.split(',').filter_map(|x| usize::from_str_radix(x.trim(), 16).ok()).collect();
+        if v.len() == 2 {
+            *VWATCH.lock().unwrap() = (v[0], v[1], 0);
+            VWATCH_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+            crate::dlog!("Dreamcast: watching video RAM writes to {:06X}-{:06X}", v[0], v[1]);
+        }
+    }
+}
+
+/// The watched range, if DC_VRAM_WATCH is set.
+fn vwatch_range() -> Option<(usize, usize)> {
+    if !VWATCH_ON.load(std::sync::atomic::Ordering::Relaxed) { return None; }
+    let w = VWATCH.lock().unwrap();
+    Some((w.0, w.1))
+}
+
+/// One watch line (the first 400; a render only the first time its settings are seen).
+fn vwatch_log(line: &str) {
+    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut w = VWATCH.lock().unwrap();
+    if w.2 >= 400 { return; }
+    if line.starts_with("render") {
+        let mut seen = SEEN.lock().unwrap();
+        let key = line.split_once("; ").map_or(line, |x| x.1);
+        if seen.iter().any(|k| k == key) { return; }
+        seen.push(key.to_string());
+    }
+    w.2 += 1;
+    crate::dlog!("  vram write ({line})");
+}
+
+/// For the frame reports: whether the watch is on and how many lines it has logged.
+pub fn vwatch_status() -> Option<String> {
+    let (a, b) = vwatch_range()?;
+    let n = VWATCH.lock().unwrap().2;
+    Some(format!("video RAM watch {a:06X}-{b:06X}: {n} lines logged"))
+}
+
+#[inline(always)]
+fn vwatch(path: &str, p: u32, i: usize, v: u32, size: u32, extra: impl FnOnce() -> String) {
+    if !VWATCH_ON.load(std::sync::atomic::Ordering::Relaxed) { return; }
+    let (lo, hi) = { let w = VWATCH.lock().unwrap(); (w.0, w.1) };
+    if i >= lo && i < hi {
+        vwatch_log(&format!("{path}: address {p:08X} -> offset {i:06X} = {v:08X} ({size} bytes); {}", extra()));
     }
 }

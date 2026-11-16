@@ -415,6 +415,39 @@ impl EmuSystem {
         }
     }
 
+    /// The memory card in the slot (Dreamcast VMU) as card-file bytes (empty: no slot).
+    #[func]
+    fn get_memory_card(&self) -> PackedByteArray {
+        match self.system.as_ref().and_then(|s| s.memory_card()) {
+            Some(d) => PackedByteArray::from(&d[..]),
+            None => PackedByteArray::new(),
+        }
+    }
+
+    /// Put a card file in the slot (empty bytes: a new formatted card); `swap` pulls the old
+    /// one out for a moment first.
+    #[func]
+    fn insert_memory_card(&mut self, data: PackedByteArray, swap: bool) -> bool {
+        match &mut self.system { Some(s) => s.insert_memory_card(data.as_slice(), swap), None => false }
+    }
+
+    /// The game wrote to the card since the last call (then the card file needs saving).
+    #[func]
+    fn memory_card_dirty(&mut self) -> bool {
+        match &mut self.system { Some(s) => s.memory_card_dirty(), None => false }
+    }
+
+    /// A Dreamcast card file: [free blocks, save names...] (empty: not a card image).
+    #[func]
+    fn memory_card_info(data: PackedByteArray) -> PackedStringArray {
+        let mut out = PackedStringArray::new();
+        if let Some((free, files)) = crate::dreamcast::vmu::Vmu::summary(data.as_slice()) {
+            out.push(&GString::from(free.to_string().as_str()));
+            for f in files { out.push(&GString::from(f.as_str())); }
+        }
+        out
+    }
+
     /// Light gun pointer (framebuffer pixels, -1 = off screen; buttons bit 0 left, bit 1 right)
     #[func]
     fn set_pointer(&mut self, x: i64, y: i64, buttons: i64) {

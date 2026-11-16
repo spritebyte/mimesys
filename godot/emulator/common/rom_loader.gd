@@ -500,6 +500,9 @@ static func _build_regions(db: Dictionary, set_id: String, pool: Array) -> Dicti
 		var found_any := false
 		var buf := PackedByteArray()
 		buf.resize(region["size"].hex_to_int())   # zero-filled
+		# "fill": "0xff" = MAME's ROMREGION_ERASEFF (gaps between ROMs read as FF)
+		if region.has("fill"):
+			buf.fill(region["fill"].hex_to_int())
 		for rom in region["roms"]:
 			var data := _find_rom(pool, rom)
 			if data.is_empty():

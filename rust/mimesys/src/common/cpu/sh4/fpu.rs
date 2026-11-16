@@ -41,6 +41,20 @@ impl Sh4 {
     fn mode(&self) -> Mode { let mut m = Mode::from_fpscr(self.fpscr); m.fast = self.fast_fpu; m }
     fn sz(&self) -> bool { self.fpscr & FPSCR_SZ != 0 }
 
+    /// SR.FD set: the FPU-disabled exception (0x800, 0x820 in a delay slot) and true. LDS /
+    /// STS to FPUL and FPSCR count as FPU instructions too - Windows CE switches the FPU's
+    /// registers lazily on this exception, so one that slipped through would land in the
+    /// previous thread's registers (Resident Evil 2 quit over it).
+    #[inline(always)]
+    pub(super) fn fd_trap<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B) -> bool {
+        if self.check_fd && self.sr_hi & SR_FD != 0 {
+            let code = if self.in_slot { EXP_FPU_DISABLED_SLOT } else { EXP_FPU_DISABLED };
+            self.exception(bus, code);
+            return true;
+        }
+        false
+    }
+
     #[inline(always)]
     pub(super) fn fpu<B: Sh4Bus + ?Sized>(&mut self, bus: &mut B, op: u16) {
         if self.check_fd && self.sr_hi & SR_FD != 0 {

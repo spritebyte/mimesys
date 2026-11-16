@@ -42,7 +42,7 @@ impl DiscSlot {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-enum Phase {
+pub enum Phase {
     Idle,
     /// receiving the 12-byte packet
     Packet,
@@ -70,11 +70,11 @@ pub struct Gdrom {
     pub devctl: u8,
     /// interrupt line to Holly
     pub irq: bool,
-    phase: Phase,
+    pub phase: Phase,
     packet: Vec<u8>,
     #[serde(with = "serde_bytes")]
-    data: Vec<u8>,
-    pos: usize,
+    pub data: Vec<u8>,
+    pub pos: usize,
     /// end of the piece the host is reading now (PIO)
     chunk_end: usize,
     /// byte-count limit the host set before the packet
@@ -85,7 +85,10 @@ pub struct Gdrom {
     /// a few sectors at a time as the host takes them (NBA 2K asks for 32767 sectors, takes
     /// what it needs and stops the drive with an ATA NOP).
     #[serde(default)]
-    stream: (u32, u32, bool),
+    pub stream: (u32, u32, bool),
+    /// debug: commands and packets for the bus's event trace
+    #[serde(skip)]
+    pub ev: Vec<String>,
     /// debug: ATA NOPs and PIO bytes since the last look
     #[serde(skip)]
     pub nops: u32,
@@ -201,7 +204,7 @@ const CMD71_REPLY: [u8; 1012] = [
 
 impl Gdrom {
     pub fn new() -> Self {
-        Self {
+        Self { ev: Vec::new(),
             status: DRDY | DSC, error: 0, ireason: 3, state: ST_STANDBY, features: 0, byte_count: 0,
             drive_select: 0, devctl: 0, irq: false, phase: Phase::Idle, packet: Vec::new(), data: Vec::new(),
             pos: 0, chunk_end: 0, limit: 0, dma: false, stream: (0, 0, false), nops: 0, pio_bytes: 0, sense: 0, asc: 0, mode: MODE_DEFAULT.to_vec(), fad: 150,
@@ -233,8 +236,15 @@ impl Gdrom {
 
     /// Keep the last 32 commands (the start of the boot is in the first report).
     fn note(&mut self, s: String) {
+        if self.ev.len() < 64 { self.ev.push(s.clone()); }
         if self.log.len() >= 32 { self.log.remove(0); }
         self.log.push(s);
+    }
+
+    /// debug: the drive's state in one line
+    pub fn describe(&self) -> String {
+        format!("status {:02X} error {:02X} phase {:?} dma {} data {:X} taken {:X} stream next {:X} left {:X} irq {}",
+                self.status, self.error, self.phase, self.dma, self.data.len(), self.pos, self.stream.0, self.stream.1, self.irq)
     }
 
     fn interrupt(&mut self) { if self.devctl & 2 == 0 { self.irq = true; } }
