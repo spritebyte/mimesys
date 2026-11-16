@@ -94,7 +94,7 @@ code. ares is (c) 2004-2025 Near and the ares team, under the ISC license:
 | SNES test cartridge | `rust/mimesys/src/snes/test_rom/` (`test.s` → `test.sfc`, ca65) | written for mimesys | MIT (this project) |
 
 ## Code ported from ymfm
-`common/audio/ym2151.rs`, `common/audio/ym2612.rs`: ports of Aaron Giles' ymfm.
+`common/audio/ym2151.rs`, `common/audio/ym2612.rs`, `common/audio/ym2203.rs`: ports of Aaron Giles' ymfm.
 Copyright (c) 2021, Aaron Giles. BSD-3-Clause (`licenses/ymfm-BSD-3-Clause.txt`).
 
 ## Code ported from or modelled on MAME
@@ -131,6 +131,12 @@ and MAME's `src/devices/` or `src/mame/`.
 | `arcade/ddragon/*` | `technos/ddragon.cpp, ddragon_v.cpp` | Philip Bennett, Carlos A. Lozano, Rob Rosenbrock, Phil Stroffolino, Ernesto Corvi, David Haywood, R. Belmont |
 | `arcade/digdug/*` | `namco/digdug.cpp, galaga.cpp, galaga_a.cpp, namcoio.cpp, namco06.cpp` | Nicola Salmoria, Derrick Renaud, Mike Harris, Aaron Giles |
 | `arcade/galaxian/*` | `galaxian/galaxian.cpp, galaxian_a.cpp, galaxian_v.cpp; shared/timeplt_a.cpp` | Aaron Giles, Couriersud, Stephane Humbert, Robbbert, Nicola Salmoria |
+| `arcade/bagman/*` | `valadon/bagman.cpp, bagman_v.cpp` (the PAL16R6 logic is derived here from the fuse map, not from the GPL bagman_m.cpp code) | Nicola Salmoria |
+| `arcade/gng/*` | `capcom/gng.cpp` | Pierpaolo Prazzoli |
+| `arcade/commando/*` | `capcom/commando.cpp` | Nicola Salmoria |
+| `arcade/c1942/*` | `capcom/1942.cpp, 1942_v.cpp` | Paul Leaman, Couriersud |
+| `arcade/gunsmoke/*` | `capcom/gunsmoke.cpp` | Paul Leaman |
+| `arcade/bionicc/*` | `capcom/bionicc.cpp`, `capcom/tigeroad_spr.cpp` (and MAME 0.139's `bionicc.c` for the no-MCU fallback) | Phil Stroffolino, Paul Leaman, Dirk Best, David Haywood |
 | `arcade/gberet/*` | `konami/gberet.cpp` | Nicola Salmoria |
 | `arcade/gottlieb/*` | `gottlieb/gottlieb.cpp; shared/gottlieb_a.cpp` | Fabrice Frances, Nicola Salmoria, Aaron Giles |
 | `arcade/irem/*` | `irem/m62.cpp, m62_v.cpp` | smf, David Haywood |

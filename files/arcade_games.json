@@ -135773,5 +135773,6783 @@
     "optional": true
    }
   }
+ },
+ "commando": {
+  "title": "Commando (World)",
+  "driver": "commando",
+  "rotation": 270,
+  "regions": {
+   "maincpu": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "cm04.9m",
+      "offset": "0x0000",
+      "size": "0x8000",
+      "crc": "8438b694",
+      "sha1": "e154478d8f1b635355bd777370acabe49cb9d309"
+     },
+     {
+      "name": "cm03.8m",
+      "offset": "0x8000",
+      "size": "0x4000",
+      "crc": "35486542",
+      "sha1": "531a85c9e03970ce037be84f2240c2df6f6e3ec1"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "cm02.9f",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "f9cc4a74",
+      "sha1": "ee8dd73919c6f47f62cc6d999de9510db9f79b8f"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x4000",
+    "roms": [
+     {
+      "name": "vt01.5d",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "505726e0",
+      "sha1": "2435c87c9c9d78a6e703cf0e1f6a0288207fcd4c"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt11.5a",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "7b2e1b48",
+      "sha1": "5d49e1d8146e4ef744445b68f35677302e875a85"
+     },
+     {
+      "name": "vt12.6a",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "81b417d3",
+      "sha1": "5ec7e3f0c8069384a5f6eb39232c228b9d7b8c0c"
+     },
+     {
+      "name": "vt13.7a",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "5612dbd2",
+      "sha1": "9e4e1a22b6cbf60607b9a81dae34482ae55f7c47"
+     },
+     {
+      "name": "vt14.8a",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2b2dee36",
+      "sha1": "8792278464fa3da47176582025f6673a15a581e2"
+     },
+     {
+      "name": "vt15.9a",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "de70babf",
+      "sha1": "6717e23baf55f84d3143fb432140a7c3e102ac26"
+     },
+     {
+      "name": "vt16.10a",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "14178237",
+      "sha1": "f896e71c7004349c9a46155edfd9f0aaa186065d"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt05.7e",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "79f16e3d",
+      "sha1": "04e1f03a4d6b4cc2b81bce3a290bbb95de900d35"
+     },
+     {
+      "name": "vt06.8e",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "26fee521",
+      "sha1": "2fbfc73ee860f72a20229a01d4da9f5cc2e858d3"
+     },
+     {
+      "name": "vt07.9e",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "ca88bdfd",
+      "sha1": "548b05460bc7983cc81f15c70e87f47d10db2812"
+     },
+     {
+      "name": "vt08.7h",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2019c883",
+      "sha1": "883c0156ceab99f4849fe36972c4162b4ac8c216"
+     },
+     {
+      "name": "vt09.8h",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "98703982",
+      "sha1": "ba9a9b0dcadd4f52502828408c4a19b0bd518351"
+     },
+     {
+      "name": "vt10.9h",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "f069d2f8",
+      "sha1": "2c92300a9407470b34965021de882f1f7a84730c"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "vtb5.6l",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x500",
+    "roms": [
+     {
+      "name": "vtb1.1d",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "3aba15a1",
+      "sha1": "8b057f6e26155dd9e48bde182e680fce4519f600"
+     },
+     {
+      "name": "vtb2.2d",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "88865754",
+      "sha1": "ca6dddca98baf00a65b2fb70b69cf4704ef8c831"
+     },
+     {
+      "name": "vtb3.3d",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "4c14c3f6",
+      "sha1": "644ac17c7413f094ec9a15cba87bbd421b26321f"
+     }
+    ]
+   }
+  }
+ },
+ "commandou": {
+  "title": "Commando (US set 1)",
+  "driver": "commando",
+  "rotation": 270,
+  "parent": "commando",
+  "regions": {
+   "maincpu": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "u4-f.9m",
+      "offset": "0x0000",
+      "size": "0x8000",
+      "crc": "a6118935",
+      "sha1": "d5811968b23d61e344e151747bcc3c0ed2b9497b"
+     },
+     {
+      "name": "u3-f.8m",
+      "offset": "0x8000",
+      "size": "0x4000",
+      "crc": "24f49684",
+      "sha1": "d38a7bd9f3b506747a03f6b94c3f8a2d9fc59166"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "cm02.9f",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "f9cc4a74",
+      "sha1": "ee8dd73919c6f47f62cc6d999de9510db9f79b8f"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x4000",
+    "roms": [
+     {
+      "name": "vt01.5d",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "505726e0",
+      "sha1": "2435c87c9c9d78a6e703cf0e1f6a0288207fcd4c"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt11.5a",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "7b2e1b48",
+      "sha1": "5d49e1d8146e4ef744445b68f35677302e875a85"
+     },
+     {
+      "name": "vt12.6a",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "81b417d3",
+      "sha1": "5ec7e3f0c8069384a5f6eb39232c228b9d7b8c0c"
+     },
+     {
+      "name": "vt13.7a",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "5612dbd2",
+      "sha1": "9e4e1a22b6cbf60607b9a81dae34482ae55f7c47"
+     },
+     {
+      "name": "vt14.8a",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2b2dee36",
+      "sha1": "8792278464fa3da47176582025f6673a15a581e2"
+     },
+     {
+      "name": "vt15.9a",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "de70babf",
+      "sha1": "6717e23baf55f84d3143fb432140a7c3e102ac26"
+     },
+     {
+      "name": "vt16.10a",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "14178237",
+      "sha1": "f896e71c7004349c9a46155edfd9f0aaa186065d"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt05.7e",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "79f16e3d",
+      "sha1": "04e1f03a4d6b4cc2b81bce3a290bbb95de900d35"
+     },
+     {
+      "name": "vt06.8e",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "26fee521",
+      "sha1": "2fbfc73ee860f72a20229a01d4da9f5cc2e858d3"
+     },
+     {
+      "name": "vt07.9e",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "ca88bdfd",
+      "sha1": "548b05460bc7983cc81f15c70e87f47d10db2812"
+     },
+     {
+      "name": "vt08.7h",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2019c883",
+      "sha1": "883c0156ceab99f4849fe36972c4162b4ac8c216"
+     },
+     {
+      "name": "vt09.8h",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "98703982",
+      "sha1": "ba9a9b0dcadd4f52502828408c4a19b0bd518351"
+     },
+     {
+      "name": "vt10.9h",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "f069d2f8",
+      "sha1": "2c92300a9407470b34965021de882f1f7a84730c"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "vtb5.6l",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x500",
+    "roms": [
+     {
+      "name": "vtb1.1d",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "3aba15a1",
+      "sha1": "8b057f6e26155dd9e48bde182e680fce4519f600"
+     },
+     {
+      "name": "vtb2.2d",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "88865754",
+      "sha1": "ca6dddca98baf00a65b2fb70b69cf4704ef8c831"
+     },
+     {
+      "name": "vtb3.3d",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "4c14c3f6",
+      "sha1": "644ac17c7413f094ec9a15cba87bbd421b26321f"
+     }
+    ]
+   }
+  }
+ },
+ "commandoj": {
+  "title": "Senjou no Ookami (Japan)",
+  "driver": "commando",
+  "rotation": 270,
+  "parent": "commando",
+  "regions": {
+   "maincpu": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "so04.9m",
+      "offset": "0x0000",
+      "size": "0x8000",
+      "crc": "d3f2bfb3",
+      "sha1": "738a5673ac6a907cb04cfb125e8aab3f7437b9d2"
+     },
+     {
+      "name": "so03.8m",
+      "offset": "0x8000",
+      "size": "0x4000",
+      "crc": "ed01f472",
+      "sha1": "fa181293ae8f0fee78d412259eb81f6de1e1307a"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "so02.9f",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "ca20aca5",
+      "sha1": "206a8fd4a8985e7ceed7de8349ba02627e881503"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x4000",
+    "roms": [
+     {
+      "name": "vt01.5d",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "505726e0",
+      "sha1": "2435c87c9c9d78a6e703cf0e1f6a0288207fcd4c"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt11.5a",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "7b2e1b48",
+      "sha1": "5d49e1d8146e4ef744445b68f35677302e875a85"
+     },
+     {
+      "name": "vt12.6a",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "81b417d3",
+      "sha1": "5ec7e3f0c8069384a5f6eb39232c228b9d7b8c0c"
+     },
+     {
+      "name": "vt13.7a",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "5612dbd2",
+      "sha1": "9e4e1a22b6cbf60607b9a81dae34482ae55f7c47"
+     },
+     {
+      "name": "vt14.8a",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2b2dee36",
+      "sha1": "8792278464fa3da47176582025f6673a15a581e2"
+     },
+     {
+      "name": "vt15.9a",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "de70babf",
+      "sha1": "6717e23baf55f84d3143fb432140a7c3e102ac26"
+     },
+     {
+      "name": "vt16.10a",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "14178237",
+      "sha1": "f896e71c7004349c9a46155edfd9f0aaa186065d"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt05.7e",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "79f16e3d",
+      "sha1": "04e1f03a4d6b4cc2b81bce3a290bbb95de900d35"
+     },
+     {
+      "name": "vt06.8e",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "26fee521",
+      "sha1": "2fbfc73ee860f72a20229a01d4da9f5cc2e858d3"
+     },
+     {
+      "name": "vt07.9e",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "ca88bdfd",
+      "sha1": "548b05460bc7983cc81f15c70e87f47d10db2812"
+     },
+     {
+      "name": "vt08.7h",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2019c883",
+      "sha1": "883c0156ceab99f4849fe36972c4162b4ac8c216"
+     },
+     {
+      "name": "vt09.8h",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "98703982",
+      "sha1": "ba9a9b0dcadd4f52502828408c4a19b0bd518351"
+     },
+     {
+      "name": "vt10.9h",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "f069d2f8",
+      "sha1": "2c92300a9407470b34965021de882f1f7a84730c"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "vtb5.6l",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x500",
+    "roms": [
+     {
+      "name": "vtb1.1d",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "3aba15a1",
+      "sha1": "8b057f6e26155dd9e48bde182e680fce4519f600"
+     },
+     {
+      "name": "vtb2.2d",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "88865754",
+      "sha1": "ca6dddca98baf00a65b2fb70b69cf4704ef8c831"
+     },
+     {
+      "name": "vtb3.3d",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "4c14c3f6",
+      "sha1": "644ac17c7413f094ec9a15cba87bbd421b26321f"
+     }
+    ]
+   }
+  }
+ },
+ "commandob": {
+  "title": "Commando (bootleg set 1)",
+  "driver": "commando_b",
+  "rotation": 270,
+  "parent": "commando",
+  "regions": {
+   "maincpu": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "commandob_04_9m_27256.bin",
+      "offset": "0x0000",
+      "size": "0x8000",
+      "crc": "348a7654",
+      "sha1": "f3668c47c154a9c7d7afeabb0259c9bc56e847ac"
+     },
+     {
+      "name": "cm03.8m",
+      "offset": "0x8000",
+      "size": "0x4000",
+      "crc": "35486542",
+      "sha1": "531a85c9e03970ce037be84f2240c2df6f6e3ec1"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "cm02.9f",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "f9cc4a74",
+      "sha1": "ee8dd73919c6f47f62cc6d999de9510db9f79b8f"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x4000",
+    "roms": [
+     {
+      "name": "vt01.5d",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "505726e0",
+      "sha1": "2435c87c9c9d78a6e703cf0e1f6a0288207fcd4c"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt11.5a",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "7b2e1b48",
+      "sha1": "5d49e1d8146e4ef744445b68f35677302e875a85"
+     },
+     {
+      "name": "vt12.6a",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "81b417d3",
+      "sha1": "5ec7e3f0c8069384a5f6eb39232c228b9d7b8c0c"
+     },
+     {
+      "name": "vt13.7a",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "5612dbd2",
+      "sha1": "9e4e1a22b6cbf60607b9a81dae34482ae55f7c47"
+     },
+     {
+      "name": "vt14.8a",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2b2dee36",
+      "sha1": "8792278464fa3da47176582025f6673a15a581e2"
+     },
+     {
+      "name": "vt15.9a",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "de70babf",
+      "sha1": "6717e23baf55f84d3143fb432140a7c3e102ac26"
+     },
+     {
+      "name": "vt16.10a",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "14178237",
+      "sha1": "f896e71c7004349c9a46155edfd9f0aaa186065d"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt05.7e",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "79f16e3d",
+      "sha1": "04e1f03a4d6b4cc2b81bce3a290bbb95de900d35"
+     },
+     {
+      "name": "vt06.8e",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "26fee521",
+      "sha1": "2fbfc73ee860f72a20229a01d4da9f5cc2e858d3"
+     },
+     {
+      "name": "vt07.9e",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "ca88bdfd",
+      "sha1": "548b05460bc7983cc81f15c70e87f47d10db2812"
+     },
+     {
+      "name": "vt08.7h",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2019c883",
+      "sha1": "883c0156ceab99f4849fe36972c4162b4ac8c216"
+     },
+     {
+      "name": "vt09.8h",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "98703982",
+      "sha1": "ba9a9b0dcadd4f52502828408c4a19b0bd518351"
+     },
+     {
+      "name": "vt10.9h",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "f069d2f8",
+      "sha1": "2c92300a9407470b34965021de882f1f7a84730c"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "vtb5.6l",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x500",
+    "roms": [
+     {
+      "name": "vtb1.1d",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "3aba15a1",
+      "sha1": "8b057f6e26155dd9e48bde182e680fce4519f600"
+     },
+     {
+      "name": "vtb2.2d",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "88865754",
+      "sha1": "ca6dddca98baf00a65b2fb70b69cf4704ef8c831"
+     },
+     {
+      "name": "vtb3.3d",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "4c14c3f6",
+      "sha1": "644ac17c7413f094ec9a15cba87bbd421b26321f"
+     }
+    ]
+   }
+  }
+ },
+ "commandob2": {
+  "title": "Commando (bootleg set 2)",
+  "driver": "commando",
+  "rotation": 270,
+  "parent": "commando",
+  "regions": {
+   "maincpu": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "10",
+      "offset": "0x0000",
+      "size": "0x8000",
+      "crc": "ab5d1469",
+      "sha1": "05935155365bef3c40823101303a3857af1c71e6"
+     },
+     {
+      "name": "11",
+      "offset": "0x8000",
+      "size": "0x4000",
+      "crc": "d1a43ba1",
+      "sha1": "dbaedcd3a1b489a01b7f783fda6fcad203758717"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "8,so02.9f",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "ca20aca5",
+      "sha1": "206a8fd4a8985e7ceed7de8349ba02627e881503"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x4000",
+    "roms": [
+     {
+      "name": "7,vt01.5d",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "505726e0",
+      "sha1": "2435c87c9c9d78a6e703cf0e1f6a0288207fcd4c"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "17,vt11.5a",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "7b2e1b48",
+      "sha1": "5d49e1d8146e4ef744445b68f35677302e875a85"
+     },
+     {
+      "name": "16,vt12.6a",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "81b417d3",
+      "sha1": "5ec7e3f0c8069384a5f6eb39232c228b9d7b8c0c"
+     },
+     {
+      "name": "15,vt13.7a",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "5612dbd2",
+      "sha1": "9e4e1a22b6cbf60607b9a81dae34482ae55f7c47"
+     },
+     {
+      "name": "14,vt14.8a",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2b2dee36",
+      "sha1": "8792278464fa3da47176582025f6673a15a581e2"
+     },
+     {
+      "name": "13,vt15.9a",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "de70babf",
+      "sha1": "6717e23baf55f84d3143fb432140a7c3e102ac26"
+     },
+     {
+      "name": "12,vt16.10a",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "14178237",
+      "sha1": "f896e71c7004349c9a46155edfd9f0aaa186065d"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "3,vt05.7e",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "79f16e3d",
+      "sha1": "04e1f03a4d6b4cc2b81bce3a290bbb95de900d35"
+     },
+     {
+      "name": "2,vt06.8e",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "26fee521",
+      "sha1": "2fbfc73ee860f72a20229a01d4da9f5cc2e858d3"
+     },
+     {
+      "name": "1,vt07.9e",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "ca88bdfd",
+      "sha1": "548b05460bc7983cc81f15c70e87f47d10db2812"
+     },
+     {
+      "name": "6,vt08.7h",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2019c883",
+      "sha1": "883c0156ceab99f4849fe36972c4162b4ac8c216"
+     },
+     {
+      "name": "5,vt09.8h",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "98703982",
+      "sha1": "ba9a9b0dcadd4f52502828408c4a19b0bd518351"
+     },
+     {
+      "name": "4,vt10.9h",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "f069d2f8",
+      "sha1": "2c92300a9407470b34965021de882f1f7a84730c"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "vtb5.6l",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x500",
+    "roms": [
+     {
+      "name": "vtb1.1d",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "3aba15a1",
+      "sha1": "8b057f6e26155dd9e48bde182e680fce4519f600"
+     },
+     {
+      "name": "vtb2.2d",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "88865754",
+      "sha1": "ca6dddca98baf00a65b2fb70b69cf4704ef8c831"
+     },
+     {
+      "name": "vtb3.3d",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "4c14c3f6",
+      "sha1": "644ac17c7413f094ec9a15cba87bbd421b26321f"
+     }
+    ]
+   }
+  }
+ },
+ "commandob3": {
+  "title": "Commando (bootleg set 3)",
+  "driver": "commando",
+  "rotation": 270,
+  "parent": "commando",
+  "regions": {
+   "maincpu": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "b5.10n",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "df8f4e9a",
+      "sha1": "72f08dc70a72c183c3f071ed47b1d060516e545a"
+     },
+     {
+      "name": "b4.9n",
+      "offset": "0x4000",
+      "size": "0x4000",
+      "crc": "aca99905",
+      "sha1": "609cf3d180ceb0c67e2deff9db16fa56c8948a97"
+     },
+     {
+      "name": "b3.8n",
+      "offset": "0x8000",
+      "size": "0x4000",
+      "crc": "35486542",
+      "sha1": "531a85c9e03970ce037be84f2240c2df6f6e3ec1"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "b2.9f",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "f9cc4a74",
+      "sha1": "ee8dd73919c6f47f62cc6d999de9510db9f79b8f"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x4000",
+    "roms": [
+     {
+      "name": "b1.5d",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "505726e0",
+      "sha1": "2435c87c9c9d78a6e703cf0e1f6a0288207fcd4c"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "b12.5a",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "7b2e1b48",
+      "sha1": "5d49e1d8146e4ef744445b68f35677302e875a85"
+     },
+     {
+      "name": "b13.6a",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "81b417d3",
+      "sha1": "5ec7e3f0c8069384a5f6eb39232c228b9d7b8c0c"
+     },
+     {
+      "name": "b14.7a",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "5612dbd2",
+      "sha1": "9e4e1a22b6cbf60607b9a81dae34482ae55f7c47"
+     },
+     {
+      "name": "b15.8a",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2b2dee36",
+      "sha1": "8792278464fa3da47176582025f6673a15a581e2"
+     },
+     {
+      "name": "b16.9a",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "de70babf",
+      "sha1": "6717e23baf55f84d3143fb432140a7c3e102ac26"
+     },
+     {
+      "name": "b17.10a",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "14178237",
+      "sha1": "f896e71c7004349c9a46155edfd9f0aaa186065d"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "b6.7e",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "79f16e3d",
+      "sha1": "04e1f03a4d6b4cc2b81bce3a290bbb95de900d35"
+     },
+     {
+      "name": "b7.8e",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "26fee521",
+      "sha1": "2fbfc73ee860f72a20229a01d4da9f5cc2e858d3"
+     },
+     {
+      "name": "b8.9e",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "ca88bdfd",
+      "sha1": "548b05460bc7983cc81f15c70e87f47d10db2812"
+     },
+     {
+      "name": "b9.7h",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2019c883",
+      "sha1": "883c0156ceab99f4849fe36972c4162b4ac8c216"
+     },
+     {
+      "name": "b10.8h",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "98703982",
+      "sha1": "ba9a9b0dcadd4f52502828408c4a19b0bd518351"
+     },
+     {
+      "name": "b11.9h",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "f069d2f8",
+      "sha1": "2c92300a9407470b34965021de882f1f7a84730c"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "vtb5.6l",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x500",
+    "roms": [
+     {
+      "name": "vtb1.1d",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "3aba15a1",
+      "sha1": "8b057f6e26155dd9e48bde182e680fce4519f600"
+     },
+     {
+      "name": "vtb2.2d",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "88865754",
+      "sha1": "ca6dddca98baf00a65b2fb70b69cf4704ef8c831"
+     },
+     {
+      "name": "vtb3.3d",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "4c14c3f6",
+      "sha1": "644ac17c7413f094ec9a15cba87bbd421b26321f"
+     }
+    ]
+   }
+  }
+ },
+ "commandou2": {
+  "title": "Commando (US set 2)",
+  "driver": "commando",
+  "rotation": 270,
+  "parent": "commando",
+  "regions": {
+   "maincpu": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "uc4.9m",
+      "offset": "0x0000",
+      "size": "0x8000",
+      "crc": "89ee8e17",
+      "sha1": "68db271af8b0f400ca95df5672983bfb87f3f84a"
+     },
+     {
+      "name": "uc3.8m",
+      "offset": "0x8000",
+      "size": "0x4000",
+      "crc": "72a1a529",
+      "sha1": "fe7797206e38bd78e817b6c351d5cb943720fe6c"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "cd02.9f",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "f9cc4a74",
+      "sha1": "ee8dd73919c6f47f62cc6d999de9510db9f79b8f"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x4000",
+    "roms": [
+     {
+      "name": "vt01.5d",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "505726e0",
+      "sha1": "2435c87c9c9d78a6e703cf0e1f6a0288207fcd4c"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt11.5a",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "7b2e1b48",
+      "sha1": "5d49e1d8146e4ef744445b68f35677302e875a85"
+     },
+     {
+      "name": "vt12.6a",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "81b417d3",
+      "sha1": "5ec7e3f0c8069384a5f6eb39232c228b9d7b8c0c"
+     },
+     {
+      "name": "vt13.7a",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "5612dbd2",
+      "sha1": "9e4e1a22b6cbf60607b9a81dae34482ae55f7c47"
+     },
+     {
+      "name": "vt14.8a",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2b2dee36",
+      "sha1": "8792278464fa3da47176582025f6673a15a581e2"
+     },
+     {
+      "name": "vt15.9a",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "de70babf",
+      "sha1": "6717e23baf55f84d3143fb432140a7c3e102ac26"
+     },
+     {
+      "name": "vt16.10a",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "14178237",
+      "sha1": "f896e71c7004349c9a46155edfd9f0aaa186065d"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt05.7e",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "79f16e3d",
+      "sha1": "04e1f03a4d6b4cc2b81bce3a290bbb95de900d35"
+     },
+     {
+      "name": "vt06.8e",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "26fee521",
+      "sha1": "2fbfc73ee860f72a20229a01d4da9f5cc2e858d3"
+     },
+     {
+      "name": "vt07.9e",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "ca88bdfd",
+      "sha1": "548b05460bc7983cc81f15c70e87f47d10db2812"
+     },
+     {
+      "name": "vt08.7h",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2019c883",
+      "sha1": "883c0156ceab99f4849fe36972c4162b4ac8c216"
+     },
+     {
+      "name": "vt09.8h",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "98703982",
+      "sha1": "ba9a9b0dcadd4f52502828408c4a19b0bd518351"
+     },
+     {
+      "name": "vt10.9h",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "f069d2f8",
+      "sha1": "2c92300a9407470b34965021de882f1f7a84730c"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "vtb-5.6l",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x500",
+    "roms": [
+     {
+      "name": "vtb-1.1d",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "3aba15a1",
+      "sha1": "8b057f6e26155dd9e48bde182e680fce4519f600"
+     },
+     {
+      "name": "vtb-2.2d",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "88865754",
+      "sha1": "ca6dddca98baf00a65b2fb70b69cf4704ef8c831"
+     },
+     {
+      "name": "vtb-3.3d",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "4c14c3f6",
+      "sha1": "644ac17c7413f094ec9a15cba87bbd421b26321f"
+     }
+    ]
+   }
+  }
+ },
+ "sinvasn": {
+  "title": "Space Invasion (Europe)",
+  "driver": "commando",
+  "rotation": 270,
+  "parent": "commando",
+  "regions": {
+   "maincpu": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "sp04.9m",
+      "offset": "0x0000",
+      "size": "0x8000",
+      "crc": "33f9601e",
+      "sha1": "71182227b77fccbbc1d89b5828aa86dcc64ca05e"
+     },
+     {
+      "name": "sp03.8m",
+      "offset": "0x8000",
+      "size": "0x4000",
+      "crc": "c7fb43b3",
+      "sha1": "36d0dffdacc36a6b6a77101d942c0821846f3275"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "u2.9f",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "cbf8c40e",
+      "sha1": "0c8dce034d96d075e012cbb8f68c2817b860d969"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x04000",
+    "roms": [
+     {
+      "name": "u1.5d",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "f477e13a",
+      "sha1": "ec5b80f5d508501e72cba028dc45b2c307ac452b"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt11.5a",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "7b2e1b48",
+      "sha1": "5d49e1d8146e4ef744445b68f35677302e875a85"
+     },
+     {
+      "name": "vt12.6a",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "81b417d3",
+      "sha1": "5ec7e3f0c8069384a5f6eb39232c228b9d7b8c0c"
+     },
+     {
+      "name": "vt13.7a",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "5612dbd2",
+      "sha1": "9e4e1a22b6cbf60607b9a81dae34482ae55f7c47"
+     },
+     {
+      "name": "vt14.8a",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2b2dee36",
+      "sha1": "8792278464fa3da47176582025f6673a15a581e2"
+     },
+     {
+      "name": "vt15.9a",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "de70babf",
+      "sha1": "6717e23baf55f84d3143fb432140a7c3e102ac26"
+     },
+     {
+      "name": "vt16.10a",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "14178237",
+      "sha1": "f896e71c7004349c9a46155edfd9f0aaa186065d"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "u5.e7",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "2a97c933",
+      "sha1": "bfddb0c0f930a7caffad7e52d394d72c09ffb45f"
+     },
+     {
+      "name": "sp06.e8",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "d7887212",
+      "sha1": "43ad98263d6314d40abf33087127c23a3ad72335"
+     },
+     {
+      "name": "sp07.e9",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "9abe7a20",
+      "sha1": "5f1b851bd66a3ab818b893286d3ebf2194f425c4"
+     },
+     {
+      "name": "u8.h7",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "d6b4aa2e",
+      "sha1": "5bbf536f73010182b9150dd4fb1e2a42b5b380b0"
+     },
+     {
+      "name": "sp09.h8",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "3985b318",
+      "sha1": "ac4c67c3af42121869c1b9470377404bc88793c2"
+     },
+     {
+      "name": "sp10.h9",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "3c131b0f",
+      "sha1": "dd3e63199120502c03eedd024a2eed3b5d3e2a1c"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "vtb5.6l",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x0500",
+    "roms": [
+     {
+      "name": "vtb1.1d",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "3aba15a1",
+      "sha1": "8b057f6e26155dd9e48bde182e680fce4519f600"
+     },
+     {
+      "name": "vtb2.2d",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "88865754",
+      "sha1": "ca6dddca98baf00a65b2fb70b69cf4704ef8c831"
+     },
+     {
+      "name": "vtb3.3d",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "4c14c3f6",
+      "sha1": "644ac17c7413f094ec9a15cba87bbd421b26321f"
+     }
+    ]
+   }
+  }
+ },
+ "sinvasnb": {
+  "title": "Space Invasion (bootleg)",
+  "driver": "commando_b",
+  "rotation": 270,
+  "parent": "commando",
+  "regions": {
+   "maincpu": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "u4",
+      "offset": "0x0000",
+      "size": "0x8000",
+      "crc": "834ba0de",
+      "sha1": "85f40559e6a436f3f752b6e862a419a5b9481fa8"
+     },
+     {
+      "name": "u3",
+      "offset": "0x8000",
+      "size": "0x4000",
+      "crc": "07e4ee3a",
+      "sha1": "6d7665b3072f075893ef37e55147b10271d069ef"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "u2",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "cbf8c40e",
+      "sha1": "0c8dce034d96d075e012cbb8f68c2817b860d969"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x04000",
+    "roms": [
+     {
+      "name": "u1",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "f477e13a",
+      "sha1": "ec5b80f5d508501e72cba028dc45b2c307ac452b"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt11.5a",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "7b2e1b48",
+      "sha1": "5d49e1d8146e4ef744445b68f35677302e875a85"
+     },
+     {
+      "name": "vt12.6a",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "81b417d3",
+      "sha1": "5ec7e3f0c8069384a5f6eb39232c228b9d7b8c0c"
+     },
+     {
+      "name": "vt13.7a",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "5612dbd2",
+      "sha1": "9e4e1a22b6cbf60607b9a81dae34482ae55f7c47"
+     },
+     {
+      "name": "vt14.8a",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2b2dee36",
+      "sha1": "8792278464fa3da47176582025f6673a15a581e2"
+     },
+     {
+      "name": "vt15.9a",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "de70babf",
+      "sha1": "6717e23baf55f84d3143fb432140a7c3e102ac26"
+     },
+     {
+      "name": "vt16.10a",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "14178237",
+      "sha1": "f896e71c7004349c9a46155edfd9f0aaa186065d"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "u5",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "2a97c933",
+      "sha1": "bfddb0c0f930a7caffad7e52d394d72c09ffb45f"
+     },
+     {
+      "name": "vt06.e8",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "26fee521",
+      "sha1": "2fbfc73ee860f72a20229a01d4da9f5cc2e858d3"
+     },
+     {
+      "name": "vt07.e9",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "ca88bdfd",
+      "sha1": "548b05460bc7983cc81f15c70e87f47d10db2812"
+     },
+     {
+      "name": "u8",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "d6b4aa2e",
+      "sha1": "5bbf536f73010182b9150dd4fb1e2a42b5b380b0"
+     },
+     {
+      "name": "vt09.h8",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "98703982",
+      "sha1": "ba9a9b0dcadd4f52502828408c4a19b0bd518351"
+     },
+     {
+      "name": "vt10.h9",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "f069d2f8",
+      "sha1": "2c92300a9407470b34965021de882f1f7a84730c"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "vtb5.6l",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x0500",
+    "roms": [
+     {
+      "name": "vtb1.1d",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "3aba15a1",
+      "sha1": "8b057f6e26155dd9e48bde182e680fce4519f600"
+     },
+     {
+      "name": "vtb2.2d",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "88865754",
+      "sha1": "ca6dddca98baf00a65b2fb70b69cf4704ef8c831"
+     },
+     {
+      "name": "vtb3.3d",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "4c14c3f6",
+      "sha1": "644ac17c7413f094ec9a15cba87bbd421b26321f"
+     }
+    ]
+   }
+  }
+ },
+ "mercenario": {
+  "title": "Mercenario (bootleg of Commando)",
+  "driver": "commando_b",
+  "rotation": 270,
+  "parent": "commando",
+  "regions": {
+   "maincpu": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "4ac.bin",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "59ebf408",
+      "sha1": "ce2c06580a9fc902b1f6409249f25eba8216af8a"
+     },
+     {
+      "name": "4bc.bin",
+      "offset": "0x4000",
+      "size": "0x4000",
+      "crc": "aca99905",
+      "sha1": "609cf3d180ceb0c67e2deff9db16fa56c8948a97"
+     },
+     {
+      "name": "b3.8n",
+      "offset": "0x8000",
+      "size": "0x4000",
+      "crc": "f998d08a",
+      "sha1": "05d86daeaaffbf5f67c77b630b91064c9ae7b6d4"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "cm02.9f",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "f9cc4a74",
+      "sha1": "ee8dd73919c6f47f62cc6d999de9510db9f79b8f"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x4000",
+    "roms": [
+     {
+      "name": "1c.5d",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "fe3ebe35",
+      "sha1": "298f1620e83929af01bc9c999262c022e9421c41"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt11.5a",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "7b2e1b48",
+      "sha1": "5d49e1d8146e4ef744445b68f35677302e875a85"
+     },
+     {
+      "name": "vt12.6a",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "81b417d3",
+      "sha1": "5ec7e3f0c8069384a5f6eb39232c228b9d7b8c0c"
+     },
+     {
+      "name": "vt13.7a",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "5612dbd2",
+      "sha1": "9e4e1a22b6cbf60607b9a81dae34482ae55f7c47"
+     },
+     {
+      "name": "vt14.8a",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2b2dee36",
+      "sha1": "8792278464fa3da47176582025f6673a15a581e2"
+     },
+     {
+      "name": "vt15.9a",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "de70babf",
+      "sha1": "6717e23baf55f84d3143fb432140a7c3e102ac26"
+     },
+     {
+      "name": "vt16.10a",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "14178237",
+      "sha1": "f896e71c7004349c9a46155edfd9f0aaa186065d"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "vt05.7e",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "79f16e3d",
+      "sha1": "04e1f03a4d6b4cc2b81bce3a290bbb95de900d35"
+     },
+     {
+      "name": "vt06.8e",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "26fee521",
+      "sha1": "2fbfc73ee860f72a20229a01d4da9f5cc2e858d3"
+     },
+     {
+      "name": "vt07.9e",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "ca88bdfd",
+      "sha1": "548b05460bc7983cc81f15c70e87f47d10db2812"
+     },
+     {
+      "name": "vt08.7h",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "2019c883",
+      "sha1": "883c0156ceab99f4849fe36972c4162b4ac8c216"
+     },
+     {
+      "name": "vt09.8h",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "98703982",
+      "sha1": "ba9a9b0dcadd4f52502828408c4a19b0bd518351"
+     },
+     {
+      "name": "vt10.9h",
+      "offset": "0x14000",
+      "size": "0x4000",
+      "crc": "f069d2f8",
+      "sha1": "2c92300a9407470b34965021de882f1f7a84730c"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "vtb5.6l",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x500",
+    "roms": [
+     {
+      "name": "vtb1.1d",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "3aba15a1",
+      "sha1": "8b057f6e26155dd9e48bde182e680fce4519f600"
+     },
+     {
+      "name": "vtb2.2d",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "88865754",
+      "sha1": "ca6dddca98baf00a65b2fb70b69cf4704ef8c831"
+     },
+     {
+      "name": "vtb3.3d",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "4c14c3f6",
+      "sha1": "644ac17c7413f094ec9a15cba87bbd421b26321f"
+     }
+    ]
+   }
+  }
+ },
+ "1942": {
+  "title": "1942 (Revision B)",
+  "driver": "1942",
+  "rotation": 270,
+  "regions": {
+   "maincpu": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "srb-03.m3",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "d9dafcc3",
+      "sha1": "a089a9bc55fb7d6d0ac53f91b258396d5d62677a"
+     },
+     {
+      "name": "srb-04.m4",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "da0cf924",
+      "sha1": "856fbb302c9a4ec7850a26ab23dab8467f79bba4"
+     },
+     {
+      "name": "srb-05.m5",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "d102911c",
+      "sha1": "35ba1d82bd901940f61d8619273463d02fc0a952"
+     },
+     {
+      "name": "srb-06.m6",
+      "offset": "0x14000",
+      "size": "0x2000",
+      "crc": "466f8248",
+      "sha1": "2ccc8fc59962d3001fbc10e8d2f20a254a74f251"
+     },
+     {
+      "name": "srb-07.m7",
+      "offset": "0x18000",
+      "size": "0x4000",
+      "crc": "0d31038c",
+      "sha1": "b588eaf6fddd66ecb2d9832dc197f286f1ccd846"
+     }
+    ],
+    "fill": "0xff"
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "sr-01.c11",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "bd87f06b",
+      "sha1": "821f85cf157f81117eeaba0c3cf0337eac357e58"
+     }
+    ]
+   },
+   "gfx1": {
+    "size": "0x2000",
+    "roms": [
+     {
+      "name": "sr-02.f2",
+      "offset": "0x0000",
+      "size": "0x2000",
+      "crc": "6ebca191",
+      "sha1": "0dbddadde54a0ab66994c4a8726be05c6ca88a0e"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "sr-08.a1",
+      "offset": "0x0000",
+      "size": "0x2000",
+      "crc": "3884d9eb",
+      "sha1": "5cbd9215fa5ba5a61208b383700adc4428521aed"
+     },
+     {
+      "name": "sr-09.a2",
+      "offset": "0x2000",
+      "size": "0x2000",
+      "crc": "999cf6e0",
+      "sha1": "5b8b685038ec98b781908b92eb7fb9506db68544"
+     },
+     {
+      "name": "sr-10.a3",
+      "offset": "0x4000",
+      "size": "0x2000",
+      "crc": "8edb273a",
+      "sha1": "85fdd4c690ed31e6396e3c16aa02140ee7ea2d61"
+     },
+     {
+      "name": "sr-11.a4",
+      "offset": "0x6000",
+      "size": "0x2000",
+      "crc": "3a2726c3",
+      "sha1": "187c92ef591febdcbd1d42ab850e0cbb62c00873"
+     },
+     {
+      "name": "sr-12.a5",
+      "offset": "0x8000",
+      "size": "0x2000",
+      "crc": "1bd3d8bb",
+      "sha1": "ef4dce605eb4dc8035985a415315ec61c21419c6"
+     },
+     {
+      "name": "sr-13.a6",
+      "offset": "0xa000",
+      "size": "0x2000",
+      "crc": "658f02c4",
+      "sha1": "f087d69e49e38cf3107350cde18fcf85a8fa04f0"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "sr-14.l1",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "2528bec6",
+      "sha1": "29f7719f18faad6bd1ec6735cc24e69168361470"
+     },
+     {
+      "name": "sr-15.l2",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "f89287aa",
+      "sha1": "136fff6d2a4f48a488fc7c620213761459c3ada0"
+     },
+     {
+      "name": "sr-16.n1",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "024418f8",
+      "sha1": "145b8d5d6c8654cd090955a98f6dd8c8dbafe7c1"
+     },
+     {
+      "name": "sr-17.n2",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "e2c7e489",
+      "sha1": "d4b5d575c021f58f6966df189df94e08c5b3621c"
+     }
+    ]
+   },
+   "palproms": {
+    "size": "0x0300",
+    "roms": [
+     {
+      "name": "sb-5.e8",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "93ab8153",
+      "sha1": "a792f24e5c0c3c4a6b436102e7a98199f878ece1"
+     },
+     {
+      "name": "sb-6.e9",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "8ab44f7d",
+      "sha1": "f74680a6a987d74b3acb32e6396f20e127874149"
+     },
+     {
+      "name": "sb-7.e10",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "f4ade9a4",
+      "sha1": "62ad31d31d183cce213b03168daa035083b2f28e"
+     }
+    ]
+   },
+   "charprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-0.f1",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "6047d91b",
+      "sha1": "1ce025f9524c1033e48c5294ee7d360f8bfebe8d"
+     }
+    ]
+   },
+   "tileprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-4.d6",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "4858968d",
+      "sha1": "20b5dbcaa1a4081b3139e7e2332d8fe3c9e55ed6"
+     }
+    ]
+   },
+   "sprprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-8.k3",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "f6fad943",
+      "sha1": "b0a24ea7805272e8ebf72a99b08907bc00d5f82f"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-1.k6",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   }
+  }
+ },
+ "1942a": {
+  "title": "1942 (Revision A)",
+  "driver": "1942",
+  "rotation": 270,
+  "parent": "1942",
+  "regions": {
+   "maincpu": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "sra-03.m3",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "40201bab",
+      "sha1": "4886c07a4602223c21419118e10aadce9c99fa5a"
+     },
+     {
+      "name": "sr-04.m4",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "a60ac644",
+      "sha1": "f37862db3cf5e6cc9ab3276f3bc45fd629fd70dd"
+     },
+     {
+      "name": "sr-05.m5",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "835f7b24",
+      "sha1": "24b66827f08c43fbf5b9517d638acdfc38e1b1e7"
+     },
+     {
+      "name": "sr-06.m6",
+      "offset": "0x14000",
+      "size": "0x2000",
+      "crc": "821c6481",
+      "sha1": "06becb6bf8b4bde3a458098498eecad566a87711"
+     },
+     {
+      "name": "sr-07.m7",
+      "offset": "0x18000",
+      "size": "0x4000",
+      "crc": "5df525e1",
+      "sha1": "70cd2910e2945db76bd6ebfa0ff09a5efadc2d0b"
+     }
+    ],
+    "fill": "0xff"
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "sr-01.c11",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "bd87f06b",
+      "sha1": "821f85cf157f81117eeaba0c3cf0337eac357e58"
+     }
+    ]
+   },
+   "gfx1": {
+    "size": "0x2000",
+    "roms": [
+     {
+      "name": "sr-02.f2",
+      "offset": "0x0000",
+      "size": "0x2000",
+      "crc": "6ebca191",
+      "sha1": "0dbddadde54a0ab66994c4a8726be05c6ca88a0e"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "sr-08.a1",
+      "offset": "0x0000",
+      "size": "0x2000",
+      "crc": "3884d9eb",
+      "sha1": "5cbd9215fa5ba5a61208b383700adc4428521aed"
+     },
+     {
+      "name": "sr-09.a2",
+      "offset": "0x2000",
+      "size": "0x2000",
+      "crc": "999cf6e0",
+      "sha1": "5b8b685038ec98b781908b92eb7fb9506db68544"
+     },
+     {
+      "name": "sr-10.a3",
+      "offset": "0x4000",
+      "size": "0x2000",
+      "crc": "8edb273a",
+      "sha1": "85fdd4c690ed31e6396e3c16aa02140ee7ea2d61"
+     },
+     {
+      "name": "sr-11.a4",
+      "offset": "0x6000",
+      "size": "0x2000",
+      "crc": "3a2726c3",
+      "sha1": "187c92ef591febdcbd1d42ab850e0cbb62c00873"
+     },
+     {
+      "name": "sr-12.a5",
+      "offset": "0x8000",
+      "size": "0x2000",
+      "crc": "1bd3d8bb",
+      "sha1": "ef4dce605eb4dc8035985a415315ec61c21419c6"
+     },
+     {
+      "name": "sr-13.a6",
+      "offset": "0xa000",
+      "size": "0x2000",
+      "crc": "658f02c4",
+      "sha1": "f087d69e49e38cf3107350cde18fcf85a8fa04f0"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "sr-14.l1",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "2528bec6",
+      "sha1": "29f7719f18faad6bd1ec6735cc24e69168361470"
+     },
+     {
+      "name": "sr-15.l2",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "f89287aa",
+      "sha1": "136fff6d2a4f48a488fc7c620213761459c3ada0"
+     },
+     {
+      "name": "sr-16.n1",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "024418f8",
+      "sha1": "145b8d5d6c8654cd090955a98f6dd8c8dbafe7c1"
+     },
+     {
+      "name": "sr-17.n2",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "e2c7e489",
+      "sha1": "d4b5d575c021f58f6966df189df94e08c5b3621c"
+     }
+    ]
+   },
+   "palproms": {
+    "size": "0x0300",
+    "roms": [
+     {
+      "name": "sb-5.e8",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "93ab8153",
+      "sha1": "a792f24e5c0c3c4a6b436102e7a98199f878ece1"
+     },
+     {
+      "name": "sb-6.e9",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "8ab44f7d",
+      "sha1": "f74680a6a987d74b3acb32e6396f20e127874149"
+     },
+     {
+      "name": "sb-7.e10",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "f4ade9a4",
+      "sha1": "62ad31d31d183cce213b03168daa035083b2f28e"
+     }
+    ]
+   },
+   "charprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-0.f1",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "6047d91b",
+      "sha1": "1ce025f9524c1033e48c5294ee7d360f8bfebe8d"
+     }
+    ]
+   },
+   "tileprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-4.d6",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "4858968d",
+      "sha1": "20b5dbcaa1a4081b3139e7e2332d8fe3c9e55ed6"
+     }
+    ]
+   },
+   "sprprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-8.k3",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "f6fad943",
+      "sha1": "b0a24ea7805272e8ebf72a99b08907bc00d5f82f"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-1.k6",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   }
+  }
+ },
+ "1942abl": {
+  "title": "1942 (Revision A, bootleg)",
+  "driver": "1942",
+  "rotation": 270,
+  "parent": "1942",
+  "regions": {
+   "maincpu": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "3.bin",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "f3184f5a",
+      "sha1": "a566c344ee1f63580d41aca95ece9ad1f7a135d2"
+     },
+     {
+      "name": "5.bin",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "835f7b24",
+      "sha1": "24b66827f08c43fbf5b9517d638acdfc38e1b1e7"
+     },
+     {
+      "name": "7.bin",
+      "offset": "0x14000",
+      "size": "0x8000",
+      "crc": "2f456c6e",
+      "sha1": "b728c72f97ccdb57a4aac53ef7ca3f4516fc2ecb"
+     }
+    ],
+    "fill": "0xff"
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "1.bin",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "bd87f06b",
+      "sha1": "821f85cf157f81117eeaba0c3cf0337eac357e58"
+     }
+    ]
+   },
+   "gfx1": {
+    "size": "0x2000",
+    "roms": [
+     {
+      "name": "2.bin",
+      "offset": "0x0000",
+      "size": "0x2000",
+      "crc": "6ebca191",
+      "sha1": "0dbddadde54a0ab66994c4a8726be05c6ca88a0e"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "9.bin",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "60329fa4",
+      "sha1": "8f66c283c992a6bc676f5f0f739b7e9d07bbf9ee"
+     },
+     {
+      "name": "11.bin",
+      "offset": "0x4000",
+      "size": "0x4000",
+      "crc": "66bac116",
+      "sha1": "ce21a693ad8d7592d21e05d0cb9eabb36e7e8fef"
+     },
+     {
+      "name": "13.bin",
+      "offset": "0x8000",
+      "size": "0x4000",
+      "crc": "623fcec1",
+      "sha1": "b3eea37d705e3871dc94e4cf6f2aacc6fbd09216"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "14.bin",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "df2345ef",
+      "sha1": "3776edebda7bc9c72117f4b764f3bdaec0a632b4"
+     },
+     {
+      "name": "14.bin",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "df2345ef",
+      "sha1": "3776edebda7bc9c72117f4b764f3bdaec0a632b4",
+      "file_offset": "0x4000"
+     },
+     {
+      "name": "16.bin",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "c106b1ed",
+      "sha1": "a16520752fb02e403c93975ecf12b75854d58d69"
+     },
+     {
+      "name": "16.bin",
+      "offset": "0x8000",
+      "size": "0x4000",
+      "crc": "c106b1ed",
+      "sha1": "a16520752fb02e403c93975ecf12b75854d58d69",
+      "file_offset": "0x4000"
+     }
+    ]
+   },
+   "palproms": {
+    "size": "0x0300",
+    "roms": [
+     {
+      "name": "sb-5.e8",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "93ab8153",
+      "sha1": "a792f24e5c0c3c4a6b436102e7a98199f878ece1"
+     },
+     {
+      "name": "sb-6.e9",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "8ab44f7d",
+      "sha1": "f74680a6a987d74b3acb32e6396f20e127874149"
+     },
+     {
+      "name": "sb-7.e10",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "f4ade9a4",
+      "sha1": "62ad31d31d183cce213b03168daa035083b2f28e"
+     }
+    ]
+   },
+   "charprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-0.f1",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "6047d91b",
+      "sha1": "1ce025f9524c1033e48c5294ee7d360f8bfebe8d"
+     }
+    ]
+   },
+   "tileprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-4.d6",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "4858968d",
+      "sha1": "20b5dbcaa1a4081b3139e7e2332d8fe3c9e55ed6"
+     }
+    ]
+   },
+   "sprprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-8.k3",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "f6fad943",
+      "sha1": "b0a24ea7805272e8ebf72a99b08907bc00d5f82f"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-1.k6",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   }
+  }
+ },
+ "1942h": {
+  "title": "Supercharger 1942",
+  "driver": "1942",
+  "rotation": 270,
+  "parent": "1942",
+  "regions": {
+   "maincpu": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "supercharger_1942_@3.m3",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "ec70785f",
+      "sha1": "2010a945e1d5c984a14cf7f47a883d04bd71567d"
+     },
+     {
+      "name": "supercharger_1942_@4.m4",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "cc11355f",
+      "sha1": "44fceb449f406f657494eeee4e6b43bf063f2013"
+     },
+     {
+      "name": "supercharger_1942_@5.m5",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "42746d75",
+      "sha1": "ede6919b84653b94fddeb40b3004e44336880ba2"
+     },
+     {
+      "name": "srb-06.m6",
+      "offset": "0x14000",
+      "size": "0x2000",
+      "crc": "466f8248",
+      "sha1": "2ccc8fc59962d3001fbc10e8d2f20a254a74f251"
+     },
+     {
+      "name": "srb-07.m7",
+      "offset": "0x18000",
+      "size": "0x4000",
+      "crc": "0d31038c",
+      "sha1": "b588eaf6fddd66ecb2d9832dc197f286f1ccd846"
+     }
+    ],
+    "fill": "0xff"
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "sr-01.c11",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "bd87f06b",
+      "sha1": "821f85cf157f81117eeaba0c3cf0337eac357e58"
+     }
+    ]
+   },
+   "gfx1": {
+    "size": "0x2000",
+    "roms": [
+     {
+      "name": "sr-02.f2",
+      "offset": "0x0000",
+      "size": "0x2000",
+      "crc": "6ebca191",
+      "sha1": "0dbddadde54a0ab66994c4a8726be05c6ca88a0e"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "sr-08.a1",
+      "offset": "0x0000",
+      "size": "0x2000",
+      "crc": "3884d9eb",
+      "sha1": "5cbd9215fa5ba5a61208b383700adc4428521aed"
+     },
+     {
+      "name": "sr-09.a2",
+      "offset": "0x2000",
+      "size": "0x2000",
+      "crc": "999cf6e0",
+      "sha1": "5b8b685038ec98b781908b92eb7fb9506db68544"
+     },
+     {
+      "name": "sr-10.a3",
+      "offset": "0x4000",
+      "size": "0x2000",
+      "crc": "8edb273a",
+      "sha1": "85fdd4c690ed31e6396e3c16aa02140ee7ea2d61"
+     },
+     {
+      "name": "sr-11.a4",
+      "offset": "0x6000",
+      "size": "0x2000",
+      "crc": "3a2726c3",
+      "sha1": "187c92ef591febdcbd1d42ab850e0cbb62c00873"
+     },
+     {
+      "name": "sr-12.a5",
+      "offset": "0x8000",
+      "size": "0x2000",
+      "crc": "1bd3d8bb",
+      "sha1": "ef4dce605eb4dc8035985a415315ec61c21419c6"
+     },
+     {
+      "name": "sr-13.a6",
+      "offset": "0xa000",
+      "size": "0x2000",
+      "crc": "658f02c4",
+      "sha1": "f087d69e49e38cf3107350cde18fcf85a8fa04f0"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "sr-14.l1",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "2528bec6",
+      "sha1": "29f7719f18faad6bd1ec6735cc24e69168361470"
+     },
+     {
+      "name": "sr-15.l2",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "f89287aa",
+      "sha1": "136fff6d2a4f48a488fc7c620213761459c3ada0"
+     },
+     {
+      "name": "sr-16.n1",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "024418f8",
+      "sha1": "145b8d5d6c8654cd090955a98f6dd8c8dbafe7c1"
+     },
+     {
+      "name": "sr-17.n2",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "e2c7e489",
+      "sha1": "d4b5d575c021f58f6966df189df94e08c5b3621c"
+     }
+    ]
+   },
+   "palproms": {
+    "size": "0x0300",
+    "roms": [
+     {
+      "name": "sb-5.e8",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "93ab8153",
+      "sha1": "a792f24e5c0c3c4a6b436102e7a98199f878ece1"
+     },
+     {
+      "name": "sb-6.e9",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "8ab44f7d",
+      "sha1": "f74680a6a987d74b3acb32e6396f20e127874149"
+     },
+     {
+      "name": "sb-7.e10",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "f4ade9a4",
+      "sha1": "62ad31d31d183cce213b03168daa035083b2f28e"
+     }
+    ]
+   },
+   "charprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-0.f1",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "6047d91b",
+      "sha1": "1ce025f9524c1033e48c5294ee7d360f8bfebe8d"
+     }
+    ]
+   },
+   "tileprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-4.d6",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "4858968d",
+      "sha1": "20b5dbcaa1a4081b3139e7e2332d8fe3c9e55ed6"
+     }
+    ]
+   },
+   "sprprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-8.k3",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "f6fad943",
+      "sha1": "b0a24ea7805272e8ebf72a99b08907bc00d5f82f"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-1.k6",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   }
+  }
+ },
+ "1942b": {
+  "title": "1942 (First Version)",
+  "driver": "1942",
+  "rotation": 270,
+  "parent": "1942",
+  "regions": {
+   "maincpu": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "sr-03.m3",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "612975f2",
+      "sha1": "f3744335862dd4c53925cc32792badd4a378c837"
+     },
+     {
+      "name": "sr-04.m4",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "a60ac644",
+      "sha1": "f37862db3cf5e6cc9ab3276f3bc45fd629fd70dd"
+     },
+     {
+      "name": "sr-05.m5",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "835f7b24",
+      "sha1": "24b66827f08c43fbf5b9517d638acdfc38e1b1e7"
+     },
+     {
+      "name": "sr-06.m6",
+      "offset": "0x14000",
+      "size": "0x2000",
+      "crc": "821c6481",
+      "sha1": "06becb6bf8b4bde3a458098498eecad566a87711"
+     },
+     {
+      "name": "sr-07.m7",
+      "offset": "0x18000",
+      "size": "0x4000",
+      "crc": "5df525e1",
+      "sha1": "70cd2910e2945db76bd6ebfa0ff09a5efadc2d0b"
+     }
+    ],
+    "fill": "0xff"
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "sr-01.c11",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "bd87f06b",
+      "sha1": "821f85cf157f81117eeaba0c3cf0337eac357e58"
+     }
+    ]
+   },
+   "gfx1": {
+    "size": "0x2000",
+    "roms": [
+     {
+      "name": "sr-02.f2",
+      "offset": "0x0000",
+      "size": "0x2000",
+      "crc": "6ebca191",
+      "sha1": "0dbddadde54a0ab66994c4a8726be05c6ca88a0e"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "sr-08.a1",
+      "offset": "0x0000",
+      "size": "0x2000",
+      "crc": "3884d9eb",
+      "sha1": "5cbd9215fa5ba5a61208b383700adc4428521aed"
+     },
+     {
+      "name": "sr-09.a2",
+      "offset": "0x2000",
+      "size": "0x2000",
+      "crc": "999cf6e0",
+      "sha1": "5b8b685038ec98b781908b92eb7fb9506db68544"
+     },
+     {
+      "name": "sr-10.a3",
+      "offset": "0x4000",
+      "size": "0x2000",
+      "crc": "8edb273a",
+      "sha1": "85fdd4c690ed31e6396e3c16aa02140ee7ea2d61"
+     },
+     {
+      "name": "sr-11.a4",
+      "offset": "0x6000",
+      "size": "0x2000",
+      "crc": "3a2726c3",
+      "sha1": "187c92ef591febdcbd1d42ab850e0cbb62c00873"
+     },
+     {
+      "name": "sr-12.a5",
+      "offset": "0x8000",
+      "size": "0x2000",
+      "crc": "1bd3d8bb",
+      "sha1": "ef4dce605eb4dc8035985a415315ec61c21419c6"
+     },
+     {
+      "name": "sr-13.a6",
+      "offset": "0xa000",
+      "size": "0x2000",
+      "crc": "658f02c4",
+      "sha1": "f087d69e49e38cf3107350cde18fcf85a8fa04f0"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "sr-14.l1",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "2528bec6",
+      "sha1": "29f7719f18faad6bd1ec6735cc24e69168361470"
+     },
+     {
+      "name": "sr-15.l2",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "f89287aa",
+      "sha1": "136fff6d2a4f48a488fc7c620213761459c3ada0"
+     },
+     {
+      "name": "sr-16.n1",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "024418f8",
+      "sha1": "145b8d5d6c8654cd090955a98f6dd8c8dbafe7c1"
+     },
+     {
+      "name": "sr-17.n2",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "e2c7e489",
+      "sha1": "d4b5d575c021f58f6966df189df94e08c5b3621c"
+     }
+    ]
+   },
+   "palproms": {
+    "size": "0x0300",
+    "roms": [
+     {
+      "name": "sb-5.e8",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "93ab8153",
+      "sha1": "a792f24e5c0c3c4a6b436102e7a98199f878ece1"
+     },
+     {
+      "name": "sb-6.e9",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "8ab44f7d",
+      "sha1": "f74680a6a987d74b3acb32e6396f20e127874149"
+     },
+     {
+      "name": "sb-7.e10",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "f4ade9a4",
+      "sha1": "62ad31d31d183cce213b03168daa035083b2f28e"
+     }
+    ]
+   },
+   "charprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-0.f1",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "6047d91b",
+      "sha1": "1ce025f9524c1033e48c5294ee7d360f8bfebe8d"
+     }
+    ]
+   },
+   "tileprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-4.d6",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "4858968d",
+      "sha1": "20b5dbcaa1a4081b3139e7e2332d8fe3c9e55ed6"
+     }
+    ]
+   },
+   "sprprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-8.k3",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "f6fad943",
+      "sha1": "b0a24ea7805272e8ebf72a99b08907bc00d5f82f"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-1.k6",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   }
+  }
+ },
+ "1942w": {
+  "title": "1942 (Williams Electronics license)",
+  "driver": "1942",
+  "rotation": 270,
+  "parent": "1942",
+  "regions": {
+   "maincpu": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "sw-03.m3",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "afd79770",
+      "sha1": "74c7a887fe3d4abfce1dcfec4c75b21ab81adc8c"
+     },
+     {
+      "name": "sw-04.m4",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "933d9910",
+      "sha1": "9c73ef880f56e30a865be959f8bbdbe79c7ef8e2"
+     },
+     {
+      "name": "sw-05.m5",
+      "offset": "0x10000",
+      "size": "0x4000",
+      "crc": "e9a71bb6",
+      "sha1": "1f0d52c9282d15f9e4898b3b144ece25d345b71f"
+     },
+     {
+      "name": "sw-06.m6",
+      "offset": "0x14000",
+      "size": "0x2000",
+      "crc": "466f8248",
+      "sha1": "2ccc8fc59962d3001fbc10e8d2f20a254a74f251"
+     },
+     {
+      "name": "sw-07.m7",
+      "offset": "0x18000",
+      "size": "0x4000",
+      "crc": "ec41655e",
+      "sha1": "dbe4bb11f2e88574cb43ba5cd216354c3b7f69a6"
+     }
+    ],
+    "fill": "0xff"
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "sr-01.c11",
+      "offset": "0x0000",
+      "size": "0x4000",
+      "crc": "bd87f06b",
+      "sha1": "821f85cf157f81117eeaba0c3cf0337eac357e58"
+     }
+    ]
+   },
+   "gfx1": {
+    "size": "0x2000",
+    "roms": [
+     {
+      "name": "sw-02.f2",
+      "offset": "0x0000",
+      "size": "0x2000",
+      "crc": "f8e9ada2",
+      "sha1": "028f554e70425c53faa30a6fe1c45cc16724560a"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0xc000",
+    "roms": [
+     {
+      "name": "sr-08.a1",
+      "offset": "0x0000",
+      "size": "0x2000",
+      "crc": "3884d9eb",
+      "sha1": "5cbd9215fa5ba5a61208b383700adc4428521aed"
+     },
+     {
+      "name": "sr-09.a2",
+      "offset": "0x2000",
+      "size": "0x2000",
+      "crc": "999cf6e0",
+      "sha1": "5b8b685038ec98b781908b92eb7fb9506db68544"
+     },
+     {
+      "name": "sr-10.a3",
+      "offset": "0x4000",
+      "size": "0x2000",
+      "crc": "8edb273a",
+      "sha1": "85fdd4c690ed31e6396e3c16aa02140ee7ea2d61"
+     },
+     {
+      "name": "sr-11.a4",
+      "offset": "0x6000",
+      "size": "0x2000",
+      "crc": "3a2726c3",
+      "sha1": "187c92ef591febdcbd1d42ab850e0cbb62c00873"
+     },
+     {
+      "name": "sr-12.a5",
+      "offset": "0x8000",
+      "size": "0x2000",
+      "crc": "1bd3d8bb",
+      "sha1": "ef4dce605eb4dc8035985a415315ec61c21419c6"
+     },
+     {
+      "name": "sr-13.a6",
+      "offset": "0xa000",
+      "size": "0x2000",
+      "crc": "658f02c4",
+      "sha1": "f087d69e49e38cf3107350cde18fcf85a8fa04f0"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "sr-14.l1",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "2528bec6",
+      "sha1": "29f7719f18faad6bd1ec6735cc24e69168361470"
+     },
+     {
+      "name": "sr-15.l2",
+      "offset": "0x04000",
+      "size": "0x4000",
+      "crc": "f89287aa",
+      "sha1": "136fff6d2a4f48a488fc7c620213761459c3ada0"
+     },
+     {
+      "name": "sr-16.n1",
+      "offset": "0x08000",
+      "size": "0x4000",
+      "crc": "024418f8",
+      "sha1": "145b8d5d6c8654cd090955a98f6dd8c8dbafe7c1"
+     },
+     {
+      "name": "sr-17.n2",
+      "offset": "0x0c000",
+      "size": "0x4000",
+      "crc": "e2c7e489",
+      "sha1": "d4b5d575c021f58f6966df189df94e08c5b3621c"
+     }
+    ]
+   },
+   "palproms": {
+    "size": "0x0300",
+    "roms": [
+     {
+      "name": "sb-5.e8",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "93ab8153",
+      "sha1": "a792f24e5c0c3c4a6b436102e7a98199f878ece1"
+     },
+     {
+      "name": "sb-6.e9",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "8ab44f7d",
+      "sha1": "f74680a6a987d74b3acb32e6396f20e127874149"
+     },
+     {
+      "name": "sb-7.e10",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "f4ade9a4",
+      "sha1": "62ad31d31d183cce213b03168daa035083b2f28e"
+     }
+    ]
+   },
+   "charprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-0.f1",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "6047d91b",
+      "sha1": "1ce025f9524c1033e48c5294ee7d360f8bfebe8d"
+     }
+    ]
+   },
+   "tileprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-4.d6",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "4858968d",
+      "sha1": "20b5dbcaa1a4081b3139e7e2332d8fe3c9e55ed6"
+     }
+    ]
+   },
+   "sprprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-8.k3",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "f6fad943",
+      "sha1": "b0a24ea7805272e8ebf72a99b08907bc00d5f82f"
+     }
+    ]
+   },
+   "irqprom": {
+    "size": "0x0100",
+    "roms": [
+     {
+      "name": "sb-1.k6",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "712ac508",
+      "sha1": "5349d722ab6733afdda65f6e0a98322f0d515e86"
+     }
+    ]
+   }
+  }
+ },
+ "gunsmoke": {
+  "title": "Gun.Smoke (World, 1985-11-15)",
+  "driver": "gunsmoke",
+  "rotation": 270,
+  "regions": {
+   "maincpu": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "gs03.09n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "40a06cef",
+      "sha1": "3e2a52d476298b7252f0adaefdb42090351e921c"
+     },
+     {
+      "name": "gs04.10n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "8d4b423f",
+      "sha1": "149274c2ed1526ca1f419fdf8a24059ff138f7f2"
+     },
+     {
+      "name": "gs05.12n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "2b5667fb",
+      "sha1": "5b689bca1e76d803b4cae22feaa7744fa528e93f"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "gs02.14h",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "cd7a2c38",
+      "sha1": "c76c471f694b76015370f0eacf5350e652f526ff"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x04000",
+    "roms": [
+     {
+      "name": "gs01.11f",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "b61ece9b",
+      "sha1": "eb3fc62644cc5b5a2b9cbe67c393d4a0e2a59ca9"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs13.06c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "f6769fc5",
+      "sha1": "d192ec176425327ca4b7e25fc8432fc47837ba29"
+     },
+     {
+      "name": "gs12.05c",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "d997b78c",
+      "sha1": "3b4a9b6f9e57ecfb4ab9734379bd0ee765fd6daa"
+     },
+     {
+      "name": "gs11.04c",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "125ba58e",
+      "sha1": "cf6931653cebd051564bed8121ab8713a55095c5"
+     },
+     {
+      "name": "gs10.02c",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "f469c13c",
+      "sha1": "54eda52d6fce58771c0adfe2c88292a41d5a9b99"
+     },
+     {
+      "name": "gs09.06a",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "539f182d",
+      "sha1": "4190c0adbecc57b92f4d002e121acb77e8c5d8d8"
+     },
+     {
+      "name": "gs08.05a",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "e87e526d",
+      "sha1": "d10068addf30322424a85bbc6382cb762ae3fbe2"
+     },
+     {
+      "name": "gs07.04a",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "4382c0d2",
+      "sha1": "8615e62bc57b40d082f6ca211d64f22185bed1fd"
+     },
+     {
+      "name": "gs06.02a",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "4cafe7a6",
+      "sha1": "fe501f3a5e9ce9e82e9708f1cd297f4c94ef0f81"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs22.06n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "dc9c508c",
+      "sha1": "920505dd4c63b177918feb4e54cca8a7948ec9d9"
+     },
+     {
+      "name": "gs21.04n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "68883749",
+      "sha1": "c7bf2bf49c53feddf8f30b4001dc2d59b52b1c28"
+     },
+     {
+      "name": "gs20.03n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "0be932ed",
+      "sha1": "1c5af5884a23112dbc36579515d1cb497992da2f"
+     },
+     {
+      "name": "gs19.01n",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "63072f93",
+      "sha1": "cb3a2729782cf2855558d081fe92d28366228b8e"
+     },
+     {
+      "name": "gs18.06l",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "f69a3c7c",
+      "sha1": "e9eb9dfa7d53aa7b728150f91d05bfc3bf6f1e75"
+     },
+     {
+      "name": "gs17.04l",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "4e98562a",
+      "sha1": "0341b8a79be1d71a57d0d76ed890e15f9f92259e"
+     },
+     {
+      "name": "gs16.03l",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "0d99c3b3",
+      "sha1": "436c566b76f632242448671e3b6319f7d9f65322"
+     },
+     {
+      "name": "gs15.01l",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "7f14270e",
+      "sha1": "dd06c333c2ea097e25185a1423cd61e1b7afc42b"
+     }
+    ]
+   },
+   "bgtiles": {
+    "size": "0x8000",
+    "roms": [
+     {
+      "name": "gs14.11c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "0af4f7eb",
+      "sha1": "24a98fdeedeeaf1035b4af52d5a8dd5e47a5e62d"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x0a00",
+    "roms": [
+     {
+      "name": "g-01.03b",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "02f55589",
+      "sha1": "8a3f98304aedf3aba1c08b615bf457752a480edc"
+     },
+     {
+      "name": "g-02.04b",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "e1e36dd9",
+      "sha1": "5bd88a35898a2d973045bdde8311aac3a12826de"
+     },
+     {
+      "name": "g-03.05b",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "989399c0",
+      "sha1": "e408e391f49ed0c7b9e16479fea44b809440fefc"
+     },
+     {
+      "name": "g-04.09d",
+      "offset": "0x0300",
+      "size": "0x0100",
+      "crc": "906612b5",
+      "sha1": "7b727a6200c088538180758320ede84aa7e5b96d"
+     },
+     {
+      "name": "g-06.14a",
+      "offset": "0x0400",
+      "size": "0x0100",
+      "crc": "4a9da18b",
+      "sha1": "fed3b81b56aab2ed0a21ed1fcebe3f1ae095a13b"
+     },
+     {
+      "name": "g-07.15a",
+      "offset": "0x0500",
+      "size": "0x0100",
+      "crc": "cb9394fc",
+      "sha1": "8ad0fde6a8ef8326d2da4b6dbf3b51f5f6c668c8"
+     },
+     {
+      "name": "g-09.09f",
+      "offset": "0x0600",
+      "size": "0x0100",
+      "crc": "3cee181e",
+      "sha1": "3f95bdb12391cb9b3673191bda8d09c84b36b4d3"
+     },
+     {
+      "name": "g-08.08f",
+      "offset": "0x0700",
+      "size": "0x0100",
+      "crc": "ef91cdd2",
+      "sha1": "90b9191c9f10a153d64055a4238eb6e15b8c12bc"
+     }
+    ]
+   }
+  }
+ },
+ "gunsmokeb": {
+  "title": "Gun.Smoke (World, 1985-11-15) (bootleg)",
+  "driver": "gunsmoke",
+  "rotation": 270,
+  "parent": "gunsmoke",
+  "regions": {
+   "maincpu": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "3.ic85",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "ae6f4b75",
+      "sha1": "f4ee4f7a7d507ceaef9ce8165704fd80c8c1e8ba"
+     },
+     {
+      "name": "4.ic86",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "8d4b423f",
+      "sha1": "149274c2ed1526ca1f419fdf8a24059ff138f7f2"
+     },
+     {
+      "name": "5.ic87",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "2b5667fb",
+      "sha1": "5b689bca1e76d803b4cae22feaa7744fa528e93f"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "2.ic41",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "cd7a2c38",
+      "sha1": "c76c471f694b76015370f0eacf5350e652f526ff"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x04000",
+    "roms": [
+     {
+      "name": "1.ic39",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "b61ece9b",
+      "sha1": "eb3fc62644cc5b5a2b9cbe67c393d4a0e2a59ca9"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "13.ic21",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "f6769fc5",
+      "sha1": "d192ec176425327ca4b7e25fc8432fc47837ba29"
+     },
+     {
+      "name": "12.ic20",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "d997b78c",
+      "sha1": "3b4a9b6f9e57ecfb4ab9734379bd0ee765fd6daa"
+     },
+     {
+      "name": "11.ic19",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "125ba58e",
+      "sha1": "cf6931653cebd051564bed8121ab8713a55095c5"
+     },
+     {
+      "name": "10.ic18",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "f469c13c",
+      "sha1": "54eda52d6fce58771c0adfe2c88292a41d5a9b99"
+     },
+     {
+      "name": "9.ic04",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "539f182d",
+      "sha1": "4190c0adbecc57b92f4d002e121acb77e8c5d8d8"
+     },
+     {
+      "name": "8.ic03",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "e87e526d",
+      "sha1": "d10068addf30322424a85bbc6382cb762ae3fbe2"
+     },
+     {
+      "name": "7.ic02",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "4382c0d2",
+      "sha1": "8615e62bc57b40d082f6ca211d64f22185bed1fd"
+     },
+     {
+      "name": "6.ic01",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "4cafe7a6",
+      "sha1": "fe501f3a5e9ce9e82e9708f1cd297f4c94ef0f81"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "22.ic134",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "dc9c508c",
+      "sha1": "920505dd4c63b177918feb4e54cca8a7948ec9d9"
+     },
+     {
+      "name": "21.ic133",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "68883749",
+      "sha1": "c7bf2bf49c53feddf8f30b4001dc2d59b52b1c28"
+     },
+     {
+      "name": "20.ic132",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "0be932ed",
+      "sha1": "1c5af5884a23112dbc36579515d1cb497992da2f"
+     },
+     {
+      "name": "19.ic131",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "63072f93",
+      "sha1": "cb3a2729782cf2855558d081fe92d28366228b8e"
+     },
+     {
+      "name": "18.ic115",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "f69a3c7c",
+      "sha1": "e9eb9dfa7d53aa7b728150f91d05bfc3bf6f1e75"
+     },
+     {
+      "name": "17.ic114",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "4e98562a",
+      "sha1": "0341b8a79be1d71a57d0d76ed890e15f9f92259e"
+     },
+     {
+      "name": "16.ic113",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "0d99c3b3",
+      "sha1": "436c566b76f632242448671e3b6319f7d9f65322"
+     },
+     {
+      "name": "15.ic112",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "7f14270e",
+      "sha1": "dd06c333c2ea097e25185a1423cd61e1b7afc42b"
+     }
+    ]
+   },
+   "bgtiles": {
+    "size": "0x8000",
+    "roms": [
+     {
+      "name": "14.ic25",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "0af4f7eb",
+      "sha1": "24a98fdeedeeaf1035b4af52d5a8dd5e47a5e62d"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x0a00",
+    "roms": [
+     {
+      "name": "prom.ic3",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "02f55589",
+      "sha1": "8a3f98304aedf3aba1c08b615bf457752a480edc"
+     },
+     {
+      "name": "prom.ic4",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "e1e36dd9",
+      "sha1": "5bd88a35898a2d973045bdde8311aac3a12826de"
+     },
+     {
+      "name": "prom.ic5",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "989399c0",
+      "sha1": "e408e391f49ed0c7b9e16479fea44b809440fefc"
+     },
+     {
+      "name": "g-04.09d",
+      "offset": "0x0300",
+      "size": "0x0100",
+      "crc": "906612b5",
+      "sha1": "7b727a6200c088538180758320ede84aa7e5b96d"
+     },
+     {
+      "name": "g-06.14a",
+      "offset": "0x0400",
+      "size": "0x0100",
+      "crc": "4a9da18b",
+      "sha1": "fed3b81b56aab2ed0a21ed1fcebe3f1ae095a13b"
+     },
+     {
+      "name": "g-07.15a",
+      "offset": "0x0500",
+      "size": "0x0100",
+      "crc": "cb9394fc",
+      "sha1": "8ad0fde6a8ef8326d2da4b6dbf3b51f5f6c668c8"
+     },
+     {
+      "name": "g-09.09f",
+      "offset": "0x0600",
+      "size": "0x0100",
+      "crc": "3cee181e",
+      "sha1": "3f95bdb12391cb9b3673191bda8d09c84b36b4d3"
+     },
+     {
+      "name": "g-08.08f",
+      "offset": "0x0700",
+      "size": "0x0100",
+      "crc": "ef91cdd2",
+      "sha1": "90b9191c9f10a153d64055a4238eb6e15b8c12bc"
+     }
+    ]
+   }
+  }
+ },
+ "gunsmokej": {
+  "title": "Gun.Smoke (Japan, 1985-11-15)",
+  "driver": "gunsmoke",
+  "rotation": 270,
+  "parent": "gunsmoke",
+  "regions": {
+   "maincpu": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "gsj_03.09n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "b56b5df6",
+      "sha1": "0295a3ef491b6b8ee9c198fd08dddc29d88bbef6"
+     },
+     {
+      "name": "gs04.10n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "8d4b423f",
+      "sha1": "149274c2ed1526ca1f419fdf8a24059ff138f7f2"
+     },
+     {
+      "name": "gs05.12n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "2b5667fb",
+      "sha1": "5b689bca1e76d803b4cae22feaa7744fa528e93f"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "gs02.14h",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "cd7a2c38",
+      "sha1": "c76c471f694b76015370f0eacf5350e652f526ff"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x04000",
+    "roms": [
+     {
+      "name": "gs01.11f",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "b61ece9b",
+      "sha1": "eb3fc62644cc5b5a2b9cbe67c393d4a0e2a59ca9"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs13.06c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "f6769fc5",
+      "sha1": "d192ec176425327ca4b7e25fc8432fc47837ba29"
+     },
+     {
+      "name": "gs12.05c",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "d997b78c",
+      "sha1": "3b4a9b6f9e57ecfb4ab9734379bd0ee765fd6daa"
+     },
+     {
+      "name": "gs11.04c",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "125ba58e",
+      "sha1": "cf6931653cebd051564bed8121ab8713a55095c5"
+     },
+     {
+      "name": "gs10.02c",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "f469c13c",
+      "sha1": "54eda52d6fce58771c0adfe2c88292a41d5a9b99"
+     },
+     {
+      "name": "gs09.06a",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "539f182d",
+      "sha1": "4190c0adbecc57b92f4d002e121acb77e8c5d8d8"
+     },
+     {
+      "name": "gs08.05a",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "e87e526d",
+      "sha1": "d10068addf30322424a85bbc6382cb762ae3fbe2"
+     },
+     {
+      "name": "gs07.04a",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "4382c0d2",
+      "sha1": "8615e62bc57b40d082f6ca211d64f22185bed1fd"
+     },
+     {
+      "name": "gs06.02a",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "4cafe7a6",
+      "sha1": "fe501f3a5e9ce9e82e9708f1cd297f4c94ef0f81"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs22.06n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "dc9c508c",
+      "sha1": "920505dd4c63b177918feb4e54cca8a7948ec9d9"
+     },
+     {
+      "name": "gs21.04n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "68883749",
+      "sha1": "c7bf2bf49c53feddf8f30b4001dc2d59b52b1c28"
+     },
+     {
+      "name": "gs20.03n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "0be932ed",
+      "sha1": "1c5af5884a23112dbc36579515d1cb497992da2f"
+     },
+     {
+      "name": "gs19.01n",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "63072f93",
+      "sha1": "cb3a2729782cf2855558d081fe92d28366228b8e"
+     },
+     {
+      "name": "gs18.06l",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "f69a3c7c",
+      "sha1": "e9eb9dfa7d53aa7b728150f91d05bfc3bf6f1e75"
+     },
+     {
+      "name": "gs17.04l",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "4e98562a",
+      "sha1": "0341b8a79be1d71a57d0d76ed890e15f9f92259e"
+     },
+     {
+      "name": "gs16.03l",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "0d99c3b3",
+      "sha1": "436c566b76f632242448671e3b6319f7d9f65322"
+     },
+     {
+      "name": "gs15.01l",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "7f14270e",
+      "sha1": "dd06c333c2ea097e25185a1423cd61e1b7afc42b"
+     }
+    ]
+   },
+   "bgtiles": {
+    "size": "0x8000",
+    "roms": [
+     {
+      "name": "gs14.11c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "0af4f7eb",
+      "sha1": "24a98fdeedeeaf1035b4af52d5a8dd5e47a5e62d"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x0a00",
+    "roms": [
+     {
+      "name": "g-01.03b",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "02f55589",
+      "sha1": "8a3f98304aedf3aba1c08b615bf457752a480edc"
+     },
+     {
+      "name": "g-02.04b",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "e1e36dd9",
+      "sha1": "5bd88a35898a2d973045bdde8311aac3a12826de"
+     },
+     {
+      "name": "g-03.05b",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "989399c0",
+      "sha1": "e408e391f49ed0c7b9e16479fea44b809440fefc"
+     },
+     {
+      "name": "g-04.09d",
+      "offset": "0x0300",
+      "size": "0x0100",
+      "crc": "906612b5",
+      "sha1": "7b727a6200c088538180758320ede84aa7e5b96d"
+     },
+     {
+      "name": "g-06.14a",
+      "offset": "0x0400",
+      "size": "0x0100",
+      "crc": "4a9da18b",
+      "sha1": "fed3b81b56aab2ed0a21ed1fcebe3f1ae095a13b"
+     },
+     {
+      "name": "g-07.15a",
+      "offset": "0x0500",
+      "size": "0x0100",
+      "crc": "cb9394fc",
+      "sha1": "8ad0fde6a8ef8326d2da4b6dbf3b51f5f6c668c8"
+     },
+     {
+      "name": "g-09.09f",
+      "offset": "0x0600",
+      "size": "0x0100",
+      "crc": "3cee181e",
+      "sha1": "3f95bdb12391cb9b3673191bda8d09c84b36b4d3"
+     },
+     {
+      "name": "g-08.08f",
+      "offset": "0x0700",
+      "size": "0x0100",
+      "crc": "ef91cdd2",
+      "sha1": "90b9191c9f10a153d64055a4238eb6e15b8c12bc"
+     }
+    ]
+   }
+  }
+ },
+ "gunsmokeu": {
+  "title": "Gun.Smoke (USA and Canada, 1986-04-08)",
+  "driver": "gunsmoke",
+  "rotation": 270,
+  "parent": "gunsmoke",
+  "regions": {
+   "maincpu": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "gsa_03.9n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "51dc3f76",
+      "sha1": "2a188fee73c3662b665b56a825eb908b7b42dcd0"
+     },
+     {
+      "name": "gs04.10n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "5ecf31b8",
+      "sha1": "34ec9727330821a45b497c78c970a1a4f14ff4ee"
+     },
+     {
+      "name": "gs05.12n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "1c9aca13",
+      "sha1": "eb92c373d2241aea4c59248e1b82717733105ac0"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "gs02.14h",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "cd7a2c38",
+      "sha1": "c76c471f694b76015370f0eacf5350e652f526ff"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x04000",
+    "roms": [
+     {
+      "name": "gs01.11f",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "b61ece9b",
+      "sha1": "eb3fc62644cc5b5a2b9cbe67c393d4a0e2a59ca9"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs13.06c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "f6769fc5",
+      "sha1": "d192ec176425327ca4b7e25fc8432fc47837ba29"
+     },
+     {
+      "name": "gs12.05c",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "d997b78c",
+      "sha1": "3b4a9b6f9e57ecfb4ab9734379bd0ee765fd6daa"
+     },
+     {
+      "name": "gs11.04c",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "125ba58e",
+      "sha1": "cf6931653cebd051564bed8121ab8713a55095c5"
+     },
+     {
+      "name": "gs10.02c",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "f469c13c",
+      "sha1": "54eda52d6fce58771c0adfe2c88292a41d5a9b99"
+     },
+     {
+      "name": "gs09.06a",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "539f182d",
+      "sha1": "4190c0adbecc57b92f4d002e121acb77e8c5d8d8"
+     },
+     {
+      "name": "gs08.05a",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "e87e526d",
+      "sha1": "d10068addf30322424a85bbc6382cb762ae3fbe2"
+     },
+     {
+      "name": "gs07.04a",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "4382c0d2",
+      "sha1": "8615e62bc57b40d082f6ca211d64f22185bed1fd"
+     },
+     {
+      "name": "gs06.02a",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "4cafe7a6",
+      "sha1": "fe501f3a5e9ce9e82e9708f1cd297f4c94ef0f81"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs22.06n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "dc9c508c",
+      "sha1": "920505dd4c63b177918feb4e54cca8a7948ec9d9"
+     },
+     {
+      "name": "gs21.04n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "68883749",
+      "sha1": "c7bf2bf49c53feddf8f30b4001dc2d59b52b1c28"
+     },
+     {
+      "name": "gs20.03n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "0be932ed",
+      "sha1": "1c5af5884a23112dbc36579515d1cb497992da2f"
+     },
+     {
+      "name": "gs19.01n",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "63072f93",
+      "sha1": "cb3a2729782cf2855558d081fe92d28366228b8e"
+     },
+     {
+      "name": "gs18.06l",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "f69a3c7c",
+      "sha1": "e9eb9dfa7d53aa7b728150f91d05bfc3bf6f1e75"
+     },
+     {
+      "name": "gs17.04l",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "4e98562a",
+      "sha1": "0341b8a79be1d71a57d0d76ed890e15f9f92259e"
+     },
+     {
+      "name": "gs16.03l",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "0d99c3b3",
+      "sha1": "436c566b76f632242448671e3b6319f7d9f65322"
+     },
+     {
+      "name": "gs15.01l",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "7f14270e",
+      "sha1": "dd06c333c2ea097e25185a1423cd61e1b7afc42b"
+     }
+    ]
+   },
+   "bgtiles": {
+    "size": "0x8000",
+    "roms": [
+     {
+      "name": "gs14.11c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "0af4f7eb",
+      "sha1": "24a98fdeedeeaf1035b4af52d5a8dd5e47a5e62d"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x0a00",
+    "roms": [
+     {
+      "name": "g-01.03b",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "02f55589",
+      "sha1": "8a3f98304aedf3aba1c08b615bf457752a480edc"
+     },
+     {
+      "name": "g-02.04b",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "e1e36dd9",
+      "sha1": "5bd88a35898a2d973045bdde8311aac3a12826de"
+     },
+     {
+      "name": "g-03.05b",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "989399c0",
+      "sha1": "e408e391f49ed0c7b9e16479fea44b809440fefc"
+     },
+     {
+      "name": "g-04.09d",
+      "offset": "0x0300",
+      "size": "0x0100",
+      "crc": "906612b5",
+      "sha1": "7b727a6200c088538180758320ede84aa7e5b96d"
+     },
+     {
+      "name": "g-06.14a",
+      "offset": "0x0400",
+      "size": "0x0100",
+      "crc": "4a9da18b",
+      "sha1": "fed3b81b56aab2ed0a21ed1fcebe3f1ae095a13b"
+     },
+     {
+      "name": "g-07.15a",
+      "offset": "0x0500",
+      "size": "0x0100",
+      "crc": "cb9394fc",
+      "sha1": "8ad0fde6a8ef8326d2da4b6dbf3b51f5f6c668c8"
+     },
+     {
+      "name": "g-09.09f",
+      "offset": "0x0600",
+      "size": "0x0100",
+      "crc": "3cee181e",
+      "sha1": "3f95bdb12391cb9b3673191bda8d09c84b36b4d3"
+     },
+     {
+      "name": "g-08.08f",
+      "offset": "0x0700",
+      "size": "0x0100",
+      "crc": "ef91cdd2",
+      "sha1": "90b9191c9f10a153d64055a4238eb6e15b8c12bc"
+     }
+    ]
+   }
+  }
+ },
+ "gunsmokeua": {
+  "title": "Gun.Smoke (USA and Canada, 1986-01-20)",
+  "driver": "gunsmoke",
+  "rotation": 270,
+  "parent": "gunsmoke",
+  "regions": {
+   "maincpu": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "gsr_03y.09n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "1b42423f",
+      "sha1": "495f6d477ce791e296dd8a170ba28f0b8d2e66d2"
+     },
+     {
+      "name": "gsr_04y.10n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "a5ee595b",
+      "sha1": "10cd25134f4b19ca32bef63d54c11461b31d3438"
+     },
+     {
+      "name": "gsr_05y.12n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "1c9aca13",
+      "sha1": "eb92c373d2241aea4c59248e1b82717733105ac0"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "gs02.14h",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "cd7a2c38",
+      "sha1": "c76c471f694b76015370f0eacf5350e652f526ff"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x04000",
+    "roms": [
+     {
+      "name": "gs01.11f",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "b61ece9b",
+      "sha1": "eb3fc62644cc5b5a2b9cbe67c393d4a0e2a59ca9"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs13.06c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "f6769fc5",
+      "sha1": "d192ec176425327ca4b7e25fc8432fc47837ba29"
+     },
+     {
+      "name": "gs12.05c",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "d997b78c",
+      "sha1": "3b4a9b6f9e57ecfb4ab9734379bd0ee765fd6daa"
+     },
+     {
+      "name": "gs11.04c",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "125ba58e",
+      "sha1": "cf6931653cebd051564bed8121ab8713a55095c5"
+     },
+     {
+      "name": "gs10.02c",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "f469c13c",
+      "sha1": "54eda52d6fce58771c0adfe2c88292a41d5a9b99"
+     },
+     {
+      "name": "gs09.06a",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "539f182d",
+      "sha1": "4190c0adbecc57b92f4d002e121acb77e8c5d8d8"
+     },
+     {
+      "name": "gs08.05a",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "e87e526d",
+      "sha1": "d10068addf30322424a85bbc6382cb762ae3fbe2"
+     },
+     {
+      "name": "gs07.04a",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "4382c0d2",
+      "sha1": "8615e62bc57b40d082f6ca211d64f22185bed1fd"
+     },
+     {
+      "name": "gs06.02a",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "4cafe7a6",
+      "sha1": "fe501f3a5e9ce9e82e9708f1cd297f4c94ef0f81"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs22.06n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "dc9c508c",
+      "sha1": "920505dd4c63b177918feb4e54cca8a7948ec9d9"
+     },
+     {
+      "name": "gs21.04n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "68883749",
+      "sha1": "c7bf2bf49c53feddf8f30b4001dc2d59b52b1c28"
+     },
+     {
+      "name": "gs20.03n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "0be932ed",
+      "sha1": "1c5af5884a23112dbc36579515d1cb497992da2f"
+     },
+     {
+      "name": "gs19.01n",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "63072f93",
+      "sha1": "cb3a2729782cf2855558d081fe92d28366228b8e"
+     },
+     {
+      "name": "gs18.06l",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "f69a3c7c",
+      "sha1": "e9eb9dfa7d53aa7b728150f91d05bfc3bf6f1e75"
+     },
+     {
+      "name": "gs17.04l",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "4e98562a",
+      "sha1": "0341b8a79be1d71a57d0d76ed890e15f9f92259e"
+     },
+     {
+      "name": "gs16.03l",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "0d99c3b3",
+      "sha1": "436c566b76f632242448671e3b6319f7d9f65322"
+     },
+     {
+      "name": "gs15.01l",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "7f14270e",
+      "sha1": "dd06c333c2ea097e25185a1423cd61e1b7afc42b"
+     }
+    ]
+   },
+   "bgtiles": {
+    "size": "0x8000",
+    "roms": [
+     {
+      "name": "gs14.11c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "0af4f7eb",
+      "sha1": "24a98fdeedeeaf1035b4af52d5a8dd5e47a5e62d"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x0a00",
+    "roms": [
+     {
+      "name": "g-01.03b",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "02f55589",
+      "sha1": "8a3f98304aedf3aba1c08b615bf457752a480edc"
+     },
+     {
+      "name": "g-02.04b",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "e1e36dd9",
+      "sha1": "5bd88a35898a2d973045bdde8311aac3a12826de"
+     },
+     {
+      "name": "g-03.05b",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "989399c0",
+      "sha1": "e408e391f49ed0c7b9e16479fea44b809440fefc"
+     },
+     {
+      "name": "g-04.09d",
+      "offset": "0x0300",
+      "size": "0x0100",
+      "crc": "906612b5",
+      "sha1": "7b727a6200c088538180758320ede84aa7e5b96d"
+     },
+     {
+      "name": "g-06.14a",
+      "offset": "0x0400",
+      "size": "0x0100",
+      "crc": "4a9da18b",
+      "sha1": "fed3b81b56aab2ed0a21ed1fcebe3f1ae095a13b"
+     },
+     {
+      "name": "g-07.15a",
+      "offset": "0x0500",
+      "size": "0x0100",
+      "crc": "cb9394fc",
+      "sha1": "8ad0fde6a8ef8326d2da4b6dbf3b51f5f6c668c8"
+     },
+     {
+      "name": "g-09.09f",
+      "offset": "0x0600",
+      "size": "0x0100",
+      "crc": "3cee181e",
+      "sha1": "3f95bdb12391cb9b3673191bda8d09c84b36b4d3"
+     },
+     {
+      "name": "g-08.08f",
+      "offset": "0x0700",
+      "size": "0x0100",
+      "crc": "ef91cdd2",
+      "sha1": "90b9191c9f10a153d64055a4238eb6e15b8c12bc"
+     }
+    ]
+   }
+  }
+ },
+ "gunsmokeub": {
+  "title": "Gun.Smoke (USA and Canada, 1985-11-15, set 1)",
+  "driver": "gunsmoke",
+  "rotation": 270,
+  "parent": "gunsmoke",
+  "regions": {
+   "maincpu": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "gsr_03a.9n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "2f6e6ad7",
+      "sha1": "e9e4a367c240a35a1ba2eeaec9458996f7926f16"
+     },
+     {
+      "name": "gs04.10n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "8d4b423f",
+      "sha1": "149274c2ed1526ca1f419fdf8a24059ff138f7f2"
+     },
+     {
+      "name": "gs05.12n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "2b5667fb",
+      "sha1": "5b689bca1e76d803b4cae22feaa7744fa528e93f"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "gs02.14h",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "cd7a2c38",
+      "sha1": "c76c471f694b76015370f0eacf5350e652f526ff"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x04000",
+    "roms": [
+     {
+      "name": "gs01.11f",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "b61ece9b",
+      "sha1": "eb3fc62644cc5b5a2b9cbe67c393d4a0e2a59ca9"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs13.06c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "f6769fc5",
+      "sha1": "d192ec176425327ca4b7e25fc8432fc47837ba29"
+     },
+     {
+      "name": "gs12.05c",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "d997b78c",
+      "sha1": "3b4a9b6f9e57ecfb4ab9734379bd0ee765fd6daa"
+     },
+     {
+      "name": "gs11.04c",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "125ba58e",
+      "sha1": "cf6931653cebd051564bed8121ab8713a55095c5"
+     },
+     {
+      "name": "gs10.02c",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "f469c13c",
+      "sha1": "54eda52d6fce58771c0adfe2c88292a41d5a9b99"
+     },
+     {
+      "name": "gs09.06a",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "539f182d",
+      "sha1": "4190c0adbecc57b92f4d002e121acb77e8c5d8d8"
+     },
+     {
+      "name": "gs08.05a",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "e87e526d",
+      "sha1": "d10068addf30322424a85bbc6382cb762ae3fbe2"
+     },
+     {
+      "name": "gs07.04a",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "4382c0d2",
+      "sha1": "8615e62bc57b40d082f6ca211d64f22185bed1fd"
+     },
+     {
+      "name": "gs06.02a",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "4cafe7a6",
+      "sha1": "fe501f3a5e9ce9e82e9708f1cd297f4c94ef0f81"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs22.06n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "dc9c508c",
+      "sha1": "920505dd4c63b177918feb4e54cca8a7948ec9d9"
+     },
+     {
+      "name": "gs21.04n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "68883749",
+      "sha1": "c7bf2bf49c53feddf8f30b4001dc2d59b52b1c28"
+     },
+     {
+      "name": "gs20.03n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "0be932ed",
+      "sha1": "1c5af5884a23112dbc36579515d1cb497992da2f"
+     },
+     {
+      "name": "gs19.01n",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "63072f93",
+      "sha1": "cb3a2729782cf2855558d081fe92d28366228b8e"
+     },
+     {
+      "name": "gs18.06l",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "f69a3c7c",
+      "sha1": "e9eb9dfa7d53aa7b728150f91d05bfc3bf6f1e75"
+     },
+     {
+      "name": "gs17.04l",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "4e98562a",
+      "sha1": "0341b8a79be1d71a57d0d76ed890e15f9f92259e"
+     },
+     {
+      "name": "gs16.03l",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "0d99c3b3",
+      "sha1": "436c566b76f632242448671e3b6319f7d9f65322"
+     },
+     {
+      "name": "gs15.01l",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "7f14270e",
+      "sha1": "dd06c333c2ea097e25185a1423cd61e1b7afc42b"
+     }
+    ]
+   },
+   "bgtiles": {
+    "size": "0x8000",
+    "roms": [
+     {
+      "name": "gs14.11c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "0af4f7eb",
+      "sha1": "24a98fdeedeeaf1035b4af52d5a8dd5e47a5e62d"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x0a00",
+    "roms": [
+     {
+      "name": "g-01.03b",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "02f55589",
+      "sha1": "8a3f98304aedf3aba1c08b615bf457752a480edc"
+     },
+     {
+      "name": "g-02.04b",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "e1e36dd9",
+      "sha1": "5bd88a35898a2d973045bdde8311aac3a12826de"
+     },
+     {
+      "name": "g-03.05b",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "989399c0",
+      "sha1": "e408e391f49ed0c7b9e16479fea44b809440fefc"
+     },
+     {
+      "name": "g-04.09d",
+      "offset": "0x0300",
+      "size": "0x0100",
+      "crc": "906612b5",
+      "sha1": "7b727a6200c088538180758320ede84aa7e5b96d"
+     },
+     {
+      "name": "g-06.14a",
+      "offset": "0x0400",
+      "size": "0x0100",
+      "crc": "4a9da18b",
+      "sha1": "fed3b81b56aab2ed0a21ed1fcebe3f1ae095a13b"
+     },
+     {
+      "name": "g-07.15a",
+      "offset": "0x0500",
+      "size": "0x0100",
+      "crc": "cb9394fc",
+      "sha1": "8ad0fde6a8ef8326d2da4b6dbf3b51f5f6c668c8"
+     },
+     {
+      "name": "g-09.09f",
+      "offset": "0x0600",
+      "size": "0x0100",
+      "crc": "3cee181e",
+      "sha1": "3f95bdb12391cb9b3673191bda8d09c84b36b4d3"
+     },
+     {
+      "name": "g-08.08f",
+      "offset": "0x0700",
+      "size": "0x0100",
+      "crc": "ef91cdd2",
+      "sha1": "90b9191c9f10a153d64055a4238eb6e15b8c12bc"
+     }
+    ]
+   }
+  }
+ },
+ "gunsmokeuc": {
+  "title": "Gun.Smoke (USA and Canada, 1985-11-15, set 2)",
+  "driver": "gunsmoke",
+  "rotation": 270,
+  "parent": "gunsmoke",
+  "regions": {
+   "maincpu": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "gsr_03.9n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "592f211b",
+      "sha1": "8de44b3cafa3d2ce9aba515cf3ec4bac0bcdeb5b"
+     },
+     {
+      "name": "gs04.10n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "8d4b423f",
+      "sha1": "149274c2ed1526ca1f419fdf8a24059ff138f7f2"
+     },
+     {
+      "name": "gs05.12n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "2b5667fb",
+      "sha1": "5b689bca1e76d803b4cae22feaa7744fa528e93f"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "gs02.14h",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "cd7a2c38",
+      "sha1": "c76c471f694b76015370f0eacf5350e652f526ff"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x04000",
+    "roms": [
+     {
+      "name": "gs01.11f",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "b61ece9b",
+      "sha1": "eb3fc62644cc5b5a2b9cbe67c393d4a0e2a59ca9"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs13.06c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "f6769fc5",
+      "sha1": "d192ec176425327ca4b7e25fc8432fc47837ba29"
+     },
+     {
+      "name": "gs12.05c",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "d997b78c",
+      "sha1": "3b4a9b6f9e57ecfb4ab9734379bd0ee765fd6daa"
+     },
+     {
+      "name": "gs11.04c",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "125ba58e",
+      "sha1": "cf6931653cebd051564bed8121ab8713a55095c5"
+     },
+     {
+      "name": "gs10.02c",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "f469c13c",
+      "sha1": "54eda52d6fce58771c0adfe2c88292a41d5a9b99"
+     },
+     {
+      "name": "gs09.06a",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "539f182d",
+      "sha1": "4190c0adbecc57b92f4d002e121acb77e8c5d8d8"
+     },
+     {
+      "name": "gs08.05a",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "e87e526d",
+      "sha1": "d10068addf30322424a85bbc6382cb762ae3fbe2"
+     },
+     {
+      "name": "gs07.04a",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "4382c0d2",
+      "sha1": "8615e62bc57b40d082f6ca211d64f22185bed1fd"
+     },
+     {
+      "name": "gs06.02a",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "4cafe7a6",
+      "sha1": "fe501f3a5e9ce9e82e9708f1cd297f4c94ef0f81"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs22.06n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "dc9c508c",
+      "sha1": "920505dd4c63b177918feb4e54cca8a7948ec9d9"
+     },
+     {
+      "name": "gs21.04n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "68883749",
+      "sha1": "c7bf2bf49c53feddf8f30b4001dc2d59b52b1c28"
+     },
+     {
+      "name": "gs20.03n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "0be932ed",
+      "sha1": "1c5af5884a23112dbc36579515d1cb497992da2f"
+     },
+     {
+      "name": "gs19.01n",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "63072f93",
+      "sha1": "cb3a2729782cf2855558d081fe92d28366228b8e"
+     },
+     {
+      "name": "gs18.06l",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "f69a3c7c",
+      "sha1": "e9eb9dfa7d53aa7b728150f91d05bfc3bf6f1e75"
+     },
+     {
+      "name": "gs17.04l",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "4e98562a",
+      "sha1": "0341b8a79be1d71a57d0d76ed890e15f9f92259e"
+     },
+     {
+      "name": "gs16.03l",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "0d99c3b3",
+      "sha1": "436c566b76f632242448671e3b6319f7d9f65322"
+     },
+     {
+      "name": "gs15.01l",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "7f14270e",
+      "sha1": "dd06c333c2ea097e25185a1423cd61e1b7afc42b"
+     }
+    ]
+   },
+   "bgtiles": {
+    "size": "0x8000",
+    "roms": [
+     {
+      "name": "gs14.11c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "0af4f7eb",
+      "sha1": "24a98fdeedeeaf1035b4af52d5a8dd5e47a5e62d"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x0a00",
+    "roms": [
+     {
+      "name": "g-01.03b",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "02f55589",
+      "sha1": "8a3f98304aedf3aba1c08b615bf457752a480edc"
+     },
+     {
+      "name": "g-02.04b",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "e1e36dd9",
+      "sha1": "5bd88a35898a2d973045bdde8311aac3a12826de"
+     },
+     {
+      "name": "g-03.05b",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "989399c0",
+      "sha1": "e408e391f49ed0c7b9e16479fea44b809440fefc"
+     },
+     {
+      "name": "g-04.09d",
+      "offset": "0x0300",
+      "size": "0x0100",
+      "crc": "906612b5",
+      "sha1": "7b727a6200c088538180758320ede84aa7e5b96d"
+     },
+     {
+      "name": "g-06.14a",
+      "offset": "0x0400",
+      "size": "0x0100",
+      "crc": "4a9da18b",
+      "sha1": "fed3b81b56aab2ed0a21ed1fcebe3f1ae095a13b"
+     },
+     {
+      "name": "g-07.15a",
+      "offset": "0x0500",
+      "size": "0x0100",
+      "crc": "cb9394fc",
+      "sha1": "8ad0fde6a8ef8326d2da4b6dbf3b51f5f6c668c8"
+     },
+     {
+      "name": "g-09.09f",
+      "offset": "0x0600",
+      "size": "0x0100",
+      "crc": "3cee181e",
+      "sha1": "3f95bdb12391cb9b3673191bda8d09c84b36b4d3"
+     },
+     {
+      "name": "g-08.08f",
+      "offset": "0x0700",
+      "size": "0x0100",
+      "crc": "ef91cdd2",
+      "sha1": "90b9191c9f10a153d64055a4238eb6e15b8c12bc"
+     }
+    ]
+   }
+  }
+ },
+ "gunsmokeg": {
+  "title": "Gun.Smoke (Germany, 1985-11-15, censored)",
+  "driver": "gunsmoke",
+  "rotation": 270,
+  "parent": "gunsmoke",
+  "regions": {
+   "maincpu": {
+    "size": "0x18000",
+    "roms": [
+     {
+      "name": "gsg03.09n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "8ad2754e",
+      "sha1": "221309d4d76e49f9b80849630b2846fc2e3d72a1"
+     },
+     {
+      "name": "gs04.10n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "8d4b423f",
+      "sha1": "149274c2ed1526ca1f419fdf8a24059ff138f7f2"
+     },
+     {
+      "name": "gs05.12n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "2b5667fb",
+      "sha1": "5b689bca1e76d803b4cae22feaa7744fa528e93f"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "gs02.14h",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "cd7a2c38",
+      "sha1": "c76c471f694b76015370f0eacf5350e652f526ff"
+     }
+    ]
+   },
+   "chars": {
+    "size": "0x04000",
+    "roms": [
+     {
+      "name": "gs01.11f",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "b61ece9b",
+      "sha1": "eb3fc62644cc5b5a2b9cbe67c393d4a0e2a59ca9"
+     }
+    ]
+   },
+   "tiles": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gs13.06c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "f6769fc5",
+      "sha1": "d192ec176425327ca4b7e25fc8432fc47837ba29"
+     },
+     {
+      "name": "gs12.05c",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "d997b78c",
+      "sha1": "3b4a9b6f9e57ecfb4ab9734379bd0ee765fd6daa"
+     },
+     {
+      "name": "gs11.04c",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "125ba58e",
+      "sha1": "cf6931653cebd051564bed8121ab8713a55095c5"
+     },
+     {
+      "name": "gsg10.02c",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "0674ff4d",
+      "sha1": "cceeb3dfe8cad01115d337bce703d446cfd499ad"
+     },
+     {
+      "name": "gs09.06a",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "539f182d",
+      "sha1": "4190c0adbecc57b92f4d002e121acb77e8c5d8d8"
+     },
+     {
+      "name": "gs08.05a",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "e87e526d",
+      "sha1": "d10068addf30322424a85bbc6382cb762ae3fbe2"
+     },
+     {
+      "name": "gs07.04a",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "4382c0d2",
+      "sha1": "8615e62bc57b40d082f6ca211d64f22185bed1fd"
+     },
+     {
+      "name": "gsg06.02a",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "5cb850a7",
+      "sha1": "5b4fec3fae4d1947778c832c41f757414652f34a"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "gsg22.06n",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "96779c38",
+      "sha1": "83f5811b7674e39fac6d127bcf2741a5ba111ec1"
+     },
+     {
+      "name": "gsg21.04n",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "6e8a02c7",
+      "sha1": "8db5792ded8c6360e5a07f96b7799eae7591d719"
+     },
+     {
+      "name": "gsg20.03n",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "139bf927",
+      "sha1": "f58bf8cffbc4e9e1a48c905d341f92a22df6cf37"
+     },
+     {
+      "name": "gsg19.01n",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "8f249573",
+      "sha1": "390103b100ec944c249759383d505df6292f5405"
+     },
+     {
+      "name": "gsg18.06l",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "b290451c",
+      "sha1": "c31d93efd9c1b8d71d4875d7a095a5de2011d2b8"
+     },
+     {
+      "name": "gsg17.04l",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "61c9bd10",
+      "sha1": "ca3116c657b2cc8d7d5f0ac602a294deb92a4e8c"
+     },
+     {
+      "name": "gsg16.03l",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "6620103b",
+      "sha1": "ef1260c05c958c115f54ddaffa213d320508ff11"
+     },
+     {
+      "name": "gsg15.01l",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "ccc1c1b6",
+      "sha1": "feb480195bc4157d7be385b055bdd47505de6bc6"
+     }
+    ]
+   },
+   "bgtiles": {
+    "size": "0x8000",
+    "roms": [
+     {
+      "name": "gs14.11c",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "0af4f7eb",
+      "sha1": "24a98fdeedeeaf1035b4af52d5a8dd5e47a5e62d"
+     }
+    ]
+   },
+   "proms": {
+    "size": "0x0a00",
+    "roms": [
+     {
+      "name": "g-01.03b",
+      "offset": "0x0000",
+      "size": "0x0100",
+      "crc": "02f55589",
+      "sha1": "8a3f98304aedf3aba1c08b615bf457752a480edc"
+     },
+     {
+      "name": "g-02.04b",
+      "offset": "0x0100",
+      "size": "0x0100",
+      "crc": "e1e36dd9",
+      "sha1": "5bd88a35898a2d973045bdde8311aac3a12826de"
+     },
+     {
+      "name": "g-03.05b",
+      "offset": "0x0200",
+      "size": "0x0100",
+      "crc": "989399c0",
+      "sha1": "e408e391f49ed0c7b9e16479fea44b809440fefc"
+     },
+     {
+      "name": "g-04.09d",
+      "offset": "0x0300",
+      "size": "0x0100",
+      "crc": "906612b5",
+      "sha1": "7b727a6200c088538180758320ede84aa7e5b96d"
+     },
+     {
+      "name": "g-06.14a",
+      "offset": "0x0400",
+      "size": "0x0100",
+      "crc": "4a9da18b",
+      "sha1": "fed3b81b56aab2ed0a21ed1fcebe3f1ae095a13b"
+     },
+     {
+      "name": "g-07.15a",
+      "offset": "0x0500",
+      "size": "0x0100",
+      "crc": "cb9394fc",
+      "sha1": "8ad0fde6a8ef8326d2da4b6dbf3b51f5f6c668c8"
+     },
+     {
+      "name": "g-09.09f",
+      "offset": "0x0600",
+      "size": "0x0100",
+      "crc": "3cee181e",
+      "sha1": "3f95bdb12391cb9b3673191bda8d09c84b36b4d3"
+     },
+     {
+      "name": "g-08.08f",
+      "offset": "0x0700",
+      "size": "0x0100",
+      "crc": "ef91cdd2",
+      "sha1": "90b9191c9f10a153d64055a4238eb6e15b8c12bc"
+     }
+    ]
+   }
+  }
+ },
+ "bionicc": {
+  "title": "Bionic Commando (Euro)",
+  "driver": "bionicc",
+  "rotation": 0,
+  "regions": {
+   "maincpu": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "tse_02.1a",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "e4aeefaa",
+      "sha1": "77b6a2d4337bf350239abb50013d030d7c5c8640",
+      "step": "0x2"
+     },
+     {
+      "name": "tse_04.1b",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "d0c8ec75",
+      "sha1": "04138c75ca3939604100b7e9fb451f7fceee67ca",
+      "step": "0x2"
+     },
+     {
+      "name": "tse_03.2a",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "b2ac0a45",
+      "sha1": "d0933e74870efa9ea703251b30a56ef706ac24fe",
+      "step": "0x2"
+     },
+     {
+      "name": "tse_05.2b",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "a79cb406",
+      "sha1": "50eada2f3e80c28dcb5529890d9b279c73f0115a",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ts_01b.4e",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "a9a6cafa",
+      "sha1": "55e0a0e6ca11e8e73339d5b4604e130031211291"
+     }
+    ]
+   },
+   "mcu": {
+    "size": "0x1000",
+    "roms": [
+     {
+      "name": "ts.2f",
+      "offset": "0x0000",
+      "size": "0x1000",
+      "crc": "3ed7f0be",
+      "sha1": "db9e972065c8e60b5d74762dc3424271ea9524cb"
+     }
+    ],
+    "optional": true
+   },
+   "gfx1": {
+    "size": "0x08000",
+    "roms": [
+     {
+      "name": "tsu_08.8l",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "9bf0b7a2",
+      "sha1": "1361335c3c2c8a9c6a7d99566048d8aac99e7c8f"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "tsu_07.5l",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "9469efa4",
+      "sha1": "53c70361e8d9e54825f61b87a10df42438aaf5b0"
+     },
+     {
+      "name": "tsu_06.4l",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "40bf0eb4",
+      "sha1": "fcb186c31747e2c9872de01e34b3e713dc74df82"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ts_12.17f",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "e4b4619e",
+      "sha1": "3bec8399ffb28fd50ce6ae88d90b091eadf8bda1"
+     },
+     {
+      "name": "ts_11.15f",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "ab30237a",
+      "sha1": "ea6c07df992ba48f9eca7daa4ea775faa94358d2"
+     },
+     {
+      "name": "ts_17.17g",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "deb657e4",
+      "sha1": "b36b468f9bbb7a4937286230d3f6caa14c61d4dd"
+     },
+     {
+      "name": "ts_16.15g",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "d363b5f9",
+      "sha1": "1dd3991d99db2d6bcbdb12879ba50a01fef95004"
+     },
+     {
+      "name": "ts_13.18f",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "a8f5a004",
+      "sha1": "36ab0cb8ec9ce0519876f7461ccc5020c9c5b597"
+     },
+     {
+      "name": "ts_18.18g",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "3b36948c",
+      "sha1": "d85fcc0265ba1729c587b046cc5a7ba6f25363dd"
+     },
+     {
+      "name": "ts_23.18j",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "bbfbe58a",
+      "sha1": "9b1d5672b6f3c5c0952f8dcd0da71acc68a97a5e"
+     },
+     {
+      "name": "ts_24.18k",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "f156e564",
+      "sha1": "a6cad05bcc6d9ded6294f9b5aa856d05641aed02"
+     }
+    ]
+   },
+   "spritegen": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "tse_10.13f",
+      "offset": "0x00003",
+      "size": "0x8000",
+      "crc": "d28eeacc",
+      "sha1": "8b4a655a48da276b07f3464c65743b13cec52bcb",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_09.11f",
+      "offset": "0x20003",
+      "size": "0x8000",
+      "crc": "6a049292",
+      "sha1": "525c862061f426d679b539b6926af4c9f14b47b5",
+      "step": "0x4"
+     },
+     {
+      "name": "tse_15.13g",
+      "offset": "0x00002",
+      "size": "0x8000",
+      "crc": "9b5593c0",
+      "sha1": "73c0acbb01fe69c2bd29dea11b6a223c8efb54a0",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_14.11g",
+      "offset": "0x20002",
+      "size": "0x8000",
+      "crc": "46b2ad83",
+      "sha1": "21ebd5691a544323fdfcf330b9a37bbe0428e3e3",
+      "step": "0x4"
+     },
+     {
+      "name": "tse_20.13j",
+      "offset": "0x00001",
+      "size": "0x8000",
+      "crc": "b03db778",
+      "sha1": "f72a93e73196c800c1893fd3b523394d702547dd",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_19.11j",
+      "offset": "0x20001",
+      "size": "0x8000",
+      "crc": "b5c82722",
+      "sha1": "969f9159f7d59e4e4c9ef9ddbdc27cbfa531eabf",
+      "step": "0x4"
+     },
+     {
+      "name": "tse_22.17j",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "d4dedeb3",
+      "sha1": "e121057bb541f3f5c755963ca22832c3fe2637c0",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_21.15j",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "98777006",
+      "sha1": "bcc2058b639e9b71d16af05f63df298bcce91fdc",
+      "step": "0x4"
+     }
+    ]
+   }
+  }
+ },
+ "bionicc1": {
+  "title": "Bionic Commando (US set 1)",
+  "driver": "bionicc",
+  "rotation": 0,
+  "parent": "bionicc",
+  "regions": {
+   "maincpu": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "tsu_02b.1a",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "cf965a0a",
+      "sha1": "ab88742a3225a0b82ee2dfef6ed0058d3e11c38c",
+      "step": "0x2"
+     },
+     {
+      "name": "tsu_04b.1b",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "c9884bfb",
+      "sha1": "7d10cedff0a62847f8deb61a9611cc6661efb037",
+      "step": "0x2"
+     },
+     {
+      "name": "tsu_03b.2a",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "4e157ae2",
+      "sha1": "cc02931376d22a7fcfc320e6fd4129e03a461a49",
+      "step": "0x2"
+     },
+     {
+      "name": "tsu_05b.2b",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "e66ca0f9",
+      "sha1": "a503badf2fed38786d38c313d1dc315f3175d6de",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ts_01b.4e",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "a9a6cafa",
+      "sha1": "55e0a0e6ca11e8e73339d5b4604e130031211291"
+     }
+    ]
+   },
+   "mcu": {
+    "size": "0x1000",
+    "roms": [
+     {
+      "name": "ts.2f",
+      "offset": "0x0000",
+      "size": "0x1000",
+      "crc": "3ed7f0be",
+      "sha1": "db9e972065c8e60b5d74762dc3424271ea9524cb"
+     }
+    ],
+    "optional": true
+   },
+   "gfx1": {
+    "size": "0x08000",
+    "roms": [
+     {
+      "name": "tsu_08.8l",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "9bf0b7a2",
+      "sha1": "1361335c3c2c8a9c6a7d99566048d8aac99e7c8f"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "tsu_07.5l",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "9469efa4",
+      "sha1": "53c70361e8d9e54825f61b87a10df42438aaf5b0"
+     },
+     {
+      "name": "tsu_06.4l",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "40bf0eb4",
+      "sha1": "fcb186c31747e2c9872de01e34b3e713dc74df82"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ts_12.17f",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "e4b4619e",
+      "sha1": "3bec8399ffb28fd50ce6ae88d90b091eadf8bda1"
+     },
+     {
+      "name": "ts_11.15f",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "ab30237a",
+      "sha1": "ea6c07df992ba48f9eca7daa4ea775faa94358d2"
+     },
+     {
+      "name": "ts_17.17g",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "deb657e4",
+      "sha1": "b36b468f9bbb7a4937286230d3f6caa14c61d4dd"
+     },
+     {
+      "name": "ts_16.15g",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "d363b5f9",
+      "sha1": "1dd3991d99db2d6bcbdb12879ba50a01fef95004"
+     },
+     {
+      "name": "ts_13.18f",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "a8f5a004",
+      "sha1": "36ab0cb8ec9ce0519876f7461ccc5020c9c5b597"
+     },
+     {
+      "name": "ts_18.18g",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "3b36948c",
+      "sha1": "d85fcc0265ba1729c587b046cc5a7ba6f25363dd"
+     },
+     {
+      "name": "ts_23.18j",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "bbfbe58a",
+      "sha1": "9b1d5672b6f3c5c0952f8dcd0da71acc68a97a5e"
+     },
+     {
+      "name": "ts_24.18k",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "f156e564",
+      "sha1": "a6cad05bcc6d9ded6294f9b5aa856d05641aed02"
+     }
+    ]
+   },
+   "spritegen": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "tsu_10.13f",
+      "offset": "0x00003",
+      "size": "0x8000",
+      "crc": "f1180d02",
+      "sha1": "312626af48235a1f726ab596f296ef4739785ca0",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_09.11f",
+      "offset": "0x20003",
+      "size": "0x8000",
+      "crc": "6a049292",
+      "sha1": "525c862061f426d679b539b6926af4c9f14b47b5",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_15.13g",
+      "offset": "0x00002",
+      "size": "0x8000",
+      "crc": "ea912701",
+      "sha1": "106336c63a1c8a0b13236268bc533a8263285cad",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_14.11g",
+      "offset": "0x20002",
+      "size": "0x8000",
+      "crc": "46b2ad83",
+      "sha1": "21ebd5691a544323fdfcf330b9a37bbe0428e3e3",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_20.13j",
+      "offset": "0x00001",
+      "size": "0x8000",
+      "crc": "17857ad2",
+      "sha1": "9f45cea6e9ce82bfc9ee6896a30257d20fb38bca",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_19.11j",
+      "offset": "0x20001",
+      "size": "0x8000",
+      "crc": "b5c82722",
+      "sha1": "969f9159f7d59e4e4c9ef9ddbdc27cbfa531eabf",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_22.17j",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "5ee1ae6a",
+      "sha1": "76ca53d847c940c4176d79ba49b0c10efd6342e8",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_21.15j",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "98777006",
+      "sha1": "bcc2058b639e9b71d16af05f63df298bcce91fdc",
+      "step": "0x4"
+     }
+    ]
+   }
+  }
+ },
+ "bionicc2": {
+  "title": "Bionic Commando (US set 2)",
+  "driver": "bionicc",
+  "rotation": 0,
+  "parent": "bionicc",
+  "regions": {
+   "maincpu": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "tsu_02.1a",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "f2528f08",
+      "sha1": "04c793837c86d83312fd44b46a6a94378c90113b",
+      "step": "0x2"
+     },
+     {
+      "name": "tsu_04.1b",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "38b1c7e4",
+      "sha1": "14bf743726c214bd00177e7b410c272dd7ab3d3f",
+      "step": "0x2"
+     },
+     {
+      "name": "tsu_03.2a",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "72c3b76f",
+      "sha1": "f7f71eae7617e3348b727775088b496e86d51e38",
+      "step": "0x2"
+     },
+     {
+      "name": "tsu_05.2b",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "70621f83",
+      "sha1": "0a77c2827a5c50457d90ccc62e463508d83d2f20",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ts_01b.4e",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "a9a6cafa",
+      "sha1": "55e0a0e6ca11e8e73339d5b4604e130031211291"
+     }
+    ]
+   },
+   "mcu": {
+    "size": "0x1000",
+    "roms": [
+     {
+      "name": "ts.2f",
+      "offset": "0x0000",
+      "size": "0x1000",
+      "crc": "3ed7f0be",
+      "sha1": "db9e972065c8e60b5d74762dc3424271ea9524cb"
+     }
+    ],
+    "optional": true
+   },
+   "gfx1": {
+    "size": "0x08000",
+    "roms": [
+     {
+      "name": "tsu_08.8l",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "9bf0b7a2",
+      "sha1": "1361335c3c2c8a9c6a7d99566048d8aac99e7c8f"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "tsu_07.5l",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "9469efa4",
+      "sha1": "53c70361e8d9e54825f61b87a10df42438aaf5b0"
+     },
+     {
+      "name": "tsu_06.4l",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "40bf0eb4",
+      "sha1": "fcb186c31747e2c9872de01e34b3e713dc74df82"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ts_12.17f",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "e4b4619e",
+      "sha1": "3bec8399ffb28fd50ce6ae88d90b091eadf8bda1"
+     },
+     {
+      "name": "ts_11.15f",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "ab30237a",
+      "sha1": "ea6c07df992ba48f9eca7daa4ea775faa94358d2"
+     },
+     {
+      "name": "ts_17.17g",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "deb657e4",
+      "sha1": "b36b468f9bbb7a4937286230d3f6caa14c61d4dd"
+     },
+     {
+      "name": "ts_16.15g",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "d363b5f9",
+      "sha1": "1dd3991d99db2d6bcbdb12879ba50a01fef95004"
+     },
+     {
+      "name": "ts_13.18f",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "a8f5a004",
+      "sha1": "36ab0cb8ec9ce0519876f7461ccc5020c9c5b597"
+     },
+     {
+      "name": "ts_18.18g",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "3b36948c",
+      "sha1": "d85fcc0265ba1729c587b046cc5a7ba6f25363dd"
+     },
+     {
+      "name": "ts_23.18j",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "bbfbe58a",
+      "sha1": "9b1d5672b6f3c5c0952f8dcd0da71acc68a97a5e"
+     },
+     {
+      "name": "ts_24.18k",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "f156e564",
+      "sha1": "a6cad05bcc6d9ded6294f9b5aa856d05641aed02"
+     }
+    ]
+   },
+   "spritegen": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "tsu_10.13f",
+      "offset": "0x00003",
+      "size": "0x8000",
+      "crc": "f1180d02",
+      "sha1": "312626af48235a1f726ab596f296ef4739785ca0",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_09.11f",
+      "offset": "0x20003",
+      "size": "0x8000",
+      "crc": "6a049292",
+      "sha1": "525c862061f426d679b539b6926af4c9f14b47b5",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_15.13g",
+      "offset": "0x00002",
+      "size": "0x8000",
+      "crc": "ea912701",
+      "sha1": "106336c63a1c8a0b13236268bc533a8263285cad",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_14.11g",
+      "offset": "0x20002",
+      "size": "0x8000",
+      "crc": "46b2ad83",
+      "sha1": "21ebd5691a544323fdfcf330b9a37bbe0428e3e3",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_20.13j",
+      "offset": "0x00001",
+      "size": "0x8000",
+      "crc": "17857ad2",
+      "sha1": "9f45cea6e9ce82bfc9ee6896a30257d20fb38bca",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_19.11j",
+      "offset": "0x20001",
+      "size": "0x8000",
+      "crc": "b5c82722",
+      "sha1": "969f9159f7d59e4e4c9ef9ddbdc27cbfa531eabf",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_22.17j",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "5ee1ae6a",
+      "sha1": "76ca53d847c940c4176d79ba49b0c10efd6342e8",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_21.15j",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "98777006",
+      "sha1": "bcc2058b639e9b71d16af05f63df298bcce91fdc",
+      "step": "0x4"
+     }
+    ]
+   }
+  }
+ },
+ "topsecrt2": {
+  "title": "Top Secret (Japan, revision B)",
+  "driver": "bionicc",
+  "rotation": 0,
+  "parent": "bionicc",
+  "regions": {
+   "maincpu": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ts_02b.1a",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "0b84497f",
+      "sha1": "f7e9412d37a1e4b7a437d3f7bc5dc448c8a22079",
+      "step": "0x2"
+     },
+     {
+      "name": "ts_04b.1b",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "9ab6de8d",
+      "sha1": "04445bc183364ebb6a8833a147b694234b509634",
+      "step": "0x2"
+     },
+     {
+      "name": "ts_03b.2a",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "1b3f8a82",
+      "sha1": "2f9cad83b7bd10617bbd5172a1d31f41b194d3ac",
+      "step": "0x2"
+     },
+     {
+      "name": "ts_05b.2b",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "962a89d8",
+      "sha1": "4aa5b0fd68a59ff74716253b0ba4c1933e92855b",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ts_01b.4e",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "a9a6cafa",
+      "sha1": "55e0a0e6ca11e8e73339d5b4604e130031211291"
+     }
+    ]
+   },
+   "mcu": {
+    "size": "0x1000",
+    "roms": [
+     {
+      "name": "ts.2f",
+      "offset": "0x0000",
+      "size": "0x1000",
+      "crc": "3ed7f0be",
+      "sha1": "db9e972065c8e60b5d74762dc3424271ea9524cb"
+     }
+    ],
+    "optional": true
+   },
+   "gfx1": {
+    "size": "0x08000",
+    "roms": [
+     {
+      "name": "ts_08.8l",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "96ad379e",
+      "sha1": "accd3a560b259c186bc28cdc004ed8de0b12f9d5"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ts_07.5l",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "25cdf8b2",
+      "sha1": "316f6acc46878682dabeab12722e6a64504d23bd"
+     },
+     {
+      "name": "ts_06.4l",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "314fb12d",
+      "sha1": "dab0519a49b64fe7a837b3c6383f6147e1ab6ffd"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ts_12.17f",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "e4b4619e",
+      "sha1": "3bec8399ffb28fd50ce6ae88d90b091eadf8bda1"
+     },
+     {
+      "name": "ts_11.15f",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "ab30237a",
+      "sha1": "ea6c07df992ba48f9eca7daa4ea775faa94358d2"
+     },
+     {
+      "name": "ts_17.17g",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "deb657e4",
+      "sha1": "b36b468f9bbb7a4937286230d3f6caa14c61d4dd"
+     },
+     {
+      "name": "ts_16.15g",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "d363b5f9",
+      "sha1": "1dd3991d99db2d6bcbdb12879ba50a01fef95004"
+     },
+     {
+      "name": "ts_13.18f",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "a8f5a004",
+      "sha1": "36ab0cb8ec9ce0519876f7461ccc5020c9c5b597"
+     },
+     {
+      "name": "ts_18.18g",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "3b36948c",
+      "sha1": "d85fcc0265ba1729c587b046cc5a7ba6f25363dd"
+     },
+     {
+      "name": "ts_23.18j",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "bbfbe58a",
+      "sha1": "9b1d5672b6f3c5c0952f8dcd0da71acc68a97a5e"
+     },
+     {
+      "name": "ts_24.18k",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "f156e564",
+      "sha1": "a6cad05bcc6d9ded6294f9b5aa856d05641aed02"
+     }
+    ]
+   },
+   "spritegen": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ts_10.13f",
+      "offset": "0x00003",
+      "size": "0x8000",
+      "crc": "c3587d05",
+      "sha1": "ad0898a5d4cf110783ef092bf8e65b6ef31a8ae0",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_09.11f",
+      "offset": "0x20003",
+      "size": "0x8000",
+      "crc": "6b63eef2",
+      "sha1": "5d1580db7f49c5994c2a08a36c2d05f3e246930d",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_15.13g",
+      "offset": "0x00002",
+      "size": "0x8000",
+      "crc": "db8cebb0",
+      "sha1": "1cc9eac14851cde95fb2d69d6f5ffb08bc9c0d93",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_14.11g",
+      "offset": "0x20002",
+      "size": "0x8000",
+      "crc": "e2e41abf",
+      "sha1": "d002d0d8fdbb9ec3e2eac218f6338f733953ca82",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_20.13j",
+      "offset": "0x00001",
+      "size": "0x8000",
+      "crc": "bfd1a695",
+      "sha1": "bf93486b96bfa1a1d5015189043b07e6130e6df1",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_19.11j",
+      "offset": "0x20001",
+      "size": "0x8000",
+      "crc": "928b669e",
+      "sha1": "98ea9d23a46b0700490fd2fa7ab4fb0988dd5ca6",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_22.17j",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "3fe05d9a",
+      "sha1": "32e28ef03fb82785019d1ae8b3859215b5368c2b",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_21.15j",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "27a9bb7c",
+      "sha1": "bb60332c0ecde4d7797960dec39c1079498175c3",
+      "step": "0x4"
+     }
+    ]
+   }
+  }
+ },
+ "topsecrt": {
+  "title": "Top Secret (Japan, old revision)",
+  "driver": "bionicc",
+  "rotation": 0,
+  "parent": "bionicc",
+  "regions": {
+   "maincpu": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ts_02.1a",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "b2fe1ddb",
+      "sha1": "892f19124993add96edabdba3aafeecc6668c5d9",
+      "step": "0x2"
+     },
+     {
+      "name": "ts_04.1b",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "427a003d",
+      "sha1": "5a379fe2942e5565810939d5eb843003226222cc",
+      "step": "0x2"
+     },
+     {
+      "name": "ts_03.2a",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "27f04bb6",
+      "sha1": "41d17b84b34dc8b2e5dfa67794a8df3e898b740b",
+      "step": "0x2"
+     },
+     {
+      "name": "ts_05.2b",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "c01547b1",
+      "sha1": "563bf6be4f10f5e6eb5b562266accf168f62bf30",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ts_01.4e",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "8ea07917",
+      "sha1": "e9ace70d89482fc3669860450a41aacacbee9083"
+     }
+    ]
+   },
+   "mcu": {
+    "size": "0x1000",
+    "roms": [
+     {
+      "name": "ts.2f",
+      "offset": "0x0000",
+      "size": "0x1000",
+      "crc": "3ed7f0be",
+      "sha1": "db9e972065c8e60b5d74762dc3424271ea9524cb"
+     }
+    ],
+    "optional": true
+   },
+   "gfx1": {
+    "size": "0x08000",
+    "roms": [
+     {
+      "name": "ts_08.8l",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "96ad379e",
+      "sha1": "accd3a560b259c186bc28cdc004ed8de0b12f9d5"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ts_07.5l",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "25cdf8b2",
+      "sha1": "316f6acc46878682dabeab12722e6a64504d23bd"
+     },
+     {
+      "name": "ts_06.4l",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "314fb12d",
+      "sha1": "dab0519a49b64fe7a837b3c6383f6147e1ab6ffd"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ts_12.17f",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "e4b4619e",
+      "sha1": "3bec8399ffb28fd50ce6ae88d90b091eadf8bda1"
+     },
+     {
+      "name": "ts_11.15f",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "ab30237a",
+      "sha1": "ea6c07df992ba48f9eca7daa4ea775faa94358d2"
+     },
+     {
+      "name": "ts_17.17g",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "deb657e4",
+      "sha1": "b36b468f9bbb7a4937286230d3f6caa14c61d4dd"
+     },
+     {
+      "name": "ts_16.15g",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "d363b5f9",
+      "sha1": "1dd3991d99db2d6bcbdb12879ba50a01fef95004"
+     },
+     {
+      "name": "ts_13.18f",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "a8f5a004",
+      "sha1": "36ab0cb8ec9ce0519876f7461ccc5020c9c5b597"
+     },
+     {
+      "name": "ts_18.18g",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "3b36948c",
+      "sha1": "d85fcc0265ba1729c587b046cc5a7ba6f25363dd"
+     },
+     {
+      "name": "ts_23.18j",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "bbfbe58a",
+      "sha1": "9b1d5672b6f3c5c0952f8dcd0da71acc68a97a5e"
+     },
+     {
+      "name": "ts_24.18k",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "f156e564",
+      "sha1": "a6cad05bcc6d9ded6294f9b5aa856d05641aed02"
+     }
+    ]
+   },
+   "spritegen": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ts_10.13f",
+      "offset": "0x00003",
+      "size": "0x8000",
+      "crc": "c3587d05",
+      "sha1": "ad0898a5d4cf110783ef092bf8e65b6ef31a8ae0",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_09.11f",
+      "offset": "0x20003",
+      "size": "0x8000",
+      "crc": "6b63eef2",
+      "sha1": "5d1580db7f49c5994c2a08a36c2d05f3e246930d",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_15.13g",
+      "offset": "0x00002",
+      "size": "0x8000",
+      "crc": "db8cebb0",
+      "sha1": "1cc9eac14851cde95fb2d69d6f5ffb08bc9c0d93",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_14.11g",
+      "offset": "0x20002",
+      "size": "0x8000",
+      "crc": "e2e41abf",
+      "sha1": "d002d0d8fdbb9ec3e2eac218f6338f733953ca82",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_20.13j",
+      "offset": "0x00001",
+      "size": "0x8000",
+      "crc": "bfd1a695",
+      "sha1": "bf93486b96bfa1a1d5015189043b07e6130e6df1",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_19.11j",
+      "offset": "0x20001",
+      "size": "0x8000",
+      "crc": "928b669e",
+      "sha1": "98ea9d23a46b0700490fd2fa7ab4fb0988dd5ca6",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_22.17j",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "3fe05d9a",
+      "sha1": "32e28ef03fb82785019d1ae8b3859215b5368c2b",
+      "step": "0x4"
+     },
+     {
+      "name": "ts_21.15j",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "27a9bb7c",
+      "sha1": "bb60332c0ecde4d7797960dec39c1079498175c3",
+      "step": "0x4"
+     }
+    ]
+   }
+  }
+ },
+ "bioniccbl": {
+  "title": "Bionic Commandos (bootleg, set 1)",
+  "driver": "bionicc",
+  "rotation": 0,
+  "parent": "bionicc",
+  "regions": {
+   "maincpu": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "02l.bin",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "b2fe1ddb",
+      "sha1": "892f19124993add96edabdba3aafeecc6668c5d9",
+      "step": "0x2"
+     },
+     {
+      "name": "03l.bin",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "427a003d",
+      "sha1": "5a379fe2942e5565810939d5eb843003226222cc",
+      "step": "0x2"
+     },
+     {
+      "name": "02u.bin",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "27f04bb6",
+      "sha1": "41d17b84b34dc8b2e5dfa67794a8df3e898b740b",
+      "step": "0x2"
+     },
+     {
+      "name": "03u.bin",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "c01547b1",
+      "sha1": "563bf6be4f10f5e6eb5b562266accf168f62bf30",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "01.bin",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "8ea07917",
+      "sha1": "e9ace70d89482fc3669860450a41aacacbee9083"
+     }
+    ]
+   },
+   "mcu": {
+    "size": "0x1000",
+    "roms": [
+     {
+      "name": "d8751h.bin",
+      "offset": "0x0000",
+      "size": "0x1000",
+      "crc": "3ed7f0be",
+      "sha1": "db9e972065c8e60b5d74762dc3424271ea9524cb"
+     }
+    ],
+    "optional": true
+   },
+   "gfx1": {
+    "size": "0x08000",
+    "roms": [
+     {
+      "name": "06.bin",
+      "offset": "0x00000",
+      "size": "0x4000",
+      "crc": "4e6b81d9",
+      "sha1": "052784d789b0c9193edf218fa1883b6e3b7df988"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "05.bin",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "9bf8dc7f",
+      "sha1": "539a52087ed1f58839b6aa8c0b5ed249f4f4041e"
+     },
+     {
+      "name": "04.bin",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "1b43bf63",
+      "sha1": "b80d675a07cebd83daf202d1c3d3f7c2dedf5c30"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ts_12.17f",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "e4b4619e",
+      "sha1": "3bec8399ffb28fd50ce6ae88d90b091eadf8bda1"
+     },
+     {
+      "name": "ts_11.15f",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "ab30237a",
+      "sha1": "ea6c07df992ba48f9eca7daa4ea775faa94358d2"
+     },
+     {
+      "name": "ts_17.17g",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "deb657e4",
+      "sha1": "b36b468f9bbb7a4937286230d3f6caa14c61d4dd"
+     },
+     {
+      "name": "ts_16.15g",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "d363b5f9",
+      "sha1": "1dd3991d99db2d6bcbdb12879ba50a01fef95004"
+     },
+     {
+      "name": "ts_13.18f",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "a8f5a004",
+      "sha1": "36ab0cb8ec9ce0519876f7461ccc5020c9c5b597"
+     },
+     {
+      "name": "ts_18.18g",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "3b36948c",
+      "sha1": "d85fcc0265ba1729c587b046cc5a7ba6f25363dd"
+     },
+     {
+      "name": "ts_23.18j",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "bbfbe58a",
+      "sha1": "9b1d5672b6f3c5c0952f8dcd0da71acc68a97a5e"
+     },
+     {
+      "name": "ts_24.18k",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "f156e564",
+      "sha1": "a6cad05bcc6d9ded6294f9b5aa856d05641aed02"
+     }
+    ]
+   },
+   "spritegen": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "07.bin",
+      "offset": "0x00003",
+      "size": "0x10000",
+      "crc": "a0e78996",
+      "sha1": "810a54e657c0faaff6a8494acaf803d1d2151893",
+      "step": "0x4"
+     },
+     {
+      "name": "11.bin",
+      "offset": "0x00002",
+      "size": "0x10000",
+      "crc": "37cb11c2",
+      "sha1": "af8c2ae4bb6e6c13ea3e8b7c96e5b18f1eb1d5a5",
+      "step": "0x4"
+     },
+     {
+      "name": "15.bin",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "4e0354ce",
+      "sha1": "d3256c891b44c6593b0b44c0d0a3e754ce78c1cb",
+      "step": "0x4"
+     },
+     {
+      "name": "16.bin",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "ac89e5cc",
+      "sha1": "aa7e065ece6d25b7e83fadcd22c09e1f7dc0b86f",
+      "step": "0x4"
+     }
+    ]
+   }
+  }
+ },
+ "bioniccbl2": {
+  "title": "Bionic Commandos (bootleg, set 2)",
+  "driver": "bionicc",
+  "rotation": 0,
+  "parent": "bionicc",
+  "regions": {
+   "maincpu": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "tsu_02.1a",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "c03d3424",
+      "sha1": "1d47185e10813c2792bda31c7dfbb40e88fd46ee",
+      "step": "0x2"
+     },
+     {
+      "name": "tsu_04.1b",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "9f13eb9d",
+      "sha1": "b9c8cfc22a1d2adcc6a93e3e382b2126446c05aa",
+      "step": "0x2"
+     },
+     {
+      "name": "3",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "a909ec2c",
+      "sha1": "7979480b5d82704f7d15546bda6af78316505f85",
+      "step": "0x2"
+     },
+     {
+      "name": "tsu_05.1d",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "4e6b75ce",
+      "sha1": "44c3900b8dc9f375a7d6ed57c4025bc35771e29c",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ts_01.4e",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "8ea07917",
+      "sha1": "e9ace70d89482fc3669860450a41aacacbee9083"
+     }
+    ]
+   },
+   "mcu": {
+    "size": "0x1000",
+    "roms": [
+     {
+      "name": "d8751h.bin",
+      "offset": "0x0000",
+      "size": "0x1000",
+      "crc": "3ed7f0be",
+      "sha1": "db9e972065c8e60b5d74762dc3424271ea9524cb"
+     }
+    ],
+    "optional": true
+   },
+   "gfx1": {
+    "size": "0x08000",
+    "roms": [
+     {
+      "name": "ts_08.8l",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "96ad379e",
+      "sha1": "accd3a560b259c186bc28cdc004ed8de0b12f9d5"
+     }
+    ]
+   },
+   "gfx2": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ts_07.5l",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "25cdf8b2",
+      "sha1": "316f6acc46878682dabeab12722e6a64504d23bd"
+     },
+     {
+      "name": "ts_06.4l",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "314fb12d",
+      "sha1": "dab0519a49b64fe7a837b3c6383f6147e1ab6ffd"
+     }
+    ]
+   },
+   "gfx3": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ts_12.17f",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "e4b4619e",
+      "sha1": "3bec8399ffb28fd50ce6ae88d90b091eadf8bda1"
+     },
+     {
+      "name": "ts_11.15f",
+      "offset": "0x08000",
+      "size": "0x8000",
+      "crc": "ab30237a",
+      "sha1": "ea6c07df992ba48f9eca7daa4ea775faa94358d2"
+     },
+     {
+      "name": "ts_17.17g",
+      "offset": "0x10000",
+      "size": "0x8000",
+      "crc": "deb657e4",
+      "sha1": "b36b468f9bbb7a4937286230d3f6caa14c61d4dd"
+     },
+     {
+      "name": "ts_16.15g",
+      "offset": "0x18000",
+      "size": "0x8000",
+      "crc": "d363b5f9",
+      "sha1": "1dd3991d99db2d6bcbdb12879ba50a01fef95004"
+     },
+     {
+      "name": "ts_13.18f",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "a8f5a004",
+      "sha1": "36ab0cb8ec9ce0519876f7461ccc5020c9c5b597"
+     },
+     {
+      "name": "ts_18.18g",
+      "offset": "0x28000",
+      "size": "0x8000",
+      "crc": "3b36948c",
+      "sha1": "d85fcc0265ba1729c587b046cc5a7ba6f25363dd"
+     },
+     {
+      "name": "ts_23.18j",
+      "offset": "0x30000",
+      "size": "0x8000",
+      "crc": "bbfbe58a",
+      "sha1": "9b1d5672b6f3c5c0952f8dcd0da71acc68a97a5e"
+     },
+     {
+      "name": "ts_24.18k",
+      "offset": "0x38000",
+      "size": "0x8000",
+      "crc": "f156e564",
+      "sha1": "a6cad05bcc6d9ded6294f9b5aa856d05641aed02"
+     }
+    ]
+   },
+   "spritegen": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "tse_10.13f",
+      "offset": "0x00003",
+      "size": "0x8000",
+      "crc": "d28eeacc",
+      "sha1": "8b4a655a48da276b07f3464c65743b13cec52bcb",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_09.11f",
+      "offset": "0x20003",
+      "size": "0x8000",
+      "crc": "6a049292",
+      "sha1": "525c862061f426d679b539b6926af4c9f14b47b5",
+      "step": "0x4"
+     },
+     {
+      "name": "tse_15.13g",
+      "offset": "0x00002",
+      "size": "0x8000",
+      "crc": "9b5593c0",
+      "sha1": "73c0acbb01fe69c2bd29dea11b6a223c8efb54a0",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_14.11g",
+      "offset": "0x20002",
+      "size": "0x8000",
+      "crc": "46b2ad83",
+      "sha1": "21ebd5691a544323fdfcf330b9a37bbe0428e3e3",
+      "step": "0x4"
+     },
+     {
+      "name": "tse_20.13j",
+      "offset": "0x00001",
+      "size": "0x8000",
+      "crc": "b03db778",
+      "sha1": "f72a93e73196c800c1893fd3b523394d702547dd",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_19.11j",
+      "offset": "0x20001",
+      "size": "0x8000",
+      "crc": "b5c82722",
+      "sha1": "969f9159f7d59e4e4c9ef9ddbdc27cbfa531eabf",
+      "step": "0x4"
+     },
+     {
+      "name": "tse_22.17j",
+      "offset": "0x00000",
+      "size": "0x8000",
+      "crc": "d4dedeb3",
+      "sha1": "e121057bb541f3f5c755963ca22832c3fe2637c0",
+      "step": "0x4"
+     },
+     {
+      "name": "tsu_21.15j",
+      "offset": "0x20000",
+      "size": "0x8000",
+      "crc": "98777006",
+      "sha1": "bcc2058b639e9b71d16af05f63df298bcce91fdc",
+      "step": "0x4"
+     }
+    ]
+   }
+  }
  }
 }

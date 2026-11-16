@@ -17,6 +17,10 @@ pub mod cps1;
 pub mod cps2;
 pub mod bagman;
 pub mod gng;
+pub mod commando;
+pub mod c1942;
+pub mod gunsmoke;
+pub mod bionicc;
 pub mod state;
 pub mod hiscore;
 
@@ -107,6 +111,12 @@ pub fn load_arcade(driver: &str, set_name: &str, mut regions: HashMap<String, Ve
             set_name, regions, driver == "tmnt2p")?)),
         "simpsons" | "simpsons2p" => Ok(Box::new(simpsons::simpsons_system::SimpsonsSystem::new(
             set_name, regions, driver == "simpsons2p")?)),
+        "bionicc" => Ok(Box::new(bionicc::bionicc_system::BioniccSystem::new(set_name, regions)?)),
+        "gunsmoke" => Ok(wrap(gunsmoke::gunsmoke_system::GunsmokeSystem::new(set_name, regions)?, hs, "Capcom")),
+        "1942" => Ok(wrap(c1942::c1942_system::C1942System::new(set_name, regions)?, hs, "Capcom")),
+        // "commando_b": bootlegs that scramble the first opcode too
+        "commando" | "commando_b" => Ok(wrap(commando::commando_system::CommandoSystem::new(
+            set_name, regions, driver == "commando_b")?, hs, "Capcom")),
         "gng" | "diamrun" => {
             use gng::gng_system::{GngSystem, Variant};
             let v = if driver == "diamrun" { Variant::DiamondRun } else { Variant::Gng };

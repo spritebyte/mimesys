@@ -30,7 +30,7 @@ use crate::arcade::{state, take_region};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 
 pub const SCREEN_W: usize = 256;
 pub const SCREEN_H: usize = 224;
@@ -52,7 +52,7 @@ pub enum Variant {
 
 /// MAME gfx_layout decode: `planes`, `xs`, `ys` as bit offsets (the first plane is the
 /// high bit of a pixel), `inc` bits from one element to the next.
-fn decode(gfx: &[u8], count: usize, planes: &[usize], xs: &[usize], ys: &[usize], inc: usize) -> Vec<u8> {
+pub(crate) fn decode(gfx: &[u8], count: usize, planes: &[usize], xs: &[usize], ys: &[usize], inc: usize) -> Vec<u8> {
     let (w, h) = (xs.len(), ys.len());
     let bit = |b: usize| gfx.get(b / 8).map_or(0, |v| v >> (7 - b % 8) & 1);
     let mut out = vec![0u8; count * w * h];

@@ -7,7 +7,7 @@
 //!
 //! `run(clocks)` advances the chip; output comes out at the rate given to `new`, mono,
 //! the FM held between its samples and averaged over each output sample. Levels follow
-//! MAME's usual YM2203 routing (each SSG channel 0.40, FM 0.20).
+//! MAME's usual YM2203 routing (each SSG channel 0.40, FM 0.20; `set_mix` for others).
 
 use serde::{Deserialize, Serialize};
 use crate::common::audio::ay8910::Ay8910;
@@ -26,19 +26,30 @@ pub struct Ym2203 {
     fm_last: i32,
     fm_acc: i64,
     fm_n: u32,
+    /// output level of each SSG channel and of the FM (MAME route gains)
+    #[serde(default = "ssg_mix")]
+    ssg_mix: f32,
+    #[serde(default = "fm_mix")]
+    fm_mix: f32,
     #[serde(skip)]
     pub out: Vec<f32>,
 }
+
+fn ssg_mix() -> f32 { 0.40 }
+fn fm_mix() -> f32 { 0.20 }
 
 impl Ym2203 {
     pub fn new(clock: u32, out_rate: u32) -> Self {
         let mut ssg = Ay8910::new(clock / 2, out_rate);
         ssg.gain = 1.0;
         let mut y = Self { fm: Ym2612::new_opn(), ssg, clock, address: 0, prescale: 6, fm_left: 0, ssg_left: 0,
-                           fm_last: 0, fm_acc: 0, fm_n: 0, out: Vec::with_capacity(2048) };
+                           fm_last: 0, fm_acc: 0, fm_n: 0, ssg_mix: ssg_mix(), fm_mix: fm_mix(), out: Vec::with_capacity(2048) };
         y.set_prescale(6);
         y
     }
+
+    /// Output levels: each SSG channel, and the FM (default 0.40 / 0.20, MAME's usual).
+    pub fn set_mix(&mut self, ssg: f32, fm: f32) { self.ssg_mix = ssg; self.fm_mix = fm; }
 
     pub fn reset(&mut self) {
         self.fm.reset();
@@ -109,8 +120,8 @@ impl Ym2203 {
                     let fm = if self.fm_n > 0 { self.fm_acc as f32 / self.fm_n as f32 } else { self.fm_last as f32 };
                     self.fm_acc = 0;
                     self.fm_n = 0;
-                    // the AY core gives gain x (A + B + C) / 3: x 1.2 makes each SSG channel 0.40
-                    let v = self.ssg.out[before] * 1.2 + fm / 32768.0 * 0.2;
+                    // the AY core gives gain x (A + B + C) / 3 (gain 1)
+                    let v = self.ssg.out[before] * 3.0 * self.ssg_mix + fm / 32768.0 * self.fm_mix;
                     self.ssg.out.truncate(before);
                     self.out.push(v);
                 }
