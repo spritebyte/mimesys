@@ -82,6 +82,26 @@ fn bios_draws_and_counts_vblanks() {
     assert!((16_600..16_800).contains(&s.frame_time_usec()));
 }
 
+/// A DMA flag needs both its channel's enable and the master enable: no stale flag fires
+/// later when a program turns its channel's IRQ on (Breath of Fire III's movie player)
+#[test]
+fn dma_flag_needs_the_master_enable() {
+    let mut b = Bus::new(vec![]);
+    b.write32(0x1F80_10F0, 0x0800_0000);            // DPCR: channel 6
+    b.write32(0x1F80_10F4, 1 << 22);                // channel 6 enabled, master off
+    b.write32(0x1F80_10E0, 0x2000 + 0x3C);
+    b.write32(0x1F80_10E4, 16);
+    b.write32(0x1F80_10E8, 0x1100_0002);
+    assert_eq!(b.read32(0x1F80_10F4) & (1 << 30), 0, "no flag without the master enable");
+    b.write32(0x1F80_10F4, 0x0080_0000 | 1 << 22);  // master on
+    assert_eq!(b.i_stat & IRQ_DMA, 0, "no IRQ");
+    // a flag counts towards bit 31 even when its channel is turned off again
+    b.write32(0x1F80_10E8, 0x1100_0002);
+    assert_ne!(b.i_stat & IRQ_DMA, 0);
+    b.write32(0x1F80_10F4, 0x0080_0000);
+    assert_ne!(b.read32(0x1F80_10F4) >> 31, 0, "the flag still holds bit 31");
+}
+
 #[test]
 fn dma_ordering_table_and_gpu_list() {
     let mut b = Bus::new(vec![]);
@@ -121,7 +141,7 @@ fn dma_ordering_table_and_gpu_list() {
 #[test]
 fn pad_exchange() {
     let mut b = Bus::new(vec![]);
-    b.sio.buttons[0] = !(1 << 14);                  // Cross
+    b.sio.pads[0].buttons = !(1 << 14);                 // Cross
     b.write16(0x1F80_104A, 0x1003);                 // TX on, select, ACK IRQ
     let mut got = vec![];
     for tx in [0x01u8, 0x42, 0x00, 0x00, 0x00] {
@@ -715,4 +735,168 @@ fn spu_gauss_table_sums_to_unity() {
     let v = s.out[s.out.len() - 2];
     // 0x2000 * envelope 7FFF * vol 7FFE * main 7FFE, gauss 0.996
     assert!((v - 0.25 * 0.996).abs() < 0.01, "{v}");
+}
+
+// ---------------------------------------------------------------- memory cards
+
+use super::memcard::{self, MemCard};
+use super::sio::Sio;
+
+/// One SIO0 byte: the reply, and whether the device ACKed
+fn sio_byte(s: &mut Sio, b: u8) -> (u8, bool) {
+    s.write(0x1F80_1040, b as u32);
+    s.tick(10_000);
+    let r = s.read(0x1F80_1040) as u8;
+    let ack = s.irq;
+    s.irq = false;
+    s.write(0x1F80_104A, 0x1012);                   // acknowledge, keep selected + ACK IRQ
+    (r, ack)
+}
+
+fn sio_card() -> Sio {
+    let mut s = Sio::new();
+    s.cards[0] = Some(MemCard::new(&[]));
+    s.write(0x1F80_104A, 0x1002);                   // select port 1, ACK IRQ on
+    s
+}
+
+#[test]
+fn memcard_write_then_read_a_sector() {
+    let mut s = sio_card();
+    // write sector 0x123
+    let data: Vec<u8> = (0..128).map(|i| i as u8 ^ 0x5A).collect();
+    let chk = data.iter().fold(0x01 ^ 0x23, |a, b| a ^ b);
+    assert_eq!(sio_byte(&mut s, 0x81), (0xFF, true));
+    assert_eq!(sio_byte(&mut s, 0x57), (0x08, true), "FLAG: new card");
+    assert_eq!(sio_byte(&mut s, 0).0, 0x5A);
+    assert_eq!(sio_byte(&mut s, 0).0, 0x5D);
+    sio_byte(&mut s, 0x01);
+    sio_byte(&mut s, 0x23);
+    for &d in &data { sio_byte(&mut s, d); }
+    sio_byte(&mut s, chk);
+    assert_eq!(sio_byte(&mut s, 0).0, 0x5C);
+    assert_eq!(sio_byte(&mut s, 0).0, 0x5D);
+    assert_eq!(sio_byte(&mut s, 0), (0x47, false), "good, and the last byte");
+    assert!(s.cards[0].as_ref().unwrap().dirty);
+    // read it back
+    s.write(0x1F80_104A, 0x1000);                   // deselect
+    s.write(0x1F80_104A, 0x1002);
+    sio_byte(&mut s, 0x81);
+    assert_eq!(sio_byte(&mut s, 0x52).0, 0x00, "FLAG bit 3 cleared by the write");
+    for want in [0x5A, 0x5D] { assert_eq!(sio_byte(&mut s, 0).0, want); }
+    sio_byte(&mut s, 0x01);
+    sio_byte(&mut s, 0x23);
+    for want in [0x5C, 0x5D, 0x01, 0x23] { assert_eq!(sio_byte(&mut s, 0).0, want); }
+    let got: Vec<u8> = (0..128).map(|_| sio_byte(&mut s, 0).0).collect();
+    assert_eq!(got, data);
+    assert_eq!(sio_byte(&mut s, 0).0, chk);
+    assert_eq!(sio_byte(&mut s, 0), (0x47, false));
+}
+
+#[test]
+fn memcard_bad_checksum_and_id() {
+    let mut s = sio_card();
+    sio_byte(&mut s, 0x81);
+    sio_byte(&mut s, 0x57);
+    for _ in 0..4 { sio_byte(&mut s, 0); }          // 5A 5D, sector 0
+    for _ in 0..128 { sio_byte(&mut s, 0xFF); }
+    sio_byte(&mut s, 0x01);                         // wrong checksum (the right one is 00)
+    sio_byte(&mut s, 0);
+    sio_byte(&mut s, 0);
+    assert_eq!(sio_byte(&mut s, 0).0, 0x4E, "bad checksum");
+    assert_eq!(&s.cards[0].as_ref().unwrap().data[..2], b"MC", "sector 0 untouched");
+    s.write(0x1F80_104A, 0x1000);
+    s.write(0x1F80_104A, 0x1002);
+    sio_byte(&mut s, 0x81);
+    sio_byte(&mut s, 0x53);
+    let id: Vec<u8> = (0..8).map(|_| sio_byte(&mut s, 0).0).collect();
+    assert_eq!(id, vec![0x5A, 0x5D, 0x5C, 0x5D, 0x04, 0x00, 0x00, 0x80]);
+}
+
+#[test]
+fn memcard_formatted_and_summary() {
+    let d = memcard::formatted();
+    assert_eq!(d[0x7F], 0x0E, "header checksum");
+    assert_eq!(memcard::summary(&d), Some((15, vec![])));
+    let mut d2 = d.clone();
+    d2[128] = 0x51;
+    d2[128 + 0x0A..128 + 0x0A + 6].copy_from_slice(b"BASLUS");
+    assert_eq!(memcard::summary(&d2), Some((14, vec!["BASLUS".into()])));
+    assert_eq!(memcard::summary(&[0; 100]), None);
+    // no card in slot 2: 81 isn't answered
+    let mut s = Sio::new();
+    s.write(0x1F80_104A, 0x3002);
+    assert_eq!(sio_byte(&mut s, 0x81), (0xFF, false));
+}
+
+// ---------------------------------------------------------------- DualShock
+
+/// One whole pad transfer on port 1: the replies to `bytes` (address 01 first), stopping
+/// where the pad stops ACKing
+fn pad_xfer(s: &mut Sio, bytes: &[u8]) -> Vec<u8> {
+    s.write(0x1F80_104A, 0x1000);
+    s.write(0x1F80_104A, 0x1002);
+    let mut out = vec![];
+    for &b in bytes {
+        let (r, ack) = sio_byte(s, b);
+        out.push(r);
+        if !ack { break; }
+    }
+    out
+}
+
+#[test]
+fn dualshock_digital_then_analog_by_config() {
+    let mut s = Sio::new();
+    s.pads[0].buttons = !(1 << 14);                 // Cross
+    s.pads[0].axes = [0x80, 0x80, 0xFF, 0x00];      // left stick right + up
+    let r = pad_xfer(&mut s, &[1, 0x42, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(r, vec![0xFF, 0x41, 0x5A, 0xFF, 0xBF], "digital: L3/R3 read released");
+    // enter config, analog on + locked, exit
+    assert_eq!(pad_xfer(&mut s, &[1, 0x43, 0, 1, 0]).len(), 5);
+    let r = pad_xfer(&mut s, &[1, 0x44, 0, 1, 3, 0, 0, 0, 0]);
+    assert_eq!(&r[1..3], &[0xF3, 0x5A], "config mode ID");
+    let r = pad_xfer(&mut s, &[1, 0x45, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(r, vec![0xFF, 0xF3, 0x5A, 0x01, 0x02, 0x01, 0x02, 0x01, 0x00], "45h: LED on");
+    pad_xfer(&mut s, &[1, 0x43, 0, 0, 0, 0, 0, 0, 0]);
+    let r = pad_xfer(&mut s, &[1, 0x42, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(r, vec![0xFF, 0x73, 0x5A, 0xFF, 0xBF, 0x80, 0x80, 0xFF, 0x00], "analog: sticks after the buttons");
+    // locked: the Analog button does nothing
+    s.pads[0].analog_button();
+    assert!(s.pads[0].analog);
+}
+
+#[test]
+fn dualshock_rumble() {
+    let mut s = Sio::new();
+    // old method: 42h with 40h / 01h turns the small motor on
+    pad_xfer(&mut s, &[1, 0x42, 0, 0x40, 0x01]);
+    assert!(s.pads[0].small);
+    pad_xfer(&mut s, &[1, 0x42, 0, 0, 0]);
+    assert!(!s.pads[0].small);
+    // new method: map small to byte 4, large to byte 5
+    pad_xfer(&mut s, &[1, 0x43, 0, 1, 0]);
+    let r = pad_xfer(&mut s, &[1, 0x4D, 0, 0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF]);
+    assert_eq!(&r[3..], &[0xFF; 6], "4Dh returns the old map");
+    pad_xfer(&mut s, &[1, 0x43, 0, 0, 0, 0, 0, 0, 0]);
+    pad_xfer(&mut s, &[1, 0x42, 0, 0x01, 0xC0]);
+    assert!(s.pads[0].small);
+    assert_eq!(s.pads[0].large, 0xC0);
+    pad_xfer(&mut s, &[1, 0x42, 0, 0x00, 0x00]);
+    assert_eq!((s.pads[0].small, s.pads[0].large), (false, 0));
+    // the Analog button (not locked) stops the motors and switches mode
+    pad_xfer(&mut s, &[1, 0x42, 0, 0x01, 0xC0]);
+    s.pads[0].analog_button();
+    assert!(s.pads[0].analog);
+    assert_eq!((s.pads[0].small, s.pads[0].large), (false, 0));
+}
+
+#[test]
+fn digital_pad_has_no_config() {
+    let mut s = Sio::new();
+    s.pads[0].dualshock = false;
+    let r = pad_xfer(&mut s, &[1, 0x43, 0, 1, 0]);
+    assert_eq!(r[1], 0x41);
+    let r = pad_xfer(&mut s, &[1, 0x42, 0, 0, 0, 0, 0]);
+    assert_eq!(r.len(), 5, "still a digital pad");
 }

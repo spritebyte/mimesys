@@ -16,13 +16,21 @@ pub mod gpu;
 pub mod mdec;
 pub mod sio;
 pub mod spu;
+pub mod memcard;
+pub mod pad;
+
+/// The debug log (option "ps1_debug"): CD commands, DMA / MDEC / CD state every 5 seconds,
+/// the instructions before a crash
+static DEBUG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 pub mod timers;
 
 #[cfg(test)]
 mod tests;
 
 use crate::common::cpu::r3000::R3000;
-use crate::common::input as pad;
+use crate::common::input;
 use crate::common::system::{DisplayInfo, System};
 use bus::{Bus, BIOS_SIZE, IRQ_VBLANK};
 use crate::common::disc::Disc;
@@ -84,12 +92,14 @@ pub struct Ps1System {
     line_frac: u64,
     owed: i64,
     /// bring-up: hits per watched pc, and Breath of Fire III's last VLC output address
-    pc_hits: std::collections::HashMap<u32, u32>,
-    vlc_last: u32,
+    /// the extra input word (R2, L3, R3, Analog), the Analog button held, rumble allowed
+    ext: u32,
+    analog_held: bool,
+    rumble_on: bool,
+    pad_kind: i64,
     /// tests: how often each pc runs
     prof: Option<std::collections::HashMap<u32, u64>>,
     last_istat: u32,
-    trace_in: u32,
     tty_line: String,
     current_frame: u64,
     save_filename: String,
@@ -122,10 +132,11 @@ impl Ps1System {
             line_frac: 0,
             owed: 0,
             prof: None,
+            ext: 0,
+            analog_held: false,
+            rumble_on: true,
+            pad_kind: 0,
             last_istat: 0,
-            trace_in: 0,
-            pc_hits: Default::default(),
-            vlc_last: 0,
             tty_line: String::new(),
             current_frame: 0,
             save_filename: stem,
@@ -181,27 +192,12 @@ impl Ps1System {
         while self.owed > 0 {
             self.hooks();
             self.cpu.set_irq(self.bus.irq_line());
-            self.bus.cpu_pc = self.cpu.pc;
             if let Some(p) = &mut self.prof {
                 *p.entry(self.cpu.pc).or_default() += 1;
                 // interrupts raised: counted under FFFF00nn
                 let new = self.bus.i_stat & !self.last_istat;
                 self.last_istat = self.bus.i_stat;
                 for b in 0..11 { if new & (1 << b) != 0 { *p.entry(0xFFFF_0000 + b).or_default() += 1; } }
-            }
-            if self.cpu.pc >> 16 == 0x801D { self.pc_watch(); }
-            // bring-up: 250 instructions after the first CD request while streaming,
-            // print the trace (what the game does with the sector)
-            if self.bus.cdrom.want_trace {
-                self.bus.cdrom.want_trace = false;
-                self.trace_in = 250;
-            }
-            if self.trace_in > 0 {
-                self.trace_in -= 1;
-                if self.trace_in == 0 {
-                    self.cpu.dump_trace("250 instructions after the first CD request while streaming", 256);
-                    self.cpu.trace_dumped = false;
-                }
             }
             let c = self.cpu.step(&mut self.bus) + std::mem::take(&mut self.bus.wait);
             self.owed -= c as i64;
@@ -213,28 +209,6 @@ impl Ps1System {
         }
         if batch > 0 { self.bus.tick(batch); }
         for c in std::mem::take(&mut self.bus.tty) { self.tty(c); }
-    }
-
-    /// Bring-up: Breath of Fire III's movie player (its VLC decoder runs over its own code).
-    fn pc_watch(&mut self) {
-        let pc = self.cpu.pc;
-        let r = self.cpu.regs;
-        // Breath of Fire III: a new run of the VLC decoder's store (its output address jumps)
-        if pc == 0x801D_77E0 {
-            let a1 = r[5];
-            if a1 != self.vlc_last.wrapping_add(2) {
-                let n = self.pc_hits.entry(pc).or_default();
-                if *n < 8 {
-                    *n += 1;
-                    println!("PS1 watch VLC run: out {a1:08X} in {:08X} a2 {:08X} a3 {:08X} ra {:08X} s0 {:08X} s1 {:08X} sp {:08X}", r[4], r[6], r[7], r[31], r[16], r[17], r[29]);
-                    if *n == 1 {
-                        self.cpu.dump_trace("first VLC run", 128);
-                        self.cpu.trace_dumped = false;
-                    }
-                }
-            }
-            self.vlc_last = a1;
-        }
     }
 
     fn run_line(&mut self, line: u32) {
@@ -266,13 +240,13 @@ impl System for Ps1System {
             self.run_line(line);
         }
         if self.bus.gpu.mode & 0x20 != 0 { self.bus.gpu.field = !self.bus.gpu.field; }
-        // bring-up log: where the CPU is every 5 seconds, for the first 2 minutes
-        if self.current_frame % 300 == 299 && self.current_frame < 7200 {
+        // debug log (option "ps1_debug"): where the CPU is and what the chips do, every 5 s
+        if debug() && self.current_frame % 300 == 299 {
             let c = &self.cpu;
-            println!("PS1: frame {} pc {:08X} ra {:08X} sr {:08X} I_STAT {:03X} I_MASK {:03X} GPU mode {:02X}",
+            crate::dlog!("PS1: frame {} pc {:08X} ra {:08X} sr {:08X} I_STAT {:03X} I_MASK {:03X} GPU mode {:02X}",
                 self.current_frame + 1, c.pc, c.regs[31], c.cop0[12], self.bus.i_stat, self.bus.i_mask, self.bus.gpu.mode);
             let b = &self.bus;
-            println!("PS1:   DICR {:08X} DPCR {:08X} CHCR0 {:08X} CHCR1 {:08X} CHCR2 {:08X} CHCR3 {:08X} | MDEC {} | CD {} | GPU disp {},{}{}",
+            crate::dlog!("PS1:   DICR {:08X} DPCR {:08X} CHCR0 {:08X} CHCR1 {:08X} CHCR2 {:08X} CHCR3 {:08X} | MDEC {} | CD {} | GPU disp {},{}{}",
                 b.dicr, b.dpcr, b.dma[0].chcr, b.dma[1].chcr, b.dma[2].chcr, b.dma[3].chcr, b.mdec.debug(), b.cdrom.debug(),
                 b.gpu.disp_x, b.gpu.disp_y, if b.gpu.display_off { " off" } else { "" });
         }
@@ -304,17 +278,51 @@ impl System for Ps1System {
     /// R1, Triangle, Circle, Cross, Square. B = Cross, A = Circle, X = Square, Y = Triangle,
     /// L / R = L1 / R1, Z = L2 (R2 has no button yet).
     fn set_input(&mut self, input: u32) {
-        let pads = pad::pads(input, 0);
+        let ext = self.ext;
+        let pads = input::pads(input, ext);
+        // the Analog button toggles on its press
+        let analog_btn = ext & input::EXT_P1_ANALOG != 0;
+        if analog_btn && !self.analog_held { self.bus.sio.pads[0].analog_button(); }
+        self.analog_held = analog_btn;
         for k in 0..2 {
             let p = &pads[k];
             let mut v = 0u16;
+            let (r2, l3, r3) = if k == 0 {
+                (ext & input::EXT_P1_R2 != 0, ext & input::EXT_P1_L3 != 0, ext & input::EXT_P1_R3 != 0)
+            } else {
+                (false, false, false)
+            };
+            let mut dir = [p.up, p.right, p.down, p.left];
+            // in analog mode the left stick isn't the d-pad: drop the d-pad presses the
+            // frontend made from the stick (the stick leaning the same way)
+            let sio = &self.bus.sio.pads[k];
+            if sio.analog {
+                let [_, _, lx, ly] = sio.axes;
+                let lean = |v: u8, neg: bool| if neg { v < 0x80 - 20 } else { v > 0x80 + 20 };
+                let leaning = [lean(ly, true), lean(lx, false), lean(ly, false), lean(lx, true)];
+                for d in 0..4 { if leaning[d] { dir[d] = false; } }
+            }
             let bits = [
-                (p.coin, 0), (p.start, 3), (p.up, 4), (p.right, 5), (p.down, 6), (p.left, 7),
-                (p.z, 8), (p.l, 10), (p.r, 11), (p.y, 12), (p.a, 13), (p.b, 14), (p.x, 15),
+                (p.coin, 0), (l3, 1), (r3, 2), (p.start, 3), (dir[0], 4), (dir[1], 5), (dir[2], 6), (dir[3], 7),
+                (p.z, 8), (r2, 9), (p.l, 10), (p.r, 11), (p.y, 12), (p.a, 13), (p.b, 14), (p.x, 15),
             ];
             for (on, b) in bits { if on { v |= 1 << b; } }
-            self.bus.sio.buttons[k] = !v;
+            self.bus.sio.pads[k].buttons = !v;
         }
+    }
+
+    fn set_extra_input(&mut self, ext: u32) { self.ext = ext; }
+
+    fn set_analog(&mut self, port: usize, sticks: [u8; 4]) {
+        if let Some(p) = self.bus.sio.pads.get_mut(port) {
+            let [lx, ly, rx, ry] = sticks;
+            p.axes = [rx, ry, lx, ly];
+        }
+    }
+
+    fn rumble(&self, port: usize) -> (u8, u8) {
+        if !self.rumble_on { return (0, 0); }
+        self.bus.sio.pads.get(port).map_or((0, 0), |p| (if p.small { 0xFF } else { 0 }, p.large))
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -330,8 +338,13 @@ impl System for Ps1System {
         }
         bus.bios = std::mem::take(&mut self.bus.bios);
         bus.cdrom.disc = self.bus.cdrom.disc.take();
-        bus.sio.buttons = self.bus.sio.buttons;
+        for k in 0..2 {
+            bus.sio.pads[k].buttons = self.bus.sio.pads[k].buttons;
+            bus.sio.pads[k].axes = self.bus.sio.pads[k].axes;
+            bus.sio.pads[k].dualshock = self.bus.sio.pads[k].dualshock;
+        }
         bus.sio.connected = self.bus.sio.connected;
+        bus.sio.cards = std::mem::take(&mut self.bus.sio.cards);
         self.cpu = cpu;
         self.bus = bus;
         self.line_frac = lf;
@@ -354,6 +367,44 @@ impl System for Ps1System {
     }
 
     fn has_battery(&self) -> bool { false }
+
+    fn set_option(&mut self, key: &str, value: i64) {
+        match key {
+            "debug_report" => {
+                DEBUG.store(value != 0, std::sync::atomic::Ordering::Relaxed);
+                self.cpu.set_trace(value != 0);
+            }
+            // 0 DualShock (powers up digital), 1 DualShock in analog mode, 2 digital pad
+            // applied once per setting, so re-applying options keeps the game's mode
+            "ps1_pad" => if value != self.pad_kind {
+                self.pad_kind = value;
+                for p in self.bus.sio.pads.iter_mut() {
+                    p.dualshock = value != 2;
+                    p.analog = value == 1;
+                }
+            },
+            "ps1_rumble" => self.rumble_on = value != 0,
+            _ => {}
+        }
+    }
+
+    fn memory_card(&self) -> Option<Vec<u8>> {
+        self.bus.sio.cards[0].as_ref().map(|c| c.data.clone())
+    }
+
+    fn insert_memory_card(&mut self, data: &[u8], _swap: bool) -> bool {
+        // a card put in (or swapped) reads FLAG bit 3: the game rereads its directory
+        let c = memcard::MemCard::new(data);
+        if let Some((free, names)) = memcard::summary(&c.data) {
+            println!("PS1: memory card 1 put in: {free} blocks free, saves: {names:?}");
+        }
+        self.bus.sio.cards[0] = Some(c);
+        true
+    }
+
+    fn memory_card_dirty(&mut self) -> bool {
+        self.bus.sio.cards[0].as_mut().is_some_and(|c| std::mem::take(&mut c.dirty))
+    }
     fn save_battery_path(&self) -> &str { &self.save_path }
     fn save_filename(&self) -> &str { &self.save_filename }
     fn save_state_path(&self) -> &str { &self.save_path }

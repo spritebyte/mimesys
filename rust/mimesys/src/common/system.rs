@@ -54,6 +54,12 @@ pub trait System: Send {
     /// Pointer for light guns: position in framebuffer pixels (-1 = off screen) and mouse
     /// buttons (bit 0 left, bit 1 right). Systems without one ignore it.
     fn set_pointer(&mut self, _x: i32, _y: i32, _buttons: u32) {}
+    /// Analog sticks of controller `port` (0 = player 1): left X / Y, right X / Y, each
+    /// 0-255 with 128 centred (Y: 0 = up). Systems without them ignore it.
+    fn set_analog(&mut self, _port: usize, _sticks: [u8; 4]) {}
+    /// Rumble of controller `port`: (small / high-frequency motor, large / low-frequency
+    /// motor), 0-255 each.
+    fn rumble(&self, _port: usize) -> (u8, u8) { (0, 0) }
     fn link_partner(&mut self) -> Option<&mut dyn System> { None }
     fn attach_cable(&mut self, _cable: Option<Box<dyn crate::gameboy::gb_link::LinkCable>>) -> bool { false }
     /// Plug a network link cable in (None = unplug). Systems with a link port that isn't

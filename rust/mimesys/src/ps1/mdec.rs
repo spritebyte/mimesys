@@ -163,9 +163,9 @@ impl Mdec {
     /// A word to 1F801820: a command, or its parameters
     pub fn write(&mut self, v: u32) {
         if self.cmd == Cmd::Idle {
-            if self.logged < 300 {
+            if super::debug() && self.logged < 300 {
                 self.logged += 1;
-                println!("PS1 MDEC: command {v:08X} (output {} words waiting)", self.out.len());
+                crate::dlog!("PS1 MDEC: command {v:08X} (output {} words waiting)", self.out.len());
             }
             self.word = v;
             self.remaining = v & 0xFFFF;

@@ -19,6 +19,7 @@ const ALL_ACTIONS := [
 	"c1_up", "c1_down", "c1_left", "c1_right", "c1_b", "c1_a", "c1_select", "c1_start",
 	"coin", "c2_start", "c1_x", "c2_x", "c1_l1", "c1_r1",
 	"c1_y", "c1_z", "c1_rs_up", "c1_rs_down", "c1_rs_left", "c1_rs_right",
+	"c1_r2", "c1_l3", "c1_r3", "c1_analog",
 	"c2_up", "c2_down", "c2_left", "c2_right", "c2_b", "c2_a", "c2_select",
 	"c1_0", "c1_1", "c1_2", "c1_3", "c1_4", "c1_5", "c1_6", "c1_7", "c1_8", "c1_9",
 	"c1_star", "c1_hash",
@@ -99,6 +100,10 @@ const OPTION_DEFAULTS := {
 	"dc_record_sound": false,  # Dreamcast: write the first minute of sound to dc_sound.wav
 	"dc_card": "Card 1",     # Dreamcast: the memory card in controller 1's slot (user://GD_EMU/DC/VMU/<name>.bin)
 	"dc_dump_frame": false,  # Dreamcast: save the next 3D frame to dc_frame.bin (bug reports)
+	"ps1_pad": "dualshock",  # PlayStation: "dualshock" (starts digital), "analog" (DualShock in analog mode), "digital"
+	"ps1_rumble": true,      # PlayStation: DualShock rumble on the controller
+	"ps1_debug": false,      # PlayStation: debug log (CD commands, chip state every 5 s, trace before a crash)
+	"ps1_card": "Card 1",    # PlayStation: the memory card in slot 1 (user://GD_EMU/PS1/MemoryCards/<name>.mcd)
 }
 ## Game Boy boot ROMs: "bios" (above) is the Game Boy Color one, this is the original's.
 const GB_DMG_BIOS_DEFAULT := "user://BIOS/dmg_boot.bin"
@@ -146,7 +151,8 @@ func _init() -> void:
 			["c2_y", "P2 X [Y]"], ["c2_l1", "P2 Y [L]"], ["c2_r1", "P2 Z [R]"], ["c2_z", "P2 Mode [Z]"]]},
 		"ps1": {"name": "PlayStation", "actions": dpad + [
 			["c1_b", "Cross [B]"], ["c1_a", "Circle [A]"], ["c1_x", "Square [X]"], ["c1_y", "Triangle [Y]"],
-			["c1_l1", "L1 [L]"], ["c1_r1", "R1 [R]"], ["c1_z", "L2 [Z]"], ["c1_start", "Start"], ["c1_select", "Select"]] + dpad2 + [
+			["c1_l1", "L1 [L]"], ["c1_r1", "R1 [R]"], ["c1_z", "L2 [Z]"], ["c1_r2", "R2"], ["c1_start", "Start"], ["c1_select", "Select"],
+			["c1_l3", "L3 (left stick press)"], ["c1_r3", "R3 (right stick press)"], ["c1_analog", "Analog button (DualShock mode)"]] + dpad2 + [
 			["c2_b", "P2 Cross [B]"], ["c2_a", "P2 Circle [A]"], ["c2_x", "P2 Square [X]"], ["c2_y", "P2 Triangle [Y]"],
 			["c2_l1", "P2 L1 [L]"], ["c2_r1", "P2 R1 [R]"], ["c2_z", "P2 L2 [Z]"], ["c2_start", "P2 Start"], ["c2_select", "P2 Select"]]},
 		"dc": {"name": "Sega Dreamcast", "actions": dpad + [

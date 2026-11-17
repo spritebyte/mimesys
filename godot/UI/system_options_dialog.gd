@@ -223,6 +223,28 @@ func _rebuild() -> void:
 		tb.toggled.connect(func(on): _put("a5200_trackball", on))
 		_row("Controller", tb)
 
+	# PlayStation: the controller, rumble, the debug log (debug_ps1.log)
+	if sys == "ps1":
+		var ppad := OptionButton.new()
+		var kinds := [["dualshock", "DualShock (starts digital; the game or the Analog button switches)"],
+			["analog", "DualShock, starting in analog mode (for games that never switch it on)"],
+			["digital", "Digital pad (for the odd game that dislikes the DualShock)"]]
+		for k in kinds:
+			ppad.add_item(k[1])
+		ppad.select(max(0, kinds.map(func(k): return k[0]).find(str(_opt("ps1_pad")))))
+		ppad.item_selected.connect(func(i): _put("ps1_pad", kinds[i][0]))
+		_row("Controller (next load)", ppad)
+		var rum := CheckBox.new()
+		rum.text = "Rumble on the controller (DualShock games)"
+		rum.button_pressed = _opt("ps1_rumble")
+		rum.toggled.connect(func(on): _put("ps1_rumble", on))
+		_row("Rumble", rum)
+		var pdbg := CheckBox.new()
+		pdbg.text = "Debug log: CD commands, chip state every 5 s, the instructions before a crash (debug_ps1.log; next load)"
+		pdbg.button_pressed = _opt("ps1_debug")
+		pdbg.toggled.connect(func(on): _put("ps1_debug", on))
+		_row("Debug", pdbg)
+
 	# Genesis: console region (PAL = 50 Hz) and pad type; both apply when a game loads
 	if sys == "md":
 		var mdbg := CheckBox.new()

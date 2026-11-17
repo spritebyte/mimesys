@@ -63,19 +63,6 @@ pub struct Bus {
     /// characters from the debug UART (expansion 2)
     #[serde(skip)]
     pub tty: Vec<u8>,
-    #[serde(skip)]
-    dma_logged: u32,
-    #[serde(skip)]
-    big_logged: u32,
-    #[serde(skip)]
-    cd_dma_logged: u32,
-    #[serde(skip)]
-    wipe_logged: bool,
-    /// the CPU's pc, for the logs
-    #[serde(skip)]
-    pub cpu_pc: u32,
-    #[serde(skip)]
-    dma_routine: u32,
 }
 
 /// The BIOS's region letter, from "System ROM Version 2.2 12/04/95 A" near its end
@@ -112,12 +99,6 @@ impl Bus {
             mdec: Mdec::new(),
             wait: 0,
             tty: Vec::new(),
-            dma_logged: 0,
-            big_logged: 0,
-            cd_dma_logged: 0,
-            wipe_logged: false,
-            cpu_pc: 0,
-            dma_routine: 0,
         }
     }
 
@@ -277,12 +258,13 @@ impl Bus {
 
     // ------------------------------------------------------------------ DMA
 
+    /// DICR bit 31: bus error, or master enable and any flag (the per-channel enables
+    /// only gate the setting of a flag, PSX-SPX); its rising edge raises IRQ3
     fn update_dicr(&mut self) {
         let old = self.dicr & 0x8000_0000;
         let flags = (self.dicr >> 24) & 0x7F;
-        let en = (self.dicr >> 16) & 0x7F;
         let master = self.dicr & 0x0080_0000 != 0;
-        let on = self.dicr & 0x8000 != 0 || (master && flags & en != 0);
+        let on = self.dicr & 0x8000 != 0 || (master && flags != 0);
         self.dicr = (self.dicr & 0x7FFF_FFFF) | (on as u32) << 31;
         if on && old == 0 { self.i_stat |= IRQ_DMA; }
     }
@@ -294,13 +276,6 @@ impl Bus {
         let sync = (ch.chcr >> 9) & 3;
         let trigger = ch.chcr & 0x1000_0000 != 0;
         if !(enabled && busy && (sync != 0 || trigger)) { return; }
-        // (whole-sector CD reads are frequent: only the first 20 of those)
-        let routine = n == 3 && ch.bcr == 0x0001_0200;
-        if matches!(n, 0 | 1 | 3) && self.dma_logged < 300 && !(routine && self.dma_routine >= 20) {
-            self.dma_logged += 1;
-            if routine { self.dma_routine += 1; }
-            println!("PS1 DMA{n}: madr {:06X} bcr {:08X} chcr {:08X} (MDEC output {} words)", ch.madr, ch.bcr, ch.chcr, self.mdec.out_words());
-        }
         // MDEC out waits until the decoder has that much output
         if n == 1 && self.mdec.out_words() < Self::dma_words(&ch) { return; }
         match sync {
@@ -313,7 +288,8 @@ impl Bus {
             // the block count runs out
             c.bcr &= 0xFFFF;
         }
-        if self.dicr & (1 << (16 + n)) != 0 {
+        // a flag is set only with both its channel's enable and the master enable on
+        if self.dicr & (1 << (16 + n)) != 0 && self.dicr & 0x0080_0000 != 0 {
             self.dicr |= 1 << (24 + n);
         }
         self.update_dicr();
@@ -334,15 +310,6 @@ impl Bus {
         let ch = self.dma[n];
         let words = Self::dma_words(&ch) as u32;
         let from_ram = ch.chcr & 1 != 0;
-        // bring-up: big transfers into RAM, and CD reads while streaming
-        if !from_ram && n != 6 && words >= 0x400 && self.big_logged < 100 {
-            self.big_logged += 1;
-            println!("PS1 DMA{n} -> RAM: {words} words to {:06X} (bcr {:08X} chcr {:08X}) at pc {:08X}", ch.madr, ch.bcr, ch.chcr, self.cpu_pc);
-        }
-        if n == 3 && self.cd_dma_logged < 120 && self.cdrom.streaming() {
-            self.cd_dma_logged += 1;
-            println!("PS1 DMA3 stream: {words} words to {:06X}, FIFO {} at pc {:08X}", ch.madr, self.cdrom.fifo_state(), self.cpu_pc);
-        }
         let step: i32 = if ch.chcr & 2 != 0 { -4 } else { 4 };
         let mut addr = ch.madr & 0x1F_FFFC;
         for k in 0..words {
@@ -364,11 +331,6 @@ impl Bus {
                     4 => self.spu.dma_read(),
                     _ => 0,
                 };
-                // bring-up: Breath of Fire III's wiped dispatcher
-                if a == 0x1C_F2F8 && w == 0 && !self.wipe_logged {
-                    self.wipe_logged = true;
-                    println!("PS1 DMA{n} wrote zero to 1CF2F8 (madr {:06X} bcr {:08X} chcr {:08X}) at pc {:08X}", ch.madr, ch.bcr, ch.chcr, self.cpu_pc);
-                }
                 self.ram[a..a + 4].copy_from_slice(&w.to_le_bytes());
             }
             addr = (addr as i32).wrapping_add(step) as u32;

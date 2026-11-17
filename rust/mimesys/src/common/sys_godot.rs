@@ -440,12 +440,40 @@ impl EmuSystem {
     /// A Dreamcast card file: [free blocks, save names...] (empty: not a card image).
     #[func]
     fn memory_card_info(data: PackedByteArray) -> PackedStringArray {
+        Self::card_info(GString::from("dc"), data)
+    }
+
+    /// A card file of `system` ("dc", "ps1"): [free blocks, save names...] (empty: not a
+    /// card image).
+    #[func]
+    fn card_info(system: GString, data: PackedByteArray) -> PackedStringArray {
         let mut out = PackedStringArray::new();
-        if let Some((free, files)) = crate::dreamcast::vmu::Vmu::summary(data.as_slice()) {
+        let summary = if system.to_string() == "ps1" {
+            crate::ps1::memcard::summary(data.as_slice())
+        } else {
+            crate::dreamcast::vmu::Vmu::summary(data.as_slice())
+        };
+        if let Some((free, files)) = summary {
             out.push(&GString::from(free.to_string().as_str()));
             for f in files { out.push(&GString::from(f.as_str())); }
         }
         out
+    }
+
+    /// Controller `port`'s analog sticks: left X / Y, right X / Y, 0-255 (128 centred)
+    #[func]
+    fn set_analog(&mut self, port: i64, lx: i64, ly: i64, rx: i64, ry: i64) {
+        if let Some(sys) = &mut self.system {
+            let c = |v: i64| v.clamp(0, 255) as u8;
+            sys.set_analog(port as usize, [c(lx), c(ly), c(rx), c(ry)]);
+        }
+    }
+
+    /// Controller `port`'s rumble: (small motor, large motor), 0-255 each
+    #[func]
+    fn get_rumble(&self, port: i64) -> Vector2i {
+        let (s, l) = self.system.as_ref().map_or((0, 0), |sys| sys.rumble(port as usize));
+        Vector2i::new(s as i32, l as i32)
     }
 
     /// Light gun pointer (framebuffer pixels, -1 = off screen; buttons bit 0 left, bit 1 right)

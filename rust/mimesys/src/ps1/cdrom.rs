@@ -109,15 +109,6 @@ pub struct Cdrom {
     pub irq: bool,
     #[serde(skip)]
     logged: u32,
-    #[serde(skip)]
-    sector_logged: u32,
-    #[serde(skip)]
-    cpu_bytes: u32,
-    #[serde(skip)]
-    req_logged: u32,
-    /// bring-up: ask for the CPU's instruction trace
-    #[serde(skip)]
-    pub want_trace: bool,
     /// CD audio for the SPU (44100 Hz stereo)
     #[serde(skip)]
     pub audio: std::collections::VecDeque<(i16, i16)>,
@@ -150,17 +141,6 @@ impl Cdrom {
     pub fn new(disc: Option<Disc>, region: u8) -> Self {
         let stat = if disc.is_some() { STAT_MOTOR } else { STAT_SHELL_OPEN };
         Self { int_enable: 0x1F, stat, disc, region, sector: vec![0; SECTOR], atv: [0x80, 0, 0x80, 0], atv_next: [0x80, 0, 0x80, 0], ..Default::default() }
-    }
-
-    /// Bring-up: reading with XA mode on
-    pub fn streaming(&self) -> bool { self.mode & 0x40 != 0 && self.drive == Drive::Reading }
-
-    /// Bring-up: data FIFO position / size and the current sector's LBA
-    pub fn fifo_state(&self) -> String {
-        let m = (self.sector[12] >> 4) as u32 * 10 + (self.sector[12] & 15) as u32;
-        let s = (self.sector[13] >> 4) as u32 * 10 + (self.sector[13] & 15) as u32;
-        let f = (self.sector[14] >> 4) as u32 * 10 + (self.sector[14] & 15) as u32;
-        format!("{}/{} sector {} first {:02X?}", self.data_pos, self.data.len(), ((m * 60 + s) * 75 + f).wrapping_sub(150) as i32, &self.data[self.data_pos.min(self.data.len())..(self.data_pos + 4).min(self.data.len())])
     }
 
     pub fn debug(&self) -> String {
@@ -202,7 +182,7 @@ impl Cdrom {
                 if self.resp_pos < self.response.len() { self.resp_pos += 1; }
                 v
             }
-            2 => { self.cpu_bytes += 1; self.data_byte() }
+            2 => self.data_byte(),
             _ => match self.index & 1 {
                 0 => self.int_enable | 0xE0,
                 _ => self.int_flag | 0xE0,
@@ -227,13 +207,6 @@ impl Cdrom {
             (1, 0) => self.command(v),
             (2, 0) => if self.params.len() < 16 { self.params.push(v) },
             (3, 0) => {
-                // bring-up: how a streaming game takes its data (CPU or DMA, all of it?)
-                if self.streaming() && self.req_logged < 60 {
-                    self.req_logged += 1;
-                    if self.req_logged == 1 { self.want_trace = true; }
-                    println!("PS1 CD: request {v:02X} with FIFO at {}/{}, {} bytes read by the CPU since the last request", self.data_pos, self.data.len(), self.cpu_bytes);
-                }
-                self.cpu_bytes = 0;
                 // request: bit 7 loads the sector into the data FIFO, clear empties it
                 if v & 0x80 != 0 {
                     if self.data_pos >= self.data.len() { self.load_data(); }
@@ -285,10 +258,10 @@ impl Cdrom {
     }
 
     fn command(&mut self, c: u8) {
-        // GetStat polls are left out: some games send hundreds
-        if self.logged < 400 && c != 0x01 {
+        // debug log; GetStat polls are left out: some games send hundreds
+        if super::debug() && self.logged < 400 && c != 0x01 {
             self.logged += 1;
-            println!("PS1 CD: command {c:02X} params {:02X?}", self.params);
+            crate::dlog!("PS1 CD: command {c:02X} params {:02X?}", self.params);
         }
         let p = std::mem::take(&mut self.params);
         let have_disc = self.disc.is_some();
@@ -532,14 +505,6 @@ impl Cdrom {
             return;
         }
         let submode = raw[18];
-        // bring-up: the sectors of streamed reads (XA mode on), with their subheader and
-        // first data word
-        if self.mode & 0x40 != 0 && self.sector_logged < 150 {
-            self.sector_logged += 1;
-            let w = u32::from_le_bytes([raw[24], raw[25], raw[26], raw[27]]);
-            println!("PS1 CD: sector {} mode {:02X} sub {:02X} {:02X} {:02X} {:02X} data {w:08X} (buffered {})",
-                self.lba - 1, raw[15], raw[16], raw[17], raw[18], raw[19], self.pending.len());
-        }
         // XA audio sectors (audio + real time) go to the ADPCM decoder, not the CPU; with
         // the filter on, only the selected file / channel's are played
         if self.mode & 0x40 != 0 && raw[15] == 2 && submode & 0x44 == 0x44 {

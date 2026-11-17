@@ -49,6 +49,11 @@ pub const EXT_P3_START: u32 = 1 << 24;
 pub const EXT_P3_COIN: u32  = 1 << 25;
 pub const EXT_P4_START: u32 = 1 << 26;
 pub const EXT_P4_COIN: u32  = 1 << 27;
+/// Player 1's PlayStation extras: R2, the stick buttons L3 / R3, the Analog button.
+pub const EXT_P1_R2: u32     = 1 << 28;
+pub const EXT_P1_L3: u32     = 1 << 29;
+pub const EXT_P1_R3: u32     = 1 << 30;
+pub const EXT_P1_ANALOG: u32 = 1 << 31;
 
 /// One player's controls, from the main mask and the extra word.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

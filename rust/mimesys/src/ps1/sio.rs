@@ -1,10 +1,13 @@
 //! SIO0 (1F801040-1F80104F): the controller and memory-card port, from Nocash PSX-SPX.
 //!
-//! Digital pads only so far (ID 5A41): the host sends 01 42 00 00 00 and gets FF 41 5A,
-//! then the two button bytes (active low). Every byte but the last is answered with an ACK
-//! pulse, which raises IRQ 7 when JOY_CTRL bit 12 allows. Memory cards (address 81) aren't
-//! there yet: nothing answers them.
+//! - Controllers: address 01, then the pad's own commands (`pad.rs`: digital pad or
+//!   DualShock).
+//! - Memory cards: address 81, then the card's own commands (`memcard.rs`).
+//! - Every byte but the last is answered with an ACK pulse, which raises IRQ 7 when
+//!   JOY_CTRL bit 12 allows.
 
+use super::memcard::MemCard;
+use super::pad::Pad;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -19,21 +22,23 @@ pub struct Sio {
     ack_wait: i32,
     pending_rx: u8,
     pending_ack: bool,
-    /// position in the current pad exchange (0 = waiting for 01)
+    /// position in the current exchange (0 = waiting for the address)
     step: u8,
-    /// which device the exchange is with: 0 none, 1 pad
+    /// which device the exchange is with: 0 none, 1 pad, 2 memory card
     device: u8,
-    /// buttons, active low (bit 0 Select ... bit 15 Square), for ports 1 and 2
-    #[serde(skip)]
-    pub buttons: [u16; 2],
+    /// the controllers in ports 1 and 2 (their modes are saved, their inputs aren't)
+    pub pads: [Pad; 2],
     #[serde(skip)]
     pub connected: [bool; 2],
+    /// the memory cards in slots 1 and 2 (kept out of save states: they live in their files)
+    #[serde(skip)]
+    pub cards: [Option<MemCard>; 2],
     pub irq: bool,
 }
 
 impl Sio {
     pub fn new() -> Self {
-        Self { baud: 0x88, buttons: [0xFFFF; 2], connected: [true, false], ..Default::default() }
+        Self { baud: 0x88, connected: [true, false], ..Default::default() }
     }
 
     pub fn read(&mut self, a: u32) -> u32 {
@@ -84,20 +89,31 @@ impl Sio {
     /// The device's answer to one byte, and whether it ACKs
     fn exchange(&mut self, b: u8) -> (u8, bool) {
         let p = self.port();
+        if self.device == 2 {
+            let Some(card) = self.cards[p].as_mut() else { return (0xFF, false) };
+            let (r, more) = card.exchange(b);
+            if !more { self.device = 0; self.step = 0; }
+            return (r, more);
+        }
+        if self.device == 1 {
+            let (r, more) = self.pads[p].exchange(b);
+            if !more { self.device = 0; self.step = 0; }
+            return (r, more);
+        }
         match self.step {
             0 => {
                 if b == 0x01 && self.connected[p] {
                     self.device = 1;
-                    self.step = 1;
+                    self.pads[p].select();
+                    (0xFF, true)
+                } else if b == 0x81 && self.cards[p].is_some() {
+                    self.device = 2;
+                    self.cards[p].as_mut().unwrap().select();
                     (0xFF, true)
                 } else {
                     (0xFF, false)
                 }
             }
-            1 => { self.step = 2; (0x41, b == 0x42) }
-            2 => { self.step = 3; (0x5A, true) }
-            3 => { self.step = 4; (self.buttons[p] as u8, true) }
-            4 => { self.step = 0; self.device = 0; ((self.buttons[p] >> 8) as u8, false) }
             _ => { self.step = 0; (0xFF, false) }
         }
     }

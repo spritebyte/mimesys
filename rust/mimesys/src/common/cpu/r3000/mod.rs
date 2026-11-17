@@ -62,6 +62,9 @@ const SR_CU2: u32 = 1 << 30;
 /// KUSEG (x4), KSEG0, KSEG1, KSEG2 (x2)
 const SEG_MASK: [u32; 8] = [0x1FFF_FFFF, 0x1FFF_FFFF, 0x1FFF_FFFF, 0x1FFF_FFFF, 0x1FFF_FFFF, 0x1FFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF];
 
+/// debugging: instructions kept for `dump_trace`
+const TRACE_LEN: usize = 256;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct R3000 {
     pub regs: [u32; 32],
@@ -87,18 +90,14 @@ pub struct R3000 {
     /// when the multiplier / divider finishes
     muldiv_done: u64,
     pub cycles: u64,
-    /// bring-up: the last 64 instructions (pc, instruction, sp, ra), dumped once on the
-    /// first exception that isn't an interrupt or syscall / break
+    /// debugging (`set_trace`): the last instructions (pc, instruction, sp, ra), dumped
+    /// once on the first exception that isn't an interrupt or syscall / break
     #[serde(skip)]
     trace: Vec<(u32, u32, u32, u32)>,
     #[serde(skip)]
     trace_pos: usize,
     #[serde(skip)]
     pub trace_dumped: bool,
-    #[serde(skip)]
-    watch_logged: u32,
-    #[serde(skip)]
-    zero_run: u32,
 }
 
 impl Default for R3000 {
@@ -129,11 +128,9 @@ impl R3000 {
             irq_line: false,
             muldiv_done: 0,
             cycles: 0,
-            trace: vec![(0, 0, 0, 0); 256],
+            trace: Vec::new(),
             trace_pos: 0,
             trace_dumped: false,
-            watch_logged: 0,
-            zero_run: 0,
         };
         c.reset();
         c
@@ -213,34 +210,21 @@ impl R3000 {
         self.branch_pending = false;
     }
 
-    /// Bring-up: print the last `n` instructions, once per run
-    pub fn dump_trace(&mut self, why: &str, n: usize) {
-        if self.trace_dumped || self.trace.len() != 256 { return; }
-        self.trace_dumped = true;
-        println!("R3000: {why}; the last {n} instructions (pc instr sp ra):");
-        let n = n.min(256);
-        for k in 256 - n..256 {
-            let (pc, i, sp, ra) = self.trace[(self.trace_pos + k) % 256];
-            println!("  {pc:08X} {i:08X} sp {sp:08X} ra {ra:08X}");
-        }
+    /// Debugging: keep the last instructions (for `dump_trace`), or stop
+    pub fn set_trace(&mut self, on: bool) {
+        self.trace = if on { vec![(0, 0, 0, 0); TRACE_LEN] } else { Vec::new() };
+        self.trace_pos = 0;
     }
 
-    /// Bring-up: Breath of Fire III's movie player gets its own code wiped (RAM
-    /// 0x10000-0x1D35ED ends up zero, its interrupt dispatcher at 801CF2F8 included).
-    /// Log who stores zero there, with the arguments, and the instructions leading up.
-    fn watch_store(&mut self, va: u32, zero: bool) {
-        if !zero || self.watch_logged >= 4 || va >= 0xC000_0000 || (va & 0x1FFF_FFFF) >= 0x80_0000 { return; }
-        if (va & 0x1F_FFFC) != 0x1C_F2F8 { return; }
-        self.watch_logged += 1;
-        let r = &self.regs;
-        println!(
-            "R3000 watch: zero stored to {va:08X} at pc {:08X} ra {:08X} sp {:08X} a0 {:08X} a1 {:08X} a2 {:08X} a3 {:08X} v0 {:08X} v1 {:08X} t0 {:08X} t1 {:08X} s0 {:08X} s1 {:08X}",
-            self.cur_pc, r[31], r[29], r[4], r[5], r[6], r[7], r[2], r[3], r[8], r[9], r[16], r[17]
-        );
-        if self.watch_logged == 1 {
-            self.dump_trace("wipe reached 801CF2F8", 96);
-            // let the NOP-slide catcher still report afterwards
-            self.trace_dumped = false;
+    /// Debugging: print the last `n` instructions, once per run
+    pub fn dump_trace(&mut self, why: &str, n: usize) {
+        if self.trace_dumped || self.trace.len() != TRACE_LEN { return; }
+        self.trace_dumped = true;
+        crate::dlog!("R3000: {why}; the last {n} instructions (pc instr sp ra):");
+        let n = n.min(TRACE_LEN);
+        for k in TRACE_LEN - n..TRACE_LEN {
+            let (pc, i, sp, ra) = self.trace[(self.trace_pos + k) % TRACE_LEN];
+            crate::dlog!("  {pc:08X} {i:08X} sp {sp:08X} ra {ra:08X}");
         }
     }
 
@@ -295,7 +279,6 @@ impl R3000 {
 
     fn store32(&mut self, bus: &mut dyn R3000Bus, va: u32, v: u32) -> Res<()> {
         self.check(va, 3, EXC_ADES)?;
-        self.watch_store(va, v == 0);
         if va >= 0xC000_0000 {
             if va == 0xFFFE_0130 { self.cache_ctrl = v; }
             return Ok(());
@@ -312,7 +295,6 @@ impl R3000 {
 
     fn store16(&mut self, bus: &mut dyn R3000Bus, va: u32, v: u16) -> Res<()> {
         self.check(va, 1, EXC_ADES)?;
-        self.watch_store(va, v == 0);
         if va >= 0xC000_0000 || self.cop0[SR] & SR_ISC != 0 { return Ok(()); }
         if Self::scratch_hit(va) {
             let o = (va & 0x3FE) as usize;
@@ -325,7 +307,6 @@ impl R3000 {
 
     fn store8(&mut self, bus: &mut dyn R3000Bus, va: u32, v: u8) -> Res<()> {
         self.check(va, 0, EXC_ADES)?;
-        self.watch_store(va, v == 0);
         if va >= 0xC000_0000 || self.cop0[SR] & SR_ISC != 0 { return Ok(()); }
         if Self::scratch_hit(va) {
             self.scratch[(va & 0x3FF) as usize] = v;
@@ -364,16 +345,9 @@ impl R3000 {
             return 1;
         }
         let instr = if Self::scratch_hit(pc) { 0 } else { bus.fetch32(pc & SEG_MASK[(pc >> 29) as usize], pc >> 29 != 5) };
-        if self.trace.len() == 256 {
+        if self.trace.len() == TRACE_LEN {
             self.trace[self.trace_pos] = (pc, instr, self.regs[29], self.regs[31]);
-            self.trace_pos = (self.trace_pos + 1) % 256;
-            // running through zeroed RAM (16 NOPs in a row in a game's code area): how we got here
-            if instr == 0 && (pc & 0x1F_FFFF) >= 0x1_0000 && pc >> 29 == 4 {
-                self.zero_run += 1;
-                if self.zero_run == 16 { self.dump_trace(&format!("16 zero instructions in a row at {pc:08X}"), 256); }
-            } else {
-                self.zero_run = 0;
-            }
+            self.trace_pos = (self.trace_pos + 1) % TRACE_LEN;
         }
         self.pc = self.next_pc;
         self.next_pc = self.pc.wrapping_add(4);

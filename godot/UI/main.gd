@@ -176,7 +176,7 @@ func init_menus():
 	emu_menu.add_separator()
 	emu_menu.add_item("Cheats...   (Ctrl+H)", EmuMenuID.CHEATS)
 	emu_menu.add_item("Switch Disk Side (Famicom Disk System)   (F4)", EmuMenuID.DISK_SIDE)
-	emu_menu.add_item("Memory Cards (Dreamcast)...", EmuMenuID.MEMORY_CARDS)
+	emu_menu.add_item("Memory Cards (Dreamcast, PlayStation)...", EmuMenuID.MEMORY_CARDS)
 
 	emu_menu.id_pressed.connect(_on_emu_menu)
 
@@ -512,7 +512,7 @@ func _apply_display_options() -> void:
 		emu_system.set_option("vs_ppu", int(AppSettings.get_option(sys, "vs_ppu")))
 	# GBA cartridge clock (Pokemon etc.): local time = UTC + this many minutes
 	emu_system.set_option("rtc_utc_offset", Time.get_time_zone_from_system().bias)
-	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug", "md": "md_debug", "nes": "nes_debug", "a7800": "a7800_debug", "arcade": "arcade_debug", "dc": "dc_debug"}
+	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug", "md": "md_debug", "nes": "nes_debug", "a7800": "a7800_debug", "arcade": "arcade_debug", "dc": "dc_debug", "ps1": "ps1_debug"}
 	var dbg_key: String = dbg_keys.get(sys, "")
 	var dbg_on: bool = dbg_key != "" and AppSettings.get_option(sys, dbg_key)
 	var speed_log: bool = sys == "dc" and AppSettings.get_option(sys, "dc_speed_log")
@@ -520,6 +520,10 @@ func _apply_display_options() -> void:
 	emu_system.set_debug_log(ProjectSettings.globalize_path("user://debug_%s.log" % sys) if dbg_on or speed_log else "")
 	emu_system.set_data_dir(ProjectSettings.globalize_path("user://"))
 	emu_system.set_option("debug_report", 1 if dbg_on else 0)
+	_analog_on = sys == "ps1"
+	if sys == "ps1":
+		emu_system.set_option("ps1_pad", ["dualshock", "analog", "digital"].find(str(AppSettings.get_option(sys, "ps1_pad"))))
+		emu_system.set_option("ps1_rumble", 1 if AppSettings.get_option(sys, "ps1_rumble") else 0)
 	if sys == "dc":
 		emu_system.set_option("speed_log", 1 if speed_log else 0)
 		emu_system.set_option("dc_cpu_half", int(round(float(str(AppSettings.get_option(sys, "dc_cpu_ratio"))) * 2.0)))
@@ -682,6 +686,8 @@ const EXT_BITS := {
 	"c4_up": 16, "c4_down": 17, "c4_left": 18, "c4_right": 19,
 	"c4_b": 20, "c4_a": 21, "c4_x": 22, "c4_y": 23,
 	"c3_start": 24, "c3_coin": 25, "c4_start": 26, "c4_coin": 27,
+	# PlayStation player 1: R2, L3, R3, the DualShock's Analog button
+	"c1_r2": 28, "c1_l3": 29, "c1_r3": 30, "c1_analog": 31,
 }
 
 func _get_extra_input() -> int:
@@ -714,6 +720,40 @@ func _get_serialized_input() -> int:
 	mask |= (key_value << 8)
 	return mask
 
+## Analog sticks and rumble (PlayStation DualShock): players 1 / 2 are the first two
+## connected joypads.
+var _analog_on := false
+var _rumble_last: Array = [Vector2i.ZERO, Vector2i.ZERO]
+
+func _get_sticks() -> Array:
+	var out := []
+	var pads := Input.get_connected_joypads()
+	for p in 2:
+		if p >= pads.size():
+			break
+		var d: int = pads[p]
+		var v := func(axis): return clampi(int(round((Input.get_joy_axis(d, axis) + 1.0) * 127.5)), 0, 255)
+		out.append([v.call(JOY_AXIS_LEFT_X), v.call(JOY_AXIS_LEFT_Y), v.call(JOY_AXIS_RIGHT_X), v.call(JOY_AXIS_RIGHT_Y)])
+	return out
+
+func _apply_rumble(rumble: Array) -> void:
+	var pads := Input.get_connected_joypads()
+	for p in rumble.size():
+		var r: Vector2i = rumble[p]
+		if r == _rumble_last[p] or p >= pads.size():
+			continue
+		_rumble_last[p] = r
+		if r == Vector2i.ZERO:
+			Input.stop_joy_vibration(pads[p])
+		else:
+			# weak = the small (fast) motor, strong = the large one; 0 s = until stopped
+			Input.start_joy_vibration(pads[p], r.x / 255.0, r.y / 255.0, 0)
+
+func _stop_rumble() -> void:
+	for d in Input.get_connected_joypads():
+		Input.stop_joy_vibration(d)
+	_rumble_last = [Vector2i.ZERO, Vector2i.ZERO]
+
 const FRAME_TIME_USEC := 16743
 ## Frame length for the running game: the core's own when it has one (Genesis PAL = 50 Hz)
 var _frame_time_usec := FRAME_TIME_USEC
@@ -724,6 +764,8 @@ func _thread_loop():
 		if exit_thread:
 			break
 		if is_paused or not emu_system:
+			if _rumble_last != [Vector2i.ZERO, Vector2i.ZERO]:
+				_stop_rumble()
 			OS.delay_msec(10)
 			next_frame_time = Time.get_ticks_usec()
 			continue
@@ -731,13 +773,23 @@ func _thread_loop():
 		var input_mask = _get_serialized_input()
 		var extra_input := _get_extra_input()
 		var pointer := _pointer
+		var sticks := _get_sticks() if _analog_on else []
 		emu_mutex.lock()
 		if _zapper_on:
 			emu_system.set_pointer(pointer.x, pointer.y, pointer.z)
+		for p in sticks.size():
+			var a: Array = sticks[p]
+			emu_system.set_analog(p, a[0], a[1], a[2], a[3])
 		emu_system.set_extra_input(extra_input)
 		emu_system.run_slice(input_mask)
 		emu_system.update_audio_buffer();
+		var rumble: Array = []
+		if _analog_on:
+			for p in 2:
+				rumble.append(emu_system.get_rumble(p))
 		emu_mutex.unlock()
+		if not rumble.is_empty():
+			_apply_rumble(rumble)
 		_virtual_frame_count += 1
 		next_frame_time += _frame_time_usec
 		var now := Time.get_ticks_usec()
@@ -763,6 +815,7 @@ func stop_emulation():
 	if cpu_thread.is_started():
 		cpu_thread.wait_to_finish()
 	exit_thread = false
+	_stop_rumble()
 
 func _on_rom_dialog_file_selected(path: String) -> void:
 	execute_load(path, "")
