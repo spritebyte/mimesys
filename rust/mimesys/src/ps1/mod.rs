@@ -1,7 +1,7 @@
-//! Sony PlayStation. The plan is in the project's `ps1_plan.md`; this is stages 1-3: the
-//! R3000A (`common/cpu/r3000`), the memory map, interrupts, DMA and timers (`bus.rs`), the
-//! GPU (`gpu.rs`), digital pads (`sio.rs`), and enough of the CD-ROM and SPU for the BIOS to
-//! start with no disc (`cdrom.rs`, `spu.rs`).
+//! Sony PlayStation. The plan is in the project's `ps1_plan.md`; this is stages 1-7: the
+//! R3000A and GTE (`common/cpu/r3000`), the memory map, interrupts, DMA and timers
+//! (`bus.rs`), the GPU (`gpu.rs`), digital pads (`sio.rs`), the CD-ROM with XA-ADPCM and
+//! CD-DA (`cdrom.rs`), the SPU (`spu.rs`, 44100 Hz stereo out) and the MDEC (`mdec.rs`).
 //!
 //! - Video timing (NTSC): 263 lines of 3413 GPU clocks (53.69 MHz), about 59.83 Hz; PAL
 //!   314 lines of 3406 (53.22 MHz). Vblank runs from the display's vertical range end to its start.
@@ -28,7 +28,7 @@ use bus::{Bus, BIOS_SIZE, IRQ_VBLANK};
 use crate::common::disc::Disc;
 use serde::{Deserialize, Serialize};
 
-const STATE_VERSION: u32 = 4;
+const STATE_VERSION: u32 = 6;
 /// tick the devices in batches of about this many cycles
 const BATCH: u32 = 32;
 const CPU_HZ: u64 = 33_868_800;
@@ -83,6 +83,13 @@ pub struct Ps1System {
     frame_h: usize,
     line_frac: u64,
     owed: i64,
+    /// bring-up: hits per watched pc, and Breath of Fire III's last VLC output address
+    pc_hits: std::collections::HashMap<u32, u32>,
+    vlc_last: u32,
+    /// tests: how often each pc runs
+    prof: Option<std::collections::HashMap<u32, u64>>,
+    last_istat: u32,
+    trace_in: u32,
     tty_line: String,
     current_frame: u64,
     save_filename: String,
@@ -114,6 +121,11 @@ impl Ps1System {
             frame_h: 240,
             line_frac: 0,
             owed: 0,
+            prof: None,
+            last_istat: 0,
+            trace_in: 0,
+            pc_hits: Default::default(),
+            vlc_last: 0,
             tty_line: String::new(),
             current_frame: 0,
             save_filename: stem,
@@ -170,6 +182,27 @@ impl Ps1System {
             self.hooks();
             self.cpu.set_irq(self.bus.irq_line());
             self.bus.cpu_pc = self.cpu.pc;
+            if let Some(p) = &mut self.prof {
+                *p.entry(self.cpu.pc).or_default() += 1;
+                // interrupts raised: counted under FFFF00nn
+                let new = self.bus.i_stat & !self.last_istat;
+                self.last_istat = self.bus.i_stat;
+                for b in 0..11 { if new & (1 << b) != 0 { *p.entry(0xFFFF_0000 + b).or_default() += 1; } }
+            }
+            if self.cpu.pc >> 16 == 0x801D { self.pc_watch(); }
+            // bring-up: 250 instructions after the first CD request while streaming,
+            // print the trace (what the game does with the sector)
+            if self.bus.cdrom.want_trace {
+                self.bus.cdrom.want_trace = false;
+                self.trace_in = 250;
+            }
+            if self.trace_in > 0 {
+                self.trace_in -= 1;
+                if self.trace_in == 0 {
+                    self.cpu.dump_trace("250 instructions after the first CD request while streaming", 256);
+                    self.cpu.trace_dumped = false;
+                }
+            }
             let c = self.cpu.step(&mut self.bus) + std::mem::take(&mut self.bus.wait);
             self.owed -= c as i64;
             batch += c;
@@ -180,6 +213,28 @@ impl Ps1System {
         }
         if batch > 0 { self.bus.tick(batch); }
         for c in std::mem::take(&mut self.bus.tty) { self.tty(c); }
+    }
+
+    /// Bring-up: Breath of Fire III's movie player (its VLC decoder runs over its own code).
+    fn pc_watch(&mut self) {
+        let pc = self.cpu.pc;
+        let r = self.cpu.regs;
+        // Breath of Fire III: a new run of the VLC decoder's store (its output address jumps)
+        if pc == 0x801D_77E0 {
+            let a1 = r[5];
+            if a1 != self.vlc_last.wrapping_add(2) {
+                let n = self.pc_hits.entry(pc).or_default();
+                if *n < 8 {
+                    *n += 1;
+                    println!("PS1 watch VLC run: out {a1:08X} in {:08X} a2 {:08X} a3 {:08X} ra {:08X} s0 {:08X} s1 {:08X} sp {:08X}", r[4], r[6], r[7], r[31], r[16], r[17], r[29]);
+                    if *n == 1 {
+                        self.cpu.dump_trace("first VLC run", 128);
+                        self.cpu.trace_dumped = false;
+                    }
+                }
+            }
+            self.vlc_last = a1;
+        }
     }
 
     fn run_line(&mut self, line: u32) {
@@ -216,6 +271,10 @@ impl System for Ps1System {
             let c = &self.cpu;
             println!("PS1: frame {} pc {:08X} ra {:08X} sr {:08X} I_STAT {:03X} I_MASK {:03X} GPU mode {:02X}",
                 self.current_frame + 1, c.pc, c.regs[31], c.cop0[12], self.bus.i_stat, self.bus.i_mask, self.bus.gpu.mode);
+            let b = &self.bus;
+            println!("PS1:   DICR {:08X} DPCR {:08X} CHCR0 {:08X} CHCR1 {:08X} CHCR2 {:08X} CHCR3 {:08X} | MDEC {} | CD {} | GPU disp {},{}{}",
+                b.dicr, b.dpcr, b.dma[0].chcr, b.dma[1].chcr, b.dma[2].chcr, b.dma[3].chcr, b.mdec.debug(), b.cdrom.debug(),
+                b.gpu.disp_x, b.gpu.disp_y, if b.gpu.display_off { " off" } else { "" });
         }
         let (w, h) = self.bus.gpu.render(&mut self.frame);
         self.frame_w = w;
@@ -238,7 +297,7 @@ impl System for Ps1System {
         }
     }
 
-    fn drain_audio(&mut self) -> Vec<f32> { Vec::new() }
+    fn drain_audio(&mut self) -> Vec<f32> { std::mem::take(&mut self.bus.spu.out) }
     fn sample_rate(&self) -> u32 { 44_100 }
 
     /// The digital pad, active low: Select, -, -, Start, Up, Right, Down, Left, L2, R2, L1,

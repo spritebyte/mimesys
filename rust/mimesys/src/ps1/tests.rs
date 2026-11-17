@@ -294,6 +294,19 @@ fn dump_state() {
     for (n, t) in s.bus.timers.t.iter().enumerate() { eprintln!("t{n} count {:X} mode {:X} target {:X}", t.count, t.mode, t.target); }
     eprintln!("MDEC {}", s.bus.mdec.debug());
     eprintln!("CD {}", s.bus.cdrom.debug());
+    if let Ok(n) = std::env::var("PS1_PROF") {
+        let frames: u32 = n.parse().unwrap();
+        s.prof = Some(Default::default());
+        for _ in 0..frames { for line in 0..s.lines() { s.run_line(line); } }
+        let p = s.prof.take().unwrap();
+        let mut v: Vec<_> = p.into_iter().collect();
+        v.sort();
+        let out: String = v.iter().map(|(pc, n)| format!("{pc:08X} {n}\n")).collect();
+        std::fs::write(format!("{path}.prof"), out).unwrap();
+        std::fs::write(format!("{path}.ram2"), &s.bus.ram).unwrap();
+        eprintln!("after: pc {:08X}", s.cpu.pc);
+        return;
+    }
     if std::env::var("PS1_RUN").is_err() { return; }
     // run on: how often is the CPU outside an exception handler?
     for f in 0..20 {
@@ -329,7 +342,11 @@ fn make_disc(dir_name: &str) -> std::path::PathBuf {
             s[25..30].copy_from_slice(b"CD001");
             s[32..43].copy_from_slice(b"PLAYSTATION");
         }
-        if lba == 20 { s[18] = 0x64; s[22] = 0x64; }   // submode: real-time audio
+        if lba == 20 {
+            s[18] = 0x64; s[22] = 0x64;                 // submode: real-time audio, mono 37800 Hz
+            // XA-ADPCM: headers 0 (shift 0, filter 0), every nibble 1 (= 1000h)
+            for p in 0..18 { s[24 + p * 128 + 16..24 + p * 128 + 128].fill(0x11); }
+        }
         bin.extend_from_slice(&s);
     }
     std::fs::write(dir.join("game.bin"), &bin).unwrap();
@@ -458,6 +475,11 @@ fn cdrom_skips_xa_audio_sectors() {
         for _ in 0..1000 { b.tick(1000); if b.read8(0x1F80_1803) & 7 != 0 { break; } }
     }
     assert_eq!(got, vec![19, 21], "sector 20 went to the XA decoder");
+    // ... and came out of the SPU's CD input (captured at SPU RAM 0-3FF): 1000h x zigzag
+    for _ in 0..40 { b.tick(1000); }
+    let cap: Vec<i16> = b.spu.ram[..0x400].chunks_exact(2).map(|w| i16::from_le_bytes([w[0], w[1]])).collect();
+    let max = *cap.iter().max().unwrap();
+    assert!((0xD00..=0x1000).contains(&max), "XA audio level {max:X}");
 }
 
 #[test]
@@ -510,7 +532,12 @@ fn mdec_decodes_a_flat_macroblock_through_dma() {
     b.write32(0x1F80_1080, 0x6000);
     b.write32(0x1F80_1084, words.len() as u32);
     b.write32(0x1F80_1088, 0x0100_0201);
-    assert_eq!(b.read32(0x1F80_1098) & 0x0100_0000, 0, "MDEC out ran once the data was decoded");
+    // the chip takes 6 x 448 cycles for the macroblock
+    b.tick(2000);
+    assert_ne!(b.read32(0x1F80_1098) & 0x0100_0000, 0, "still decoding");
+    assert_ne!(b.read32(0x1F80_1824) & (1 << 31), 0, "nothing readable yet");
+    b.tick(1000);
+    assert_eq!(b.read32(0x1F80_1098) & 0x0100_0000, 0, "MDEC out ran once the macroblock was done");
     let px = b.read16(0x5000);
     assert_eq!(px & 31, 21, "168 >> 3: {px:04X}");
     assert_eq!(px, 21 | 21 << 5 | 21 << 10);
@@ -569,4 +596,123 @@ fn narrow_writes_to_32_bit_registers() {
     b.write16(0x1F80_10A2, 0x0012);
     b.write16(0x1F80_10A0, 0x3456);
     assert_eq!(b.read32(0x1F80_10A0), 0x12_3456);
+}
+
+// ---------------------------------------------------------------- SPU
+
+use super::spu::Spu;
+use std::collections::VecDeque;
+
+const SPU: u32 = 0x1F80_1C00;
+
+/// A square-ish wave: one looping block (start + end + repeat) of nibbles 7,7,9,9...
+fn spu_with_loop(flags: u8) -> Spu {
+    let mut s = Spu::new();
+    let blk = 0x1000usize;
+    s.ram[blk] = 0x00;                                  // shift 0, filter 0
+    s.ram[blk + 1] = flags;
+    for i in 2..16 { s.ram[blk + i] = if i % 2 == 0 { 0x77 } else { 0x99 }; }
+    s.write16(SPU + 0x1AA, 0xC000);                     // on, unmuted
+    s.write16(SPU + 0x180, 0x3FFF);                     // main volume
+    s.write16(SPU + 0x182, 0x3FFF);
+    s.write16(SPU + 0x000, 0x3FFF);                     // voice 0 volume
+    s.write16(SPU + 0x002, 0x3FFF);
+    s.write16(SPU + 0x004, 0x1000);                     // 44100 Hz
+    s.write16(SPU + 0x006, (blk / 8) as u16);
+    s.write16(SPU + 0x008, 0x000F);                     // attack: linear, fastest; sustain level max
+    s.write16(SPU + 0x00A, 0x0000);
+    s
+}
+
+fn spu_run(s: &mut Spu, samples: u32) {
+    let mut cd = VecDeque::new();
+    s.tick(768 * samples, &mut cd);
+}
+
+#[test]
+fn spu_voice_plays_and_loops() {
+    let mut s = spu_with_loop(0x07);                    // loop start, end, repeat
+    s.write16(SPU + 0x188, 1);                          // key on
+    spu_run(&mut s, 2000);
+    assert!(s.read16(SPU + 0x00C) > 0x7000, "attack reached the top: {:04X}", s.read16(SPU + 0x00C));
+    let peak = s.out.iter().fold(0f32, |m, v| m.max(v.abs()));
+    assert!(peak > 0.1, "audible: {peak}");
+    assert_eq!(s.read16(SPU + 0x19C) & 1, 1, "ENDX: the end flag was reached");
+    assert_eq!(s.read16(SPU + 0x00E), 0x1000 / 8, "repeat address from the loop-start flag");
+    // the loop keeps playing
+    s.out.clear();
+    spu_run(&mut s, 1000);
+    assert!(s.out.iter().any(|v| v.abs() > 0.1), "still playing");
+    // key off: release to silence
+    s.write16(SPU + 0x00A, 0x0000);                     // release: linear, fastest
+    s.write16(SPU + 0x18C, 1);
+    spu_run(&mut s, 2000);
+    assert_eq!(s.read16(SPU + 0x00C), 0, "released");
+}
+
+#[test]
+fn spu_one_shot_ends_silent() {
+    let mut s = spu_with_loop(0x01);                    // end without repeat
+    s.write16(SPU + 0x188, 1);
+    spu_run(&mut s, 200);
+    assert_eq!(s.read16(SPU + 0x19C) & 1, 1);
+    assert_eq!(s.read16(SPU + 0x00C), 0, "end + mute: envelope at 0");
+    // key on again clears ENDX
+    s.write16(SPU + 0x188, 1);
+    assert_eq!(s.read16(SPU + 0x19C) & 1, 0);
+}
+
+#[test]
+fn spu_irq_when_a_voice_reads_the_irq_address() {
+    let mut s = spu_with_loop(0x07);
+    s.write16(SPU + 0x1A4, 0x1000 / 8);
+    s.write16(SPU + 0x1AA, 0xC040);                     // IRQ on
+    s.write16(SPU + 0x188, 1);
+    spu_run(&mut s, 10);
+    assert!(s.irq, "IRQ9 raised");
+    assert_ne!(s.read16(SPU + 0x1AE) & 0x40, 0, "STAT IRQ flag");
+    s.write16(SPU + 0x1AA, 0xC000);                     // acknowledge
+    assert_eq!(s.read16(SPU + 0x1AE) & 0x40, 0);
+}
+
+#[test]
+fn spu_transfer_and_status() {
+    let mut s = Spu::new();
+    s.write16(SPU + 0x1AA, 0x8010);                     // manual write
+    assert_eq!(s.read16(SPU + 0x1AE) & 0x3F, 0x10, "STAT follows the mode");
+    s.write16(SPU + 0x1A6, 0x200);                      // RAM 1000
+    s.write16(SPU + 0x1A8, 0xBEEF);
+    s.write16(SPU + 0x1A8, 0x1234);
+    assert_eq!(&s.ram[0x1000..0x1004], &[0xEF, 0xBE, 0x34, 0x12]);
+    assert_eq!(s.read16(SPU + 0x1A6), 0x200, "the register doesn't move");
+    s.write16(SPU + 0x1A6, 0x200);
+    assert_eq!(s.dma_read(), 0x1234_BEEF);
+}
+
+#[test]
+fn spu_mixes_cd_audio() {
+    let mut s = Spu::new();
+    s.write16(SPU + 0x1AA, 0xC001);                     // CD audio in
+    s.write16(SPU + 0x1B0, 0x7FFF);
+    s.write16(SPU + 0x1B2, 0x7FFF);
+    let mut cd: VecDeque<(i16, i16)> = (0..100).map(|_| (16000, -16000)).collect();
+    s.tick(768 * 100, &mut cd);
+    assert!(cd.is_empty(), "one CD frame per sample");
+    assert!(s.out[0] > 0.45 && s.out[1] < -0.45, "{} {}", s.out[0], s.out[1]);
+    // and it's captured to RAM 0 (left) / 400 (right)
+    assert_eq!(i16::from_le_bytes([s.ram[0], s.ram[1]]), 16000);
+}
+
+#[test]
+fn spu_gauss_table_sums_to_unity() {
+    // a constant input comes out (almost) unchanged: 7F80h / 8000h
+    let mut s = spu_with_loop(0x07);
+    let blk = 0x1000usize;
+    for i in 2..16 { s.ram[blk + i] = 0x22; }           // every sample 2 << 12
+    s.write16(SPU + 0x008, 0x000F);
+    s.write16(SPU + 0x188, 1);
+    spu_run(&mut s, 3000);
+    let v = s.out[s.out.len() - 2];
+    // 0x2000 * envelope 7FFF * vol 7FFE * main 7FFE, gauss 0.996
+    assert!((v - 0.25 * 0.996).abs() < 0.01, "{v}");
 }

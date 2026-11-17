@@ -94,7 +94,7 @@ pub struct R3000 {
     #[serde(skip)]
     trace_pos: usize,
     #[serde(skip)]
-    trace_dumped: bool,
+    pub trace_dumped: bool,
     #[serde(skip)]
     watch_logged: u32,
     #[serde(skip)]
@@ -214,7 +214,7 @@ impl R3000 {
     }
 
     /// Bring-up: print the last `n` instructions, once per run
-    fn dump_trace(&mut self, why: &str, n: usize) {
+    pub fn dump_trace(&mut self, why: &str, n: usize) {
         if self.trace_dumped || self.trace.len() != 256 { return; }
         self.trace_dumped = true;
         println!("R3000: {why}; the last {n} instructions (pc instr sp ra):");
@@ -222,6 +222,25 @@ impl R3000 {
         for k in 256 - n..256 {
             let (pc, i, sp, ra) = self.trace[(self.trace_pos + k) % 256];
             println!("  {pc:08X} {i:08X} sp {sp:08X} ra {ra:08X}");
+        }
+    }
+
+    /// Bring-up: Breath of Fire III's movie player gets its own code wiped (RAM
+    /// 0x10000-0x1D35ED ends up zero, its interrupt dispatcher at 801CF2F8 included).
+    /// Log who stores zero there, with the arguments, and the instructions leading up.
+    fn watch_store(&mut self, va: u32, zero: bool) {
+        if !zero || self.watch_logged >= 4 || va >= 0xC000_0000 || (va & 0x1FFF_FFFF) >= 0x80_0000 { return; }
+        if (va & 0x1F_FFFC) != 0x1C_F2F8 { return; }
+        self.watch_logged += 1;
+        let r = &self.regs;
+        println!(
+            "R3000 watch: zero stored to {va:08X} at pc {:08X} ra {:08X} sp {:08X} a0 {:08X} a1 {:08X} a2 {:08X} a3 {:08X} v0 {:08X} v1 {:08X} t0 {:08X} t1 {:08X} s0 {:08X} s1 {:08X}",
+            self.cur_pc, r[31], r[29], r[4], r[5], r[6], r[7], r[2], r[3], r[8], r[9], r[16], r[17]
+        );
+        if self.watch_logged == 1 {
+            self.dump_trace("wipe reached 801CF2F8", 96);
+            // let the NOP-slide catcher still report afterwards
+            self.trace_dumped = false;
         }
     }
 
@@ -276,12 +295,7 @@ impl R3000 {
 
     fn store32(&mut self, bus: &mut dyn R3000Bus, va: u32, v: u32) -> Res<()> {
         self.check(va, 3, EXC_ADES)?;
-        // bring-up: who stores the DPCR address (the value that ended up as a return
-        // address in Breath of Fire III)
-        if v == 0x1F80_10F0 && self.watch_logged < 40 && va < 0xC000_0000 && (va & 0x1F_FFFF) >= 0x1_0000 && (va & 0x1FFF_FFFF) < 0x80_0000 {
-            self.watch_logged += 1;
-            println!("R3000 watch: store 1F8010F0 to {va:08X} at pc {:08X} sp {:08X} ra {:08X} sr {:08X}", self.cur_pc, self.regs[29], self.regs[31], self.cop0[SR]);
-        }
+        self.watch_store(va, v == 0);
         if va >= 0xC000_0000 {
             if va == 0xFFFE_0130 { self.cache_ctrl = v; }
             return Ok(());
@@ -298,6 +312,7 @@ impl R3000 {
 
     fn store16(&mut self, bus: &mut dyn R3000Bus, va: u32, v: u16) -> Res<()> {
         self.check(va, 1, EXC_ADES)?;
+        self.watch_store(va, v == 0);
         if va >= 0xC000_0000 || self.cop0[SR] & SR_ISC != 0 { return Ok(()); }
         if Self::scratch_hit(va) {
             let o = (va & 0x3FE) as usize;
@@ -310,6 +325,7 @@ impl R3000 {
 
     fn store8(&mut self, bus: &mut dyn R3000Bus, va: u32, v: u8) -> Res<()> {
         self.check(va, 0, EXC_ADES)?;
+        self.watch_store(va, v == 0);
         if va >= 0xC000_0000 || self.cop0[SR] & SR_ISC != 0 { return Ok(()); }
         if Self::scratch_hit(va) {
             self.scratch[(va & 0x3FF) as usize] = v;

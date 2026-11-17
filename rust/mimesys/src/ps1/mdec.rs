@@ -10,8 +10,11 @@
 //!   two-pass 8x8 IDCT with the uploaded scale table. Colour macroblocks are Cr, Cb, Y1-Y4
 //!   (16x16 pixels); monochrome ones a single Y block (8x8).
 //! - Input arrives through DMA channel 0 (or the CPU), output leaves through DMA channel 1
-//!   (or reads of 1F801820). Decoding happens as soon as a macroblock's data is in; the
-//!   output stays queued until it is read. Channel 1 waits until enough output is there.
+//!   (or reads of 1F801820). A macroblock is decoded as soon as its data is in, but its
+//!   output only becomes readable after the time the real chip takes (BLOCK_CYCLES per
+//!   8x8 block): movie players start the next frame's work while the MDEC is busy, and
+//!   instant output finishes the frame before they are ready for it (Xenogears).
+//!   Channel 1 waits until enough output is readable.
 //! - Status (1F801824 read): 31 output empty, 29 busy, 28 / 27 DMA in / out request,
 //!   23-26 the command's format bits, 16-18 current block, 0-15 parameters left - 1.
 
@@ -28,6 +31,9 @@ fn zagzig() -> [usize; 64] {
     for (i, &v) in ZIGZAG.iter().enumerate() { z[v] = i; }
     z
 }
+
+/// CPU cycles to decode one 8x8 block (about 12,000 colour macroblocks a second)
+const BLOCK_CYCLES: u32 = 448;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 enum Cmd {
@@ -49,6 +55,11 @@ pub struct Mdec {
     input: Vec<u16>,
     params: Vec<u32>,
     out: VecDeque<u32>,
+    /// words of `out` that are readable
+    avail: usize,
+    /// decoded macroblocks still "in the chip": (cycles, words)
+    busy: VecDeque<(u32, u32)>,
+    budget: u32,
     quant_y: Vec<u8>,
     quant_c: Vec<u8>,
     scale: Vec<i16>,
@@ -71,6 +82,9 @@ impl Mdec {
             input: Vec::new(),
             params: Vec::new(),
             out: VecDeque::new(),
+            avail: 0,
+            busy: VecDeque::new(),
+            budget: 0,
             quant_y: vec![0; 64],
             quant_c: vec![0; 64],
             scale: vec![0; 64],
@@ -81,10 +95,10 @@ impl Mdec {
 
     pub fn status(&self) -> u32 {
         let mut s = 0;
-        if self.out.is_empty() { s |= 1 << 31; }
+        if self.avail == 0 { s |= 1 << 31; }
         if self.cmd != Cmd::Idle || !self.out.is_empty() { s |= 1 << 29; }
         if self.ctrl & (1 << 30) != 0 && self.cmd != Cmd::Idle { s |= 1 << 28; }
-        if self.ctrl & (1 << 29) != 0 && !self.out.is_empty() { s |= 1 << 27; }
+        if self.ctrl & (1 << 29) != 0 && self.avail != 0 { s |= 1 << 27; }
         s |= ((self.word >> 25) & 0xF) << 23;
         s |= (self.block & 7) << 16;
         s |= self.remaining.wrapping_sub(1) & 0xFFFF;
@@ -98,6 +112,9 @@ impl Mdec {
             self.input.clear();
             self.params.clear();
             self.out.clear();
+            self.avail = 0;
+            self.busy.clear();
+            self.budget = 0;
             self.word = 0;
             self.block = 4;
         }
@@ -105,13 +122,43 @@ impl Mdec {
     }
 
     pub fn debug(&self) -> String {
-        format!("word {:08X} remaining {} input {} halfwords (first {:04X?}) out {} words status {:08X}",
-            self.word, self.remaining, self.input.len(), &self.input[..self.input.len().min(8)], self.out.len(), self.status())
+        format!("word {:08X} remaining {} input {} halfwords (first {:04X?}) out {} words ({} readable, {} macroblocks in the chip) status {:08X}",
+            self.word, self.remaining, self.input.len(), &self.input[..self.input.len().min(8)], self.out.len(), self.avail, self.busy.len(), self.status())
     }
 
-    pub fn read(&mut self) -> u32 { self.out.pop_front().unwrap_or(0) }
+    pub fn read(&mut self) -> u32 {
+        // a CPU read waits for the chip: let the next macroblock out now
+        if self.avail == 0 {
+            if let Some((_, w)) = self.busy.pop_front() { self.avail += w as usize; }
+            self.budget = 0;
+        }
+        self.avail = self.avail.saturating_sub(1);
+        self.out.pop_front().unwrap_or(0)
+    }
 
-    pub fn out_words(&self) -> usize { self.out.len() }
+    /// Readable output words
+    pub fn out_words(&self) -> usize { self.avail }
+
+    /// Time passes: decoded macroblocks become readable. True when some did.
+    pub fn tick(&mut self, cycles: u32) -> bool {
+        if self.busy.is_empty() { self.budget = 0; return false; }
+        self.budget = self.budget.saturating_add(cycles);
+        let mut released = false;
+        while let Some(&(cost, w)) = self.busy.front() {
+            if self.budget < cost { break; }
+            self.budget -= cost;
+            self.avail += w as usize;
+            self.busy.pop_front();
+            released = true;
+        }
+        if self.busy.is_empty() { self.budget = 0; }
+        released
+    }
+
+    fn queue_output(&mut self, before: usize, blocks: u32) {
+        let w = (self.out.len() - before) as u32;
+        self.busy.push_back((blocks * BLOCK_CYCLES, w));
+    }
 
     /// A word to 1F801820: a command, or its parameters
     pub fn write(&mut self, v: u32) {
@@ -262,6 +309,12 @@ impl Mdec {
     }
 
     fn emit_color(&mut self, b: &[[i32; 64]; 6]) {
+        let before = self.out.len();
+        self.emit_color_words(b);
+        self.queue_output(before, 6);
+    }
+
+    fn emit_color_words(&mut self, b: &[[i32; 64]; 6]) {
         let (cr, cb) = (&b[0], &b[1]);
         let depth = (self.word >> 27) & 3;
         let signed = self.word & (1 << 26) != 0;
@@ -300,6 +353,12 @@ impl Mdec {
     }
 
     fn emit_mono(&mut self, b: &[i32; 64]) {
+        let before = self.out.len();
+        self.emit_mono_words(b);
+        self.queue_output(before, 1);
+    }
+
+    fn emit_mono_words(&mut self, b: &[i32; 64]) {
         let signed = self.word & (1 << 26) != 0;
         let px: Vec<u8> = b.iter().map(|&v| if signed { v as u8 } else { (v + 128) as u8 }).collect();
         if (self.word >> 27) & 3 == 0 {

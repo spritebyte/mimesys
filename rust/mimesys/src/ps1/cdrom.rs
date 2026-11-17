@@ -11,10 +11,16 @@
 //! - The status byte: bit 1 motor on, 4 shell open, 5 reading, 6 seeking, 7 playing.
 //! - Reading: Setloc, then ReadN / ReadS seek and deliver sectors at 75 a second (150 in
 //!   double speed). Mode bit 5 picks 2048 bytes of user data or 2340 (all but the sync).
-//!   With XA-ADPCM on (mode bit 6), audio sectors go to the decoder (stage 6), not the CPU.
+//!   With XA-ADPCM on (mode bit 6), audio sectors (submode audio + real time, matching
+//!   Setfilter when mode bit 3 is on) go to the XA decoder, not the CPU.
 //!   Sectors queue in the drive's buffer (8 here) until the CPU acknowledges each INT1;
 //!   the current sector (data FIFO, GetlocL) changes only when its INT1 is raised.
-//! - Play (CD-DA) moves the position along and answers GetlocP; the sound is stage 6.
+//! - Play (CD-DA) streams the sectors' 16-bit stereo samples to the SPU and answers GetlocP.
+//! - XA-ADPCM: 18 128-byte portions of 4-bit (or 8-bit) samples, decoded like SPU-ADPCM
+//!   (four filters), 37800 or 18900 Hz, mono or stereo, resampled to 44100 Hz with the
+//!   hardware's 25-point zigzag tables (7 outputs per 6 inputs).
+//! - CD audio out: the ATV volumes (L->L, L->R, R->R, R->L, index 2 / 3 registers,
+//!   applied by ADPCTL bit 5), Mute / Demute, and ADPCTL bit 0 muting XA.
 //! - GetID reports a licensed disc with the BIOS's own region, so every region's discs
 //!   start (a modchip, in effect).
 
@@ -33,6 +39,22 @@ const ACK_DELAY: i64 = 25_000;
 const SEEK_DELAY: i64 = 150_000;
 /// sectors the drive can hold before the CPU takes them
 const SECTOR_BUFFERS: usize = 8;
+/// CD audio queued for the SPU (44100 Hz stereo frames): a quarter second
+const AUDIO_QUEUE: usize = 11_025;
+
+const XA_POS: [i32; 4] = [0, 60, 115, 98];
+const XA_NEG: [i32; 4] = [0, 0, -52, -55];
+
+const ZIGZAG: [[i32; 29]; 7] = [
+    [0, 0, 0, 0, 0, -2, 10, -34, 65, -84, 52, 9, -266, 1024, -2680, 9036, 26516, -6016, 3021, -1571, 848, -365, 107, 10, -16, 17, -8, 3, -1],
+    [0, 0, 0, -2, 0, 3, -19, 60, -75, 162, -227, 306, -67, -615, 3229, 29883, -4532, 2488, -1471, 882, -424, 166, -27, 5, 6, -8, 3, -1, 0],
+    [0, 0, -1, 3, -2, -5, 31, -74, 179, -402, 689, -926, 1272, -1446, 31033, -1446, 1272, -926, 689, -402, 179, -74, 31, -5, -2, 3, -1, 0, 0],
+    [0, -1, 3, -8, 6, 5, -27, 166, -424, 882, -1471, 2488, -4532, 29883, 3229, -615, -67, 306, -227, 162, -75, 60, -19, 3, 0, -2, 0, 0, 0],
+    [-1, 3, -8, 17, -16, 10, 107, -365, 848, -1571, 3021, -6016, 26516, 9036, -2680, 1024, -266, 9, 52, -84, 65, -34, 10, -1, 0, 1, 0, 0, 0],
+    [2, -8, 16, -35, 43, 26, -235, 635, -1352, 2810, -5882, 21472, 15367, -4681, 2062, -839, 347, -68, -23, 70, -35, 17, -5, 0, 0, 0, 0, 0, 0],
+    [-5, 17, -35, 70, -23, -68, 347, -839, 2062, -4681, 15367, 21472, -5882, 2810, -1352, 635, -235, 26, 43, -35, 16, -8, 2, 0, 0, 0, 0, 0, 0],
+];
+
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Response {
@@ -89,6 +111,35 @@ pub struct Cdrom {
     logged: u32,
     #[serde(skip)]
     sector_logged: u32,
+    #[serde(skip)]
+    cpu_bytes: u32,
+    #[serde(skip)]
+    req_logged: u32,
+    /// bring-up: ask for the CPU's instruction trace
+    #[serde(skip)]
+    pub want_trace: bool,
+    /// CD audio for the SPU (44100 Hz stereo)
+    #[serde(skip)]
+    pub audio: std::collections::VecDeque<(i16, i16)>,
+    muted: bool,
+    xa_mute: bool,
+    /// applied / written CD volumes: L->L, L->R, R->R, R->L
+    atv: [u8; 4],
+    atv_next: [u8; 4],
+    xa: Xa,
+}
+
+/// XA-ADPCM decoder state: the filters' history, the resampler's ring and counter
+#[derive(Clone, Serialize, Deserialize)]
+struct Xa {
+    old: [[i32; 2]; 2],
+    ring: Vec<[i16; 2]>,
+    p: usize,
+    six: u32,
+}
+
+impl Default for Xa {
+    fn default() -> Self { Self { old: [[0; 2]; 2], ring: vec![[0; 2]; 32], p: 0, six: 6 } }
 }
 
 fn bcd(v: u32) -> u8 { ((v / 10) << 4 | (v % 10)) as u8 }
@@ -98,7 +149,7 @@ impl Cdrom {
     /// `region`: the BIOS's letter (A, E, J)
     pub fn new(disc: Option<Disc>, region: u8) -> Self {
         let stat = if disc.is_some() { STAT_MOTOR } else { STAT_SHELL_OPEN };
-        Self { int_enable: 0x1F, stat, disc, region, sector: vec![0; SECTOR], ..Default::default() }
+        Self { int_enable: 0x1F, stat, disc, region, sector: vec![0; SECTOR], atv: [0x80, 0, 0x80, 0], atv_next: [0x80, 0, 0x80, 0], ..Default::default() }
     }
 
     /// Bring-up: reading with XA mode on
@@ -151,7 +202,7 @@ impl Cdrom {
                 if self.resp_pos < self.response.len() { self.resp_pos += 1; }
                 v
             }
-            2 => self.data_byte(),
+            2 => { self.cpu_bytes += 1; self.data_byte() }
             _ => match self.index & 1 {
                 0 => self.int_enable | 0xE0,
                 _ => self.int_flag | 0xE0,
@@ -176,6 +227,13 @@ impl Cdrom {
             (1, 0) => self.command(v),
             (2, 0) => if self.params.len() < 16 { self.params.push(v) },
             (3, 0) => {
+                // bring-up: how a streaming game takes its data (CPU or DMA, all of it?)
+                if self.streaming() && self.req_logged < 60 {
+                    self.req_logged += 1;
+                    if self.req_logged == 1 { self.want_trace = true; }
+                    println!("PS1 CD: request {v:02X} with FIFO at {}/{}, {} bytes read by the CPU since the last request", self.data_pos, self.data.len(), self.cpu_bytes);
+                }
+                self.cpu_bytes = 0;
                 // request: bit 7 loads the sector into the data FIFO, clear empties it
                 if v & 0x80 != 0 {
                     if self.data_pos >= self.data.len() { self.load_data(); }
@@ -185,6 +243,14 @@ impl Cdrom {
                 }
             }
             (2, 1) => self.int_enable = v & 0x1F,
+            (2, 2) => self.atv_next[0] = v,
+            (3, 2) => self.atv_next[1] = v,
+            (1, 3) => self.atv_next[2] = v,
+            (2, 3) => self.atv_next[3] = v,
+            (3, 3) => {
+                self.xa_mute = v & 1 != 0;
+                if v & 0x20 != 0 { self.atv = self.atv_next; }
+            }
             (3, 1) => {
                 self.int_flag &= !(v & 0x1F);
                 if v & 0x40 != 0 { self.params.clear(); }
@@ -290,7 +356,10 @@ impl Cdrom {
                 self.ack(vec![self.stat()]);
                 self.then(ACK_DELAY * 4, 2, vec![self.stat()]);
             }
-            0x0B | 0x0C => self.ack(vec![self.stat()]),     // Mute / Demute
+            0x0B | 0x0C => {                                  // Mute / Demute
+                self.muted = c == 0x0B;
+                self.ack(vec![self.stat()]);
+            }
             0x0D => {                                         // Setfilter file channel
                 self.filter = (arg(0), arg(1));
                 self.ack(vec![self.stat()]);
@@ -471,14 +540,30 @@ impl Cdrom {
             println!("PS1 CD: sector {} mode {:02X} sub {:02X} {:02X} {:02X} {:02X} data {w:08X} (buffered {})",
                 self.lba - 1, raw[15], raw[16], raw[17], raw[18], raw[19], self.pending.len());
         }
-        // XA audio sectors go to the ADPCM decoder (stage 6), not the CPU
-        if self.mode & 0x40 != 0 && raw[15] == 2 && submode & 0x04 != 0 { return; }
+        // XA audio sectors (audio + real time) go to the ADPCM decoder, not the CPU; with
+        // the filter on, only the selected file / channel's are played
+        if self.mode & 0x40 != 0 && raw[15] == 2 && submode & 0x44 == 0x44 {
+            let wanted = self.mode & 0x08 == 0 || (raw[16], raw[17]) == self.filter;
+            if wanted { self.decode_xa(&raw); }
+            return;
+        }
+        if self.mode & 0x08 != 0 && raw[15] == 2 && submode & 0x44 == 0x44 { return; }
         if self.pending.len() >= SECTOR_BUFFERS { self.pending.pop_front(); }
         self.pending.push_back(raw.to_vec());
     }
 
     fn play_sector(&mut self) {
         let leadout = self.disc.as_ref().map_or(0, |d| d.leadout);
+        // CD-DA: 588 stereo 16-bit frames
+        let mut raw = [0u8; SECTOR];
+        let audio = self.disc.as_ref().and_then(|d| d.track_at(self.lba)).is_some_and(|t| t.is_audio());
+        if audio && self.disc.as_mut().is_some_and(|d| d.read_sector(self.lba, &mut raw)) {
+            for f in raw.chunks_exact(4) {
+                let l = i16::from_le_bytes([f[0], f[1]]);
+                let r = i16::from_le_bytes([f[2], f[3]]);
+                self.push_audio(l, r);
+            }
+        }
         self.lba += 1;
         if self.lba >= leadout {
             self.drive = Drive::Idle;
@@ -493,6 +578,88 @@ impl Cdrom {
                 let r = vec![self.stat(), p[0], p[1], p[5], p[6], p[7], 0, 0];
                 self.second = Some(Response { delay: 1, int: 1, bytes: r });
             }
+        }
+    }
+
+    // ------------------------------------------------------------------ CD audio
+
+    /// A frame out to the SPU, through the CD volumes
+    fn push_audio(&mut self, l: i16, r: i16) {
+        let (l, r) = if self.muted { (0, 0) } else {
+            let (l, r) = (l as i32, r as i32);
+            let a = self.atv.map(|v| v as i32);
+            (((l * a[0] + r * a[3]) >> 7).clamp(-0x8000, 0x7FFF) as i16,
+             ((r * a[2] + l * a[1]) >> 7).clamp(-0x8000, 0x7FFF) as i16)
+        };
+        if self.audio.len() >= AUDIO_QUEUE { self.audio.pop_front(); }
+        self.audio.push_back((l, r));
+    }
+
+    /// An XA-ADPCM sector (raw, 2352 bytes) to 44100 Hz audio
+    fn decode_xa(&mut self, raw: &[u8]) {
+        let ci = raw[19];
+        let stereo = ci & 3 == 1;
+        let half_rate = ci & 4 != 0;
+        let eight_bit = ci & 0x30 == 0x10;
+        let mut left = Vec::with_capacity(4032);
+        let mut right = Vec::with_capacity(2016);
+        for portion in 0..18 {
+            let src = &raw[24 + portion * 128..24 + portion * 128 + 128];
+            for blk in 0..4 {
+                for nib in 0..2usize {
+                    // 8-bit: one block per byte; 4-bit: two nibbles per byte
+                    let (hdr_i, ch) = if eight_bit { (blk, blk & 1) } else { (blk * 2 + nib, if stereo { nib } else { 0 }) };
+                    if eight_bit && nib == 1 { continue; }
+                    let ch = if stereo { ch } else { 0 };
+                    let h = src[4 + hdr_i];
+                    let mut shift = h & 0xF;
+                    if shift > 12 { shift = 9; }
+                    let filter = ((h >> 4) & 3) as usize;
+                    let (f0, f1) = (XA_POS[filter], XA_NEG[filter]);
+                    let [mut old, mut older] = self.xa.old[ch];
+                    let out = if ch == 1 { &mut right } else { &mut left };
+                    for j in 0..28 {
+                        let w = u32::from_le_bytes(src[16 + j * 4..20 + j * 4].try_into().unwrap());
+                        let t = if eight_bit {
+                            (((w >> (blk * 8)) & 0xFF) as i32) << 24 >> 16
+                        } else {
+                            (((w >> ((blk * 2 + nib) * 4)) & 0xF) as i32) << 28 >> 16
+                        };
+                        let s = ((t >> shift) + ((old * f0 + older * f1 + 32) >> 6)).clamp(-0x8000, 0x7FFF);
+                        older = old;
+                        old = s;
+                        out.push(s as i16);
+                    }
+                    self.xa.old[ch] = [old, older];
+                }
+            }
+        }
+        if self.xa_mute { left.iter_mut().for_each(|s| *s = 0); right.iter_mut().for_each(|s| *s = 0); }
+        let n = if stereo { left.len().min(right.len()) } else { left.len() };
+        for i in 0..n {
+            let pair = if stereo { [left[i], right[i]] } else { [left[i], left[i]] };
+            self.resample(pair);
+            if half_rate { self.resample(pair); }
+        }
+    }
+
+    /// 37800 Hz in, 44100 Hz out: every sixth input makes seven outputs
+    fn resample(&mut self, s: [i16; 2]) {
+        let x = &mut self.xa;
+        x.ring[x.p & 31] = s;
+        x.p += 1;
+        x.six -= 1;
+        if x.six != 0 { return; }
+        x.six = 6;
+        for t in 0..7 {
+            let mut sum = [0i32; 2];
+            for i in 1..30 {
+                let r = self.xa.ring[(self.xa.p.wrapping_sub(i)) & 31];
+                for c in 0..2 { sum[c] += (r[c] as i32 * ZIGZAG[t][i - 1]) >> 15; }
+            }
+            let l = sum[0].clamp(-0x8000, 0x7FFF) as i16;
+            let r = sum[1].clamp(-0x8000, 0x7FFF) as i16;
+            self.push_audio(l, r);
         }
     }
 }

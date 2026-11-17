@@ -69,6 +69,8 @@ pub struct Bus {
     big_logged: u32,
     #[serde(skip)]
     cd_dma_logged: u32,
+    #[serde(skip)]
+    wipe_logged: bool,
     /// the CPU's pc, for the logs
     #[serde(skip)]
     pub cpu_pc: u32,
@@ -113,6 +115,7 @@ impl Bus {
             dma_logged: 0,
             big_logged: 0,
             cd_dma_logged: 0,
+            wipe_logged: false,
             cpu_pc: 0,
             dma_routine: 0,
         }
@@ -129,7 +132,11 @@ impl Bus {
         if self.timers.irq != 0 { self.i_stat |= self.timers.irq; self.timers.irq = 0; }
         self.cdrom.tick(cycles);
         if self.cdrom.irq { self.cdrom.irq = false; self.i_stat |= IRQ_CDROM; }
+        self.spu.tick(cycles, &mut self.cdrom.audio);
+        if self.spu.irq { self.spu.irq = false; self.i_stat |= IRQ_SPU; }
         self.sio.tick(cycles);
+        // MDEC output that became readable may let a waiting channel 1 go
+        if self.mdec.tick(cycles) { self.try_dma(1); }
         if self.sio.irq { self.sio.irq = false; self.i_stat |= IRQ_SIO0; }
         if self.gpu.irq { self.i_stat |= IRQ_GPU; }
     }
@@ -357,6 +364,11 @@ impl Bus {
                     4 => self.spu.dma_read(),
                     _ => 0,
                 };
+                // bring-up: Breath of Fire III's wiped dispatcher
+                if a == 0x1C_F2F8 && w == 0 && !self.wipe_logged {
+                    self.wipe_logged = true;
+                    println!("PS1 DMA{n} wrote zero to 1CF2F8 (madr {:06X} bcr {:08X} chcr {:08X}) at pc {:08X}", ch.madr, ch.bcr, ch.chcr, self.cpu_pc);
+                }
                 self.ram[a..a + 4].copy_from_slice(&w.to_le_bytes());
             }
             addr = (addr as i32).wrapping_add(step) as u32;
