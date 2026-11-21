@@ -9,7 +9,7 @@ use crate::pce::pce_system::PceSystem;
 use std::collections::HashMap;
  
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CartSystem { GameBoy, GameBoyColor, Gba, Coleco, Nes, Sms, GameGear, Atari2600, Pce, A7800, A5200, Genesis, Nds, Lynx, Snes, SegaCd, M32x, Dreamcast, Ps1, }
+pub enum CartSystem { GameBoy, GameBoyColor, Gba, Coleco, Nes, Sms, GameGear, Atari2600, Pce, A7800, A5200, Genesis, Nds, Lynx, Snes, SegaCd, M32x, Dreamcast, Ps1, Saturn, }
 
 impl CartSystem {
     pub fn from_id(id: &str) -> Result<Self, String> {
@@ -33,6 +33,7 @@ impl CartSystem {
             "32x"    => Ok(Self::M32x),
             "dc"     => Ok(Self::Dreamcast),
             "ps1"    => Ok(Self::Ps1),
+            "saturn" => Ok(Self::Saturn),
             other    => Err(format!("Unknown system id '{other}'")),
         }
     }
@@ -79,6 +80,10 @@ fn load_cartridge(system: CartSystem, rom: &[u8], filename: &str, bios: Option<V
         }
         CartSystem::Ps1 => {
             let core = crate::ps1::Ps1System::from_rom(rom, filename, bios_or_empty)?;
+            Ok(Box::new(core))
+        }
+        CartSystem::Saturn => {
+            let core = crate::saturn::SaturnSystem::from_rom(rom, filename, bios_or_empty)?;
             Ok(Box::new(core))
         }
         CartSystem::M32x => {

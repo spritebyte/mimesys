@@ -512,7 +512,7 @@ func _apply_display_options() -> void:
 		emu_system.set_option("vs_ppu", int(AppSettings.get_option(sys, "vs_ppu")))
 	# GBA cartridge clock (Pokemon etc.): local time = UTC + this many minutes
 	emu_system.set_option("rtc_utc_offset", Time.get_time_zone_from_system().bias)
-	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug", "md": "md_debug", "nes": "nes_debug", "a7800": "a7800_debug", "arcade": "arcade_debug", "dc": "dc_debug", "ps1": "ps1_debug"}
+	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug", "md": "md_debug", "nes": "nes_debug", "a7800": "a7800_debug", "arcade": "arcade_debug", "dc": "dc_debug", "ps1": "ps1_debug", "saturn": "saturn_debug"}
 	var dbg_key: String = dbg_keys.get(sys, "")
 	var dbg_on: bool = dbg_key != "" and AppSettings.get_option(sys, dbg_key)
 	var speed_log: bool = sys == "dc" and AppSettings.get_option(sys, "dc_speed_log")

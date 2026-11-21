@@ -245,6 +245,14 @@ func _rebuild() -> void:
 		pdbg.toggled.connect(func(on): _put("ps1_debug", on))
 		_row("Debug", pdbg)
 
+	# Saturn: the debug log (debug_saturn.log)
+	if sys == "saturn":
+		var sdbg := CheckBox.new()
+		sdbg.text = "Debug log: SMPC / CD commands, the CPUs every 5 s (debug_saturn.log; next load)"
+		sdbg.button_pressed = _opt("saturn_debug")
+		sdbg.toggled.connect(func(on): _put("saturn_debug", on))
+		_row("Debug", sdbg)
+
 	# Genesis: console region (PAL = 50 Hz) and pad type; both apply when a game loads
 	if sys == "md":
 		var mdbg := CheckBox.new()

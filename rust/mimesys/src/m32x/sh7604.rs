@@ -187,6 +187,13 @@ impl Frt {
         self.pending_irq |= (self.ovie && self.ovf) || (self.ociae && self.ocfa) || (self.ocibe && self.ocfb);
         if self.cclra && self.ocfa { self.frc = 0; }
     }
+
+    /// The FTI input's edge (the Saturn's MINIT / SINIT): FRC is copied to FICR.
+    fn capture(&mut self) {
+        self.ficr = self.frc;
+        self.icf = true;
+        self.pending_irq |= self.icie;
+    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -239,6 +246,15 @@ pub struct Periph {
     /// clocks the FRT and WDT haven't counted yet (they catch up every 16, or when read)
     #[serde(default)]
     lag: u32,
+    /// the MD5 pin: a slave reads 1 in BCR1 bit 15 (the Saturn BIOS tells its CPUs apart by it)
+    #[serde(default)]
+    pub slave: bool,
+    /// debug: the last data addresses read (any kind, cached or not), when switched on
+    #[serde(skip)]
+    pub watch: Option<std::collections::VecDeque<(u32, u32)>>,
+    /// writes so far (any kind): idle-loop detection checks nothing was written
+    #[serde(skip)]
+    pub writes: u32,
 }
 
 impl Periph {
@@ -247,8 +263,13 @@ impl Periph {
         regs[0x001] = 0xFF;          // BRR
         regs[0x003] = 0xFF;          // TDR
         regs[0x004] = 0x84;          // SSR: TDRE, TEND
+        regs[0x1E2] = 0x03;          // BCR1 = 03F0
+        regs[0x1E3] = 0xF0;
+        regs[0x1E7] = 0xFC;          // BCR2 = 00FC
+        regs[0x1EA] = 0xAA;          // WCR = AAFF
+        regs[0x1EB] = 0xFF;
         Self { cache: Cache::new(), dmac: Dmac::default(), frt: Frt::default(), wdt: Wdt::default(), divu: Divu::default(),
-               divuip: 0, dmacip: 0, wdtip: 0, sciip: 0, frtip: 0, focv: 0, witv: 0, regs, waits: 0, lag: 0 }
+               divuip: 0, dmacip: 0, wdtip: 0, sciip: 0, frtip: 0, focv: 0, witv: 0, regs, waits: 0, lag: 0, slave: false, watch: None, writes: 0 }
     }
 
     // ---------------- on-chip registers ----------------
@@ -310,6 +331,9 @@ impl Periph {
             }
             0xFFFF_FFA3 => self.dmac.vcrdma[0],
             0xFFFF_FFAB => self.dmac.vcrdma[1],
+            // BCR1: bit 15 is MASTER (0) / slave (1), from the MD5 pin; the top half reads 0
+            0xFFFF_FFE0 | 0xFFFF_FFE1 => 0,
+            0xFFFF_FFE2 => (self.regs[0x1E2] & 0x1F) | (self.slave as u8) << 7,
             0xFFFF_FFB3 => { let dm = &self.dmac; dm.dme as u8 | (dm.nmif as u8) << 1 | (dm.ae as u8) << 2 | (dm.pr as u8) << 3 }
             0xFFFF_FE00..=0xFFFF_FFFF => self.regs[(a & 0x1FF) as usize],
             _ => 0,
@@ -489,6 +513,18 @@ impl<E: ExtBus + ?Sized> ChipBus<'_, E> {
     }
 
     pub fn read(&mut self, a: u32, size: u32, through_cache: bool) -> u32 {
+        let v = self.read_inner(a, size, through_cache);
+        if self.p.watch.is_some() && a != self.fetch && a & !1 != self.fetch & !1 {
+            let w = self.p.watch.as_mut().unwrap();
+            if !w.iter().any(|&(x, _)| x == a) {
+                if w.len() >= 12 { w.pop_front(); }
+                w.push_back((a, v));
+            }
+        }
+        v
+    }
+
+    fn read_inner(&mut self, a: u32, size: u32, through_cache: bool) -> u32 {
         match a >> 29 {
             0 if through_cache && self.p.cache.enable => self.cached_read(a, size),
             0 | 1 => self.ext_read(a & 0x1FFF_FFFF, size),
@@ -505,6 +541,7 @@ impl<E: ExtBus + ?Sized> ChipBus<'_, E> {
     }
 
     pub fn write(&mut self, a: u32, size: u32, v: u32, through_cache: bool) {
+        self.p.writes = self.p.writes.wrapping_add(1);
         match a >> 29 {
             0 => {
                 if through_cache && self.p.cache.enable {
@@ -556,7 +593,10 @@ impl Sh7604 {
     /// Power on / the reset line.
     pub fn reset(&mut self, warm: bool) {
         self.cpu.power(warm);
+        let (slave, watch) = (self.p.slave, self.p.watch.take());
         self.p = Periph::new();
+        self.p.slave = slave;
+        self.p.watch = watch;
     }
 
     /// One instruction, then the on-chip interrupts and one DMA transfer. Returns the
@@ -585,6 +625,34 @@ impl Sh7604 {
         true
     }
 
+    /// Idle clocks (a skipped wait loop): the on-chip timers still count them
+    pub fn burn(&mut self, clocks: u32) {
+        self.p.lag += clocks;
+        if self.p.lag >= 16 { self.p.timers(); }
+    }
+
+    /// A DMAC channel is mid-transfer (it moves one unit per instruction)
+    pub fn dma_busy(&self) -> bool {
+        let d = &self.p.dmac;
+        d.dme && d.chcr.iter().any(|h| h.de && !h.te)
+    }
+
+    /// The FTI pin (the Saturn wires the other CPU's MINIT / SINIT writes to it).
+    pub fn input_capture(&mut self) {
+        self.p.timers();
+        self.p.frt.capture();
+    }
+
+    /// The NMI pin: taken at once (outside a delay slot), mask level 15, vector 11.
+    pub fn nmi<E: ExtBus + ?Sized>(&mut self, ext: &mut E) -> bool {
+        if self.cpu.in_delay_slot() { return false; }
+        self.p.dmac.nmif = true;
+        let fetch = self.cpu.instruction_pc();
+        let mut bus = ChipBus { p: &mut self.p, ext, fetch };
+        self.cpu.interrupt(&mut bus, 15, 11);
+        true
+    }
+
     /// The on-chip interrupt sources (ares INTC::run order: FRT, DMAC, WDT).
     fn intc<E: ExtBus + ?Sized>(&mut self, ext: &mut E) {
         let p = &self.p;
@@ -592,7 +660,10 @@ impl Sh7604 {
         if self.cpu.in_delay_slot() { return; }
         let p = &self.p;
         let take = if p.frt.pending_irq && self.cpu.sr.i < p.frtip {
-            Some((p.frtip, p.focv, 0))
+            // input capture: VCRC's FICV; compare match: FOCV; overflow: VCRD's FOVV
+            let f = &p.frt;
+            let v = if f.icie && f.icf { p.regs[0x66] } else if (f.ociae && f.ocfa) || (f.ocibe && f.ocfb) { p.focv } else { p.regs[0x68] };
+            Some((p.frtip, v & 0x7F, 0))
         } else if p.dmac.pending_irq != 0 && self.cpu.sr.i < p.dmacip {
             let c = if p.dmac.pending_irq & 1 != 0 { 0 } else { 1 };
             Some((p.dmacip, p.dmac.vcrdma[c] & 0x7F, 1 + c as u8))

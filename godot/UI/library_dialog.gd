@@ -209,6 +209,14 @@ func _system_of(path: String, inner: String, file: String, read: Callable) -> St
 	if picked != "":
 		return RomLoader.profile_id(picked)
 	var ext := file.get_extension().to_lower()
+	# a disc (Sega CD, Saturn, PlayStation, Dreamcast share .cue / .chd): ask the detector,
+	# which reads the disc's first sectors from the path
+	if ext in RomLoader.DISC_EXT and inner == "":
+		var rom: Dictionary = RomLoader.read_rom(path)
+		if not rom.is_empty():
+			var g: Dictionary = RomLoader.guess_system(rom["data"], path)
+			if not g["guesses"].is_empty():
+				return RomLoader.profile_id(g["guesses"][0]["system"])
 	if AppSettings.SYSTEM_BY_EXT.has(ext):
 		return AppSettings.SYSTEM_BY_EXT[ext]
 	var guess: Dictionary = RomLoader.guess_system(read.call(), path.get_base_dir().path_join(file))

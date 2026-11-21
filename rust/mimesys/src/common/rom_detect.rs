@@ -64,8 +64,17 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
         if matches!(ext.as_str(), "cue" | "iso" | "chd") && crate::ps1::open_disc(data).is_ok() {
             return vec![Guess { system: "ps1", score: 100, why: format!("PlayStation disc (.{ext})") }];
         }
-        // Dreamcast discs: by extension (stage 2 boots the BIOS with the tray empty)
-        if matches!(ext.as_str(), "gdi" | "chd" | "cdi") {
+        // Saturn: the first data sector says SEGA SEGASATURN
+        if matches!(ext.as_str(), "cue" | "iso" | "chd") {
+            match crate::saturn::open_disc(data) {
+                Ok(_) => return vec![Guess { system: "saturn", score: 100, why: format!("Saturn disc (.{ext})") }],
+                Err(e) => println!("detect: not a Saturn disc: {e}"),
+            }
+        }
+        // Dreamcast discs: by extension (stage 2 boots the BIOS with the tray empty); a CHD
+        // only when it holds a GD-ROM (a CD one is Sega CD, PlayStation or Saturn)
+        let gd_chd = || crate::segacd::disc_path(data).and_then(|p| crate::common::disc::Disc::open(&p).ok()).is_some_and(|d| d.gd);
+        if matches!(ext.as_str(), "gdi" | "cdi") || (ext == "chd" && gd_chd()) {
             return vec![Guess { system: "dc", score: 100, why: format!("Dreamcast disc image (.{ext})") }];
         }
         return match crate::segacd::open_disc(data) {
@@ -81,6 +90,10 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
     // PlayStation: the BIOS alone (the shell), or a PS-EXE
     if crate::ps1::is_bios(data, &file) {
         return vec![Guess { system: "ps1", score: 100, why: "PlayStation BIOS (no disc)".into() }];
+    }
+    // the Saturn BIOS alone: start the console with no disc
+    if crate::saturn::is_bios(data, &file) {
+        return vec![Guess { system: "saturn", score: 100, why: "Saturn BIOS (no disc)".into() }];
     }
     if data.len() >= 0x800 && data.starts_with(b"PS-X EXE") {
         return vec![Guess { system: "ps1", score: 100, why: "PlayStation executable (PS-EXE)".into() }];

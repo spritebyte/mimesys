@@ -66,6 +66,9 @@ pub struct Sh2 {
     pub id: bool,
     /// pending reset
     pub exceptions: u32,
+    /// the last exception taken (vector, return pc), for debug logs; not saved
+    #[serde(skip)]
+    pub last_exception: Option<(u32, u32)>,
 }
 
 impl Default for Sh2 {
@@ -75,7 +78,7 @@ impl Default for Sh2 {
 impl Sh2 {
     pub fn new() -> Self {
         let mut s = Self { r: [0; 16], pc: 0, pr: 0, gbr: 0, vbr: 0, mach: 0, macl: 0, sr: Sr::default(), ppc: 0,
-                           ppm: Branch::Step, et: false, id: false, exceptions: 0 };
+                           ppm: Branch::Step, et: false, id: false, exceptions: 0, last_exception: None };
         s.power(false);
         s
     }
@@ -118,6 +121,7 @@ impl Sh2 {
     }
 
     fn exception<B: Sh2Bus + ?Sized>(&mut self, bus: &mut B, vector: u32, ret: u32) {
+        self.last_exception = Some((vector, ret));
         self.push(bus, self.sr.get());
         self.push(bus, ret);
         let to = bus.read32(self.vbr.wrapping_add(vector * 4)).wrapping_add(4);

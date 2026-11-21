@@ -70,7 +70,10 @@ included: players supply it. The S-DSP
 nocash's fullsnes and anomie's DSP notes, not ported from an emulator; its Gaussian table
 is rebuilt from a closed formula that reproduces the hardware ROM, and the rate tables are
 hardware facts. It was checked against blargg's SPC DSP (in libgme, LGPL) used only as an
-outside reference while testing; none of that code is in mimesys. The SNES bus timing, DMA/HDMA and PPU register behaviour (`rust/mimesys/src/snes/`)
+outside reference while testing; none of that code is in mimesys. The PlayStation core
+(`rust/mimesys/src/ps1/`, `rust/mimesys/src/common/cpu/r3000/`) is new code written from the
+hardware descriptions in Nocash PSX-SPX; the SPU's Gaussian interpolation table and the
+CD-ROM's XA-ADPCM zigzag resampling tables are hardware facts as listed there. The SNES bus timing, DMA/HDMA and PPU register behaviour (`rust/mimesys/src/snes/`)
 follow ares's `sfc` core; the cart header scoring and the background/sprite drawing are new
 code. ares is (c) 2004-2025 Near and the ares team, under the ISC license:
 
@@ -152,6 +155,11 @@ and MAME's `src/devices/` or `src/mame/`.
 | `common/audio/k007232.rs` | `sound/k007232.cpp` | Nicola Salmoria, Hiromitsu Shioya |
 | `common/audio/upd7759.rs` | `sound/upd7759.cpp` (stand-alone mode only); `ymfm` `decode_fp` for the TMNT title music | Juergen Buchmueller, Mike Balfour, Howie Cohen, Olivier Galibert, Aaron Giles |
 | `arcade/hiscore.rs` | `bus/a7800/hiscore.cpp` | Fabio Priuli |
+| `saturn/smpc.rs` | `sega/smpc.cpp` | Angelo Salese, R. Belmont |
+| `saturn/scu.rs`, the SCU DMA in `saturn/bus.rs` | `sega/saturn_scu.cpp` | Angelo Salese |
+| `saturn/cdblock.rs` | `sega/saturn_cd_hle.cpp` | R. Belmont, Angelo Salese |
+| `saturn/scsp.rs` | `sound/scsp.cpp`, `sound/scspdsp.cpp` | ElSemi, R. Belmont, kingshriek |
+| `saturn/scudsp.rs` | `cpu/scudsp/scudsp.cpp` | Angelo Salese, Mariusz Wojcieszek |
 
 ## Open items before an MIT release
 - **Rastan driver** (`arcade/rastan/rastan_system.rs`, `rastan_sound.rs`): modelled on MAME's
@@ -167,6 +175,9 @@ and MAME's `src/devices/` or `src/mame/`.
   - `nds/nds_wifi.rs` follows melonDS's power state machine closely. Rewrite it from GBATEK.
 
 ## Hardware reference data
+- `saturn/*`: register layouts also follow libyaul's headers (MIT, Israel Jacquez) and
+  Sega's Saturn hardware manuals. MAME's `sega/saturn.cpp` and `stv.cpp` (LGPL) were only
+  read for facts (clocks, memory map); none of their code is used.
 - `nes/vs.rs`: the VS System's 2C03 / 2C04 colour tables and its input / DIP switch layout
   come from the NESdev wiki ("PPU palettes", "Vs. System"). They're measurements of the
   hardware, written out as tables; the code around them is mimesys's own.

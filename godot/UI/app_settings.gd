@@ -103,6 +103,7 @@ const OPTION_DEFAULTS := {
 	"ps1_pad": "dualshock",  # PlayStation: "dualshock" (starts digital), "analog" (DualShock in analog mode), "digital"
 	"ps1_rumble": true,      # PlayStation: DualShock rumble on the controller
 	"ps1_debug": false,      # PlayStation: debug log (CD commands, chip state every 5 s, trace before a crash)
+	"saturn_debug": false,   # Saturn: debug log (SMPC / CD commands, the CPUs every 5 s)
 	"ps1_card": "Card 1",    # PlayStation: the memory card in slot 1 (user://GD_EMU/PS1/MemoryCards/<name>.mcd)
 }
 ## Game Boy boot ROMs: "bios" (above) is the Game Boy Color one, this is the original's.
@@ -116,6 +117,7 @@ const BIOS_DEFAULTS := {
 	"gba": "user://BIOS/gba_bios.bin",
 	"a5200": "user://BIOS/5200.rom",
 	"lynx": "user://BIOS/lynxboot.img",
+	"saturn": "user://BIOS/saturn_bios.bin",   # else the first sega_1*, mpr-17933* or *saturn* 512 KB file
 }
 const BIOS_OPTIONAL := ["gb", "gba"]    # these can boot without it
 var _options := {}               # system id -> {option: value} (only changed ones)
@@ -155,6 +157,11 @@ func _init() -> void:
 			["c1_l3", "L3 (left stick press)"], ["c1_r3", "R3 (right stick press)"], ["c1_analog", "Analog button (DualShock mode)"]] + dpad2 + [
 			["c2_b", "P2 Cross [B]"], ["c2_a", "P2 Circle [A]"], ["c2_x", "P2 Square [X]"], ["c2_y", "P2 Triangle [Y]"],
 			["c2_l1", "P2 L1 [L]"], ["c2_r1", "P2 R1 [R]"], ["c2_z", "P2 L2 [Z]"], ["c2_start", "P2 Start"], ["c2_select", "P2 Select"]]},
+		"saturn": {"name": "Sega Saturn", "actions": dpad + [
+			["c1_b", "A [B]"], ["c1_a", "B [A]"], ["c1_r1", "C [R]"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_l1", "Z [L]"],
+			["c1_z", "L trigger [Z]"], ["c1_r2", "R trigger [R2]"], ["c1_start", "Start"]] + dpad2 + [
+			["c2_b", "P2 A [B]"], ["c2_a", "P2 B [A]"], ["c2_r1", "P2 C [R]"], ["c2_x", "P2 X"], ["c2_y", "P2 Y"], ["c2_l1", "P2 Z [L]"],
+			["c2_z", "P2 L trigger [Z]"], ["c2_select", "P2 R trigger [Select]"], ["c2_start", "P2 Start"]]},
 		"dc": {"name": "Sega Dreamcast", "actions": dpad + [
 			["c1_b", "A [B]"], ["c1_a", "B [A]"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_start", "Start"],
 			["c1_l1", "L trigger [L]"], ["c1_r1", "R trigger [R]"]] + dpad2 + [
