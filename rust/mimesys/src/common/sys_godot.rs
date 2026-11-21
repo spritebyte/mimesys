@@ -355,8 +355,8 @@ impl EmuSystem {
     #[func]
     pub fn set_cheats(&mut self, codes: PackedStringArray) -> PackedStringArray {
         let codes: Vec<String> = codes.as_slice().iter().map(|s| s.to_string()).collect();
-        let errors: Vec<String> = match self.system.as_mut().and_then(|s| s.cheats_mut()) {
-            Some(cheats) => cheats.set(&codes),
+        let errors: Vec<String> = match self.system.as_mut().and_then(|s| s.set_cheat_codes(&codes)) {
+            Some(errors) => errors,
             None => codes.iter().map(|_| "cheats aren't supported for this system yet".to_string()).collect(),
         };
         PackedStringArray::from_iter(errors.iter().map(|e| GString::from(e.as_str())))
@@ -364,7 +364,7 @@ impl EmuSystem {
 
     #[func]
     pub fn supports_cheats(&mut self) -> bool {
-        self.system.as_mut().map_or(false, |s| s.cheats_mut().is_some())
+        self.system.as_mut().map_or(false, |s| s.supports_cheats())
     }
 
     #[func]

@@ -41,6 +41,12 @@ pub trait System: Send {
     fn get_current_frame(&self) -> i64;
     fn set_audio_rate_adjust(&mut self, _factor: f32) {}
     fn cheats_mut(&mut self) -> Option<&mut crate::common::cheats::Cheats> { None }
+    /// Turn these cheat codes on (one entry per cheat); one error per entry ("" = fine), or
+    /// None when the system has no cheats. Systems with their own code formats override it.
+    fn set_cheat_codes(&mut self, codes: &[String]) -> Option<Vec<String>> {
+        self.cheats_mut().map(|c| c.set(codes))
+    }
+    fn supports_cheats(&mut self) -> bool { self.cheats_mut().is_some() }
     fn set_option(&mut self, _key: &str, _value: i64) {}
     /// The memory card in the slot (Dreamcast VMU), as a card file holds it.
     fn memory_card(&self) -> Option<Vec<u8>> { None }

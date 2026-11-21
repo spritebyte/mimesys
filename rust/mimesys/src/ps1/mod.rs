@@ -18,6 +18,7 @@ pub mod sio;
 pub mod spu;
 pub mod memcard;
 pub mod pad;
+pub mod cheats;
 
 /// The debug log (option "ps1_debug"): CD commands, DMA / MDEC / CD state every 5 seconds,
 /// the instructions before a crash
@@ -97,6 +98,7 @@ pub struct Ps1System {
     analog_held: bool,
     rumble_on: bool,
     pad_kind: i64,
+    cheats: cheats::Cheats,
     /// tests: how often each pc runs
     prof: Option<std::collections::HashMap<u32, u64>>,
     last_istat: u32,
@@ -136,6 +138,7 @@ impl Ps1System {
             analog_held: false,
             rumble_on: true,
             pad_kind: 0,
+            cheats: Default::default(),
             last_istat: 0,
             tty_line: String::new(),
             current_frame: 0,
@@ -240,6 +243,11 @@ impl System for Ps1System {
             self.run_line(line);
         }
         if self.bus.gpu.mode & 0x20 != 0 { self.bus.gpu.field = !self.bus.gpu.field; }
+        // GameShark / Action Replay codes, once a frame
+        if !self.cheats.is_empty() {
+            let buttons = !self.bus.sio.pads[0].buttons;
+            self.cheats.apply(&mut self.bus.ram, buttons);
+        }
         // debug log (option "ps1_debug"): where the CPU is and what the chips do, every 5 s
         if debug() && self.current_frame % 300 == 299 {
             let c = &self.cpu;
@@ -312,6 +320,10 @@ impl System for Ps1System {
     }
 
     fn set_extra_input(&mut self, ext: u32) { self.ext = ext; }
+
+    fn set_cheat_codes(&mut self, codes: &[String]) -> Option<Vec<String>> { Some(self.cheats.set(codes)) }
+
+    fn supports_cheats(&mut self) -> bool { true }
 
     fn set_analog(&mut self, port: usize, sticks: [u8; 4]) {
         if let Some(p) = self.bus.sio.pads.get_mut(port) {

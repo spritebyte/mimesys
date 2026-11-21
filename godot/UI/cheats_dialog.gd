@@ -13,6 +13,7 @@ const HELP := {
 	"gb": "Game Genie (ABC-DEF-GHI) or GameShark / Action Replay (01VVAAAA)",
 	"snes": "Game Genie (XXXX-XXXX) or Pro Action Replay (7E0DBE09), raw AAAAAA:VV",
 	"md": "Game Genie (XXXX-XXXX) or Action Replay / raw AAAAAA:VVVV (FF0A12:0009)",
+	"ps1": "GameShark / Action Replay (8009C6E4 03E7); paste a multi-line code into one box",
 }
 
 var _emu: Variant = null           # the EmuSystem
