@@ -390,3 +390,19 @@ fn overflow_traps_on_add_but_not_addu() {
     assert_eq!(reg(&c, 4), 0, "ADD didn't write");
     assert_eq!(c.cop0[CAUSE] >> 2 & 31, EXC_OV);
 }
+
+/// The Sony BIOS's first TLB entry: the scratchpad at 7000_0000 with PageMask 0, then the
+/// stack at 7000_3FF0
+#[test]
+fn a_scratchpad_entry_maps_16_kb_whatever_the_page_mask() {
+    let (c, _) = run(&[
+        mtc0(0, INDEX as u32), mtc0(0, PAGEMASK as u32),
+        lui(5, 0x7000), mtc0(5, ENTRYHI as u32),
+        lui(6, 0x8000), ori(6, 6, 7), mtc0(6, ENTRYLO0 as u32),
+        ori(7, 0, 7), mtc0(7, ENTRYLO1 as u32),
+        r(0x10, 0x10, 0, 0, 0, 0x02),                            // TLBWI
+        addiu(2, 0, 0x77), i(0x3F, 5, 2, 0x3FE0),                // SD -> 7000_3FE0
+    ], 12);
+    assert_eq!(c.cop0[CAUSE] >> 2 & 31, 0, "no TLB fault");
+    assert_eq!(c.scratch[0x3FE0], 0x77);
+}

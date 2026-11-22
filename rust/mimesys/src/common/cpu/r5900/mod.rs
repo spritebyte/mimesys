@@ -329,8 +329,11 @@ impl R5900 {
         // the lowest index wins where entries overlap (fill from the top down)
         for e in self.tlb.iter().rev() {
             if !e.global() && e.hi & 0xFF != asid { continue; }
-            let size = e.page_size();
-            let base = e.vbase();
+            // a scratchpad entry (EntryLo0.S) always maps the whole 16 KB, whatever
+            // PageMask says (the Sony BIOS sets PageMask 0)
+            let sp = e.lo0 >> 31 != 0;
+            let size = if sp { 0x4000 } else { e.page_size() };
+            let base = if sp { e.hi & 0xFFFF_C000 } else { e.vbase() };
             for (k, lo) in [e.lo0, e.lo1].into_iter().enumerate() {
                 let vstart = base.wrapping_add(size * k as u32);
                 // KSEG0 / KSEG1 are never mapped
