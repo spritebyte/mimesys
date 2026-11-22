@@ -175,7 +175,7 @@ impl Antic {
         let (win_l, win_r) = match w { 1 => (64, 192), 2 => (48, 208), _ => (32, 224) };
         let row = self.row as u16;
         let chbase = if mode >= 6 && mode <= 7 { (self.chbase as u16 & 0xFE) << 8 } else { (self.chbase as u16 & 0xFC) << 8 };
-        let mut put = |cc: i32, half: i32, v: u8, out: &mut [u8; OUT_W]| {
+        let put = |cc: i32, half: i32, v: u8, out: &mut [u8; OUT_W]| {
             // `half`: 0 = whole colour clock, 1 / 2 = its left / right hi-res half
             if cc < win_l || cc >= win_r { return; }
             let x = (cc - LEFT_CC) * 2;

@@ -167,7 +167,7 @@ impl System for PacmanSystem {
     fn clear_sram_dirty(&mut self) { }
     fn get_current_frame(&self) -> i64 { self.current_frame as i64 }
     fn get_sram(&self) -> Option<&[u8]> { None }
-    fn load_sram(&mut self, data: &[u8]) { }
+    fn load_sram(&mut self, _data: &[u8]) { }
 
     fn framebuffer(&self) -> &[u8] { &self.bus.video.framebuffer }
 

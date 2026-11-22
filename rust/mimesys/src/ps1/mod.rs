@@ -95,7 +95,7 @@ pub struct Ps1System {
     /// bring-up: hits per watched pc, and Breath of Fire III's last VLC output address
     /// the extra input word (R2, L3, R3, Analog), the Analog button held, rumble allowed
     ext: u32,
-    analog_held: bool,
+    analog_held: [bool; 2],
     rumble_on: bool,
     pad_kind: i64,
     cheats: cheats::Cheats,
@@ -135,7 +135,7 @@ impl Ps1System {
             owed: 0,
             prof: None,
             ext: 0,
-            analog_held: false,
+            analog_held: [false; 2],
             rumble_on: true,
             pad_kind: 0,
             cheats: Default::default(),
@@ -236,6 +236,17 @@ impl Ps1System {
     }
 }
 
+/// The d-pad (up, right, down, left). The frontend sends the left stick on its own
+/// (`set_analog`); in analog mode that's all it does, but a digital pad (or a DualShock
+/// in digital mode) has no stick, so leaning it well over counts as the d-pad there.
+pub(crate) fn stick_or_dpad(analog: bool, axes: [u8; 4], dpad: [bool; 4]) -> [bool; 4] {
+    if analog { return dpad; }
+    let [_, _, lx, ly] = axes;
+    let lean = |v: u8, neg: bool| if neg { v < 0x80 - 0x40 } else { v > 0x80 + 0x40 };
+    let s = [lean(ly, true), lean(lx, false), lean(ly, false), lean(lx, true)];
+    [dpad[0] || s[0], dpad[1] || s[1], dpad[2] || s[2], dpad[3] || s[3]]
+}
+
 impl System for Ps1System {
     fn run_frame(&mut self, input: u32) {
         self.set_input(input);
@@ -288,28 +299,21 @@ impl System for Ps1System {
     fn set_input(&mut self, input: u32) {
         let ext = self.ext;
         let pads = input::pads(input, ext);
-        // the Analog button toggles on its press
-        let analog_btn = ext & input::EXT_P1_ANALOG != 0;
-        if analog_btn && !self.analog_held { self.bus.sio.pads[0].analog_button(); }
-        self.analog_held = analog_btn;
         for k in 0..2 {
             let p = &pads[k];
             let mut v = 0u16;
-            let (r2, l3, r3) = if k == 0 {
-                (ext & input::EXT_P1_R2 != 0, ext & input::EXT_P1_L3 != 0, ext & input::EXT_P1_R3 != 0)
+            let [r2b, l3b, r3b, anb] = if k == 0 {
+                [input::EXT_P1_R2, input::EXT_P1_L3, input::EXT_P1_R3, input::EXT_P1_ANALOG]
             } else {
-                (false, false, false)
+                [input::EXT_P2_R2, input::EXT_P2_L3, input::EXT_P2_R3, input::EXT_P2_ANALOG]
             };
-            let mut dir = [p.up, p.right, p.down, p.left];
-            // in analog mode the left stick isn't the d-pad: drop the d-pad presses the
-            // frontend made from the stick (the stick leaning the same way)
+            let (r2, l3, r3) = (ext & r2b != 0, ext & l3b != 0, ext & r3b != 0);
+            // the Analog button toggles on its press
+            let analog_btn = ext & anb != 0;
+            if analog_btn && !self.analog_held[k] { self.bus.sio.pads[k].analog_button(); }
+            self.analog_held[k] = analog_btn;
             let sio = &self.bus.sio.pads[k];
-            if sio.analog {
-                let [_, _, lx, ly] = sio.axes;
-                let lean = |v: u8, neg: bool| if neg { v < 0x80 - 20 } else { v > 0x80 + 20 };
-                let leaning = [lean(ly, true), lean(lx, false), lean(ly, false), lean(lx, true)];
-                for d in 0..4 { if leaning[d] { dir[d] = false; } }
-            }
+            let dir = stick_or_dpad(sio.analog, sio.axes, [p.up, p.right, p.down, p.left]);
             let bits = [
                 (p.coin, 0), (l3, 1), (r3, 2), (p.start, 3), (dir[0], 4), (dir[1], 5), (dir[2], 6), (dir[3], 7),
                 (p.z, 8), (r2, 9), (p.l, 10), (p.r, 11), (p.y, 12), (p.a, 13), (p.b, 14), (p.x, 15),

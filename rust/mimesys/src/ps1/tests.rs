@@ -900,3 +900,14 @@ fn digital_pad_has_no_config() {
     let r = pad_xfer(&mut s, &[1, 0x42, 0, 0, 0, 0, 0]);
     assert_eq!(r.len(), 5, "still a digital pad");
 }
+
+#[test]
+fn the_left_stick_is_the_d_pad_only_without_analog_mode() {
+    use super::stick_or_dpad;
+    let left = [0x80, 0x80, 0x10, 0x80];   // [rx, ry, lx, ly]: left stick hard left
+    assert_eq!(stick_or_dpad(true, left, [false; 4]), [false; 4], "analog: the stick isn't the d-pad");
+    assert_eq!(stick_or_dpad(true, left, [true, false, false, false]), [true, false, false, false],
+        "and the d-pad works while the stick leans");
+    assert_eq!(stick_or_dpad(false, left, [false; 4]), [false, false, false, true], "digital: it is");
+    assert_eq!(stick_or_dpad(false, [0x80, 0x80, 0x60, 0xA0], [false; 4]), [false; 4], "a small lean isn't");
+}

@@ -512,7 +512,7 @@ func _apply_display_options() -> void:
 		emu_system.set_option("vs_ppu", int(AppSettings.get_option(sys, "vs_ppu")))
 	# GBA cartridge clock (Pokemon etc.): local time = UTC + this many minutes
 	emu_system.set_option("rtc_utc_offset", Time.get_time_zone_from_system().bias)
-	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug", "md": "md_debug", "nes": "nes_debug", "a7800": "a7800_debug", "arcade": "arcade_debug", "dc": "dc_debug", "ps1": "ps1_debug", "saturn": "saturn_debug"}
+	var dbg_keys := {"nds": "nds_debug", "lynx": "lynx_debug", "snes": "snes_debug", "md": "md_debug", "nes": "nes_debug", "a7800": "a7800_debug", "arcade": "arcade_debug", "dc": "dc_debug", "ps1": "ps1_debug", "ps2": "ps2_debug", "saturn": "saturn_debug"}
 	var dbg_key: String = dbg_keys.get(sys, "")
 	var dbg_on: bool = dbg_key != "" and AppSettings.get_option(sys, dbg_key)
 	var speed_log: bool = sys == "dc" and AppSettings.get_option(sys, "dc_speed_log")
@@ -520,7 +520,7 @@ func _apply_display_options() -> void:
 	emu_system.set_debug_log(ProjectSettings.globalize_path("user://debug_%s.log" % sys) if dbg_on or speed_log else "")
 	emu_system.set_data_dir(ProjectSettings.globalize_path("user://"))
 	emu_system.set_option("debug_report", 1 if dbg_on else 0)
-	_analog_on = sys == "ps1"
+	_analog_on = sys == "ps1" or sys == "dc"
 	if sys == "ps1":
 		emu_system.set_option("ps1_pad", ["dualshock", "analog", "digital"].find(str(AppSettings.get_option(sys, "ps1_pad"))))
 		emu_system.set_option("ps1_rumble", 1 if AppSettings.get_option(sys, "ps1_rumble") else 0)
@@ -681,6 +681,8 @@ const INPUT_BITS := {
 ## and their start / coin.
 const EXT_BITS := {
 	"c2_y": 0, "c2_z": 1, "c2_l1": 2, "c2_r1": 3,
+	# PlayStation player 2: R2 (also the Saturn R trigger), L3, R3, Analog
+	"c2_r2": 4, "c2_l3": 5, "c2_r3": 6, "c2_analog": 7,
 	"c3_up": 8, "c3_down": 9, "c3_left": 10, "c3_right": 11,
 	"c3_b": 12, "c3_a": 13, "c3_x": 14, "c3_y": 15,
 	"c4_up": 16, "c4_down": 17, "c4_left": 18, "c4_right": 19,
@@ -720,20 +722,31 @@ func _get_serialized_input() -> int:
 	mask |= (key_value << 8)
 	return mask
 
-## Analog sticks and rumble (PlayStation DualShock): players 1 / 2 are the first two
-## connected joypads.
+## Analog sticks (PlayStation DualShock, Dreamcast) and rumble (PlayStation): players
+## 1-4 are the connected joypads in order. A small round dead zone keeps a resting stick
+## at the centre (128).
+const STICK_DEADZONE := 0.12
 var _analog_on := false
 var _rumble_last: Array = [Vector2i.ZERO, Vector2i.ZERO]
 
 func _get_sticks() -> Array:
 	var out := []
 	var pads := Input.get_connected_joypads()
-	for p in 2:
+	for p in 4:
 		if p >= pads.size():
 			break
 		var d: int = pads[p]
-		var v := func(axis): return clampi(int(round((Input.get_joy_axis(d, axis) + 1.0) * 127.5)), 0, 255)
-		out.append([v.call(JOY_AXIS_LEFT_X), v.call(JOY_AXIS_LEFT_Y), v.call(JOY_AXIS_RIGHT_X), v.call(JOY_AXIS_RIGHT_Y)])
+		var row := []
+		for pair in [[JOY_AXIS_LEFT_X, JOY_AXIS_LEFT_Y], [JOY_AXIS_RIGHT_X, JOY_AXIS_RIGHT_Y]]:
+			var s := Vector2(Input.get_joy_axis(d, pair[0]), Input.get_joy_axis(d, pair[1]))
+			var mag := s.length()
+			if mag < STICK_DEADZONE:
+				s = Vector2.ZERO
+			else:
+				s = s / mag * minf(1.0, (mag - STICK_DEADZONE) / (1.0 - STICK_DEADZONE))
+			row.append(clampi(int(round((s.x + 1.0) * 127.5)), 0, 255))
+			row.append(clampi(int(round((s.y + 1.0) * 127.5)), 0, 255))
+		out.append(row)
 	return out
 
 func _apply_rumble(rumble: Array) -> void:

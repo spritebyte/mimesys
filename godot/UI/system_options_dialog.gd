@@ -245,6 +245,14 @@ func _rebuild() -> void:
 		pdbg.toggled.connect(func(on): _put("ps1_debug", on))
 		_row("Debug", pdbg)
 
+	# PlayStation 2: the debug log (debug_ps2.log)
+	if sys == "ps2":
+		var p2dbg := CheckBox.new()
+		p2dbg.text = "Debug log: chip state every 5 s, first use of unemulated registers, the instructions before a crash (debug_ps2.log; next load). The consoles' own messages are always logged."
+		p2dbg.button_pressed = _opt("ps2_debug")
+		p2dbg.toggled.connect(func(on): _put("ps2_debug", on))
+		_row("Debug", p2dbg)
+
 	# Saturn: the debug log (debug_saturn.log)
 	if sys == "saturn":
 		var sdbg := CheckBox.new()

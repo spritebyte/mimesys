@@ -198,3 +198,11 @@ those libraries to generate test data; the libraries aren't distributed with mim
 ## Dependencies
 Godot (MIT), godot-rust/gdext (MPL-2.0), and Rust crates under MIT / Apache-2.0 keep their
 own licenses.
+
+## PlayStation 2
+The PS2 core (`rust/mimesys/src/ps2/`, `rust/mimesys/src/common/cpu/r5900/`) is written
+from the hardware descriptions in ps2tek (github.com/israpps/ps2tek, after PSI's ps2tek),
+not ported from an emulator. The RDRAM initialisation handshake (`ps2/hw.rs`) follows the
+pseudo-code on its "EE RDRAM initialization" page. Play! (BSD-2-Clause, Jean-Philip
+Desjardins) and PCSX2 (GPL-3.0) were consulted for behaviour only; no code was copied.
+OpenPS2BIOS (MIT, Tamariba Devs) is used as a test BIOS and is not bundled.

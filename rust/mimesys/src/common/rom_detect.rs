@@ -87,6 +87,10 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
     if data.len() == crate::dreamcast::bus::BIOS_SIZE && (file.starts_with("dc_boot") || file.starts_with("dc_bios") || file.contains("dreamcast")) {
         return vec![Guess { system: "dc", score: 100, why: "Dreamcast BIOS (no disc)".into() }];
     }
+    // PlayStation 2: the BIOS alone (no disc)
+    if crate::ps2::is_bios(data, &file) {
+        return vec![Guess { system: "ps2", score: 100, why: "PlayStation 2 BIOS (no disc)".into() }];
+    }
     // PlayStation: the BIOS alone (the shell), or a PS-EXE
     if crate::ps1::is_bios(data, &file) {
         return vec![Guess { system: "ps1", score: 100, why: "PlayStation BIOS (no disc)".into() }];

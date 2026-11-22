@@ -230,7 +230,7 @@ impl Bus for PacmanBus {
         }
     }
 
-    fn port_in(&mut self, port: u16) -> u8 { 0xFF }
+    fn port_in(&mut self, _port: u16) -> u8 { 0xFF }
     fn port_out(&mut self, port: u16, val: u8) {
         if self.board == Board::Pacman && port & 0xFF == 0 { self.irq_vector = val; }
     }

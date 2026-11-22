@@ -16,3 +16,4 @@ pub mod m68000;
 pub mod sh2;
 pub mod sh4;
 pub mod r3000;
+pub mod r5900;

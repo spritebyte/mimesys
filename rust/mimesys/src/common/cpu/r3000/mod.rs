@@ -49,6 +49,7 @@ pub const EXC_ADES: u32 = 5;
 pub const EXC_SYSCALL: u32 = 8;
 pub const EXC_BREAK: u32 = 9;
 pub const EXC_RI: u32 = 10;
+pub const EXC_TRAP: u32 = 13;
 pub const EXC_CPU: u32 = 11;
 pub const EXC_OV: u32 = 12;
 
@@ -98,6 +99,10 @@ pub struct R3000 {
     trace_pos: usize,
     #[serde(skip)]
     pub trace_dumped: bool,
+    /// The PS2's IOP: run the MIPS II trap instructions (TGE .. TNE, SPECIAL 30-36) that
+    /// compilers put after divides; the PS1 treats them as reserved
+    #[serde(default)]
+    pub mips2_traps: bool,
 }
 
 impl Default for R3000 {
@@ -131,6 +136,7 @@ impl R3000 {
             trace: Vec::new(),
             trace_pos: 0,
             trace_dumped: false,
+            mips2_traps: false,
         };
         c.reset();
         c
@@ -450,6 +456,11 @@ impl R3000 {
                 0x27 => self.set(rd, !(s | t)),
                 0x2A => self.set(rd, ((s as i32) < (t as i32)) as u32),
                 0x2B => self.set(rd, (s < t) as u32),
+                f @ 0x30..=0x36 if self.mips2_traps && f != 0x35 => {
+                    let (a, b) = (s as i32, t as i32);
+                    let hit = match f { 0x30 => a >= b, 0x31 => s >= t, 0x32 => a < b, 0x33 => s < t, 0x34 => s == t, _ => s != t };
+                    if hit { return Err(self.fault(EXC_TRAP)); }
+                }
                 _ => return Err(self.fault(EXC_RI)),
             },
             0x01 => {                                          // BLTZ / BGEZ (/ AL)

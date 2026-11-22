@@ -122,7 +122,7 @@ fn bus() -> Dc { Dc::new(vec![0; BIOS_SIZE], &[], 0) }
 #[test]
 fn maple_get_condition_reads_the_pad() {
     let mut d = bus();
-    d.pads[0] = Some(dc_pad(&pad::pads(pad::B | pad::RIGHT, 0)[0]));
+    d.pads[0] = Some(dc_pad(&pad::pads(pad::B | pad::RIGHT, 0)[0], None));
     // table at 0C010000: one entry, last, port A, 2 words; reply to 0C010100
     let t = 0x8C01_0000;
     for (k, w) in [0x8000_0001u32, 0x0C01_0100, 0x09 | 0x20 << 8 | 1 << 24, 0x0100_0000].iter().enumerate() {
@@ -581,4 +581,17 @@ fn memory_cards_swap() {
     s.run_frame(0);
     assert!(s.memory_card_dirty());
     assert!(!s.memory_card_dirty(), "asking clears it");
+}
+
+/// Skies of Arcadia: the stick walks, the d-pad turns the camera, so they're separate
+#[test]
+fn the_stick_and_the_d_pad_are_separate_with_a_controller() {
+    let p = pad::pads(pad::LEFT, 0)[0];
+    let with = dc_pad(&p, Some([0xC0, 0x20]));
+    assert_eq!(with.buttons & maple::BTN_LEFT, 0, "d-pad left pressed (active low)");
+    assert_eq!((with.x, with.y), (0xC0, 0x20), "the stick is the controller's own");
+    let keyboard = dc_pad(&p, None);
+    assert_eq!((keyboard.x, keyboard.y), (0, 0x80), "no controller: the d-pad pushes the stick");
+    let centred = dc_pad(&pad::pads(0, 0)[0], Some([0x80, 0x80]));
+    assert_eq!(centred.buttons, 0xFFFF, "and the stick presses no d-pad button");
 }

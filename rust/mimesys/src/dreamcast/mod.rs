@@ -156,6 +156,9 @@ pub struct DcSystem {
     frame: Vec<u8>,
     current_frame: u64,
     ext: u32,
+    /// each controller's analog stick (X, Y) from the frontend; None = no controller there
+    /// (keyboard): the d-pad stands in for it
+    sticks: [Option<[u8; 2]>; 4],
     /// fractional CPU cycles carried between frames
     time_rem: u64,
     /// SPG_CONTROL last reported
@@ -249,7 +252,7 @@ impl DcSystem {
         bus::vwatch_init();
         crate::dlog!("Dreamcast: BIOS loaded, video cable {}", ["VGA", "?", "RGB", "composite"][dc.chip.cable as usize]);
         Ok(Self {
-            cpu: Sh4::new(), dc, frame: vec![0; OUT_W * OUT_H * 4], current_frame: 0, ext: 0, time_rem: 0, video_mode: u32::MAX,
+            cpu: Sh4::new(), dc, frame: vec![0; OUT_W * OUT_H * 4], current_frame: 0, ext: 0, sticks: [None; 4], time_rem: 0, video_mode: u32::MAX,
             debug_report: false, gd_cmds_before: 0, pc_hist: HashMap::new(), ce_log: Default::default(), ce_wait: None, ce_seq: 0, jumps: Default::default(), disc_path,
             cpi: 1, cpi_half: 2, cpi_carry: 0, fpu_exact: false, idle_skip: true, idle_loops: HashMap::new(), speed_log: false, wav: WavRec::default(), prof: Prof::default(),
             // the flash is the console's, not the game's: one file for every game
@@ -660,15 +663,17 @@ impl DcSystem {
 }
 
 /// Pad n's state on the Dreamcast controller: B (bottom) = A, A (right) = B, X, Y, Start,
-/// d-pad (also full stick deflection), L / R = the triggers.
-fn dc_pad(p: &pad::Pad) -> DcPad {
+/// the d-pad, L / R = the triggers. The analog stick is the controller's left stick; with
+/// none (`stick` None, a keyboard player) the d-pad pushes it all the way instead.
+pub(crate) fn dc_pad(p: &pad::Pad, stick: Option<[u8; 2]>) -> DcPad {
     let mut b: u16 = 0xFFFF;
     for (on, bit) in [(p.b, maple::BTN_A), (p.a, maple::BTN_B), (p.x, maple::BTN_X), (p.y, maple::BTN_Y), (p.start, maple::BTN_START),
                       (p.up, maple::BTN_UP), (p.down, maple::BTN_DOWN), (p.left, maple::BTN_LEFT), (p.right, maple::BTN_RIGHT)] {
         if on { b &= !bit; }
     }
     let axis = |neg: bool, pos: bool| if neg && !pos { 0 } else if pos && !neg { 0xFF } else { 0x80 };
-    DcPad { buttons: b, lt: if p.l { 0xFF } else { 0 }, rt: if p.r { 0xFF } else { 0 }, x: axis(p.left, p.right), y: axis(p.up, p.down) }
+    let [x, y] = stick.unwrap_or([axis(p.left, p.right), axis(p.up, p.down)]);
+    DcPad { buttons: b, lt: if p.l { 0xFF } else { 0 }, rt: if p.r { 0xFF } else { 0 }, x, y }
 }
 
 impl System for DcSystem {
@@ -714,8 +719,13 @@ impl System for DcSystem {
     fn set_input(&mut self, input: u32) {
         let pads = pad::pads(input, self.ext);
         for (k, p) in pads.iter().enumerate() {
-            if self.dc.pads[k].is_some() { self.dc.pads[k] = Some(dc_pad(p)); }
+            if self.dc.pads[k].is_some() { self.dc.pads[k] = Some(dc_pad(p, self.sticks[k])); }
         }
+    }
+
+    /// The left stick (Y: 0 = up, like the Dreamcast's); the right one has nowhere to go
+    fn set_analog(&mut self, port: usize, sticks: [u8; 4]) {
+        if let Some(s) = self.sticks.get_mut(port) { *s = Some([sticks[0], sticks[1]]); }
     }
 
     fn set_extra_input(&mut self, ext: u32) {

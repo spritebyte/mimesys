@@ -475,7 +475,7 @@ impl State {
                     let ofs = if a & 2 != 0 { 0 } else { 8 };
                     let i = ((a as usize >> 1) & 0x1FFFF & !1) | self.sub_bank();
                     let mut w = word(&self.wram, i);
-                    let mut nib = |w: &mut u16, at: u32, n: u16| {
+                    let nib = |w: &mut u16, at: u32, n: u16| {
                         let old = (*w >> at) & 0xF;
                         let write = match self.io.wram_priority {
                             0 => true,

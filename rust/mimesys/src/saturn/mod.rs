@@ -564,7 +564,8 @@ impl SaturnSystem {
         let pads = input::pads(input, self.ext);
         for k in 0..2 {
             let p = &pads[k];
-            let r2 = k == 0 && self.ext & input::EXT_P1_R2 != 0;
+            // R trigger: its own R2 action (player 2's used to be Select, still honoured)
+            let r2 = self.ext & [input::EXT_P1_R2, input::EXT_P2_R2][k] != 0;
             // R L D U Start A C B | R X Y Z L 1 1 1 (active low)
             let bits = [
                 (p.right, 15), (p.left, 14), (p.down, 13), (p.up, 12), (p.start, 11), (p.b, 10), (p.r, 9), (p.a, 8),

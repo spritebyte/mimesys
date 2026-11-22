@@ -24,5 +24,6 @@ mod m32x;
 mod nds;
 mod dreamcast;
 pub mod ps1;
+pub mod ps2;
 pub mod saturn;
 

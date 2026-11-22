@@ -39,6 +39,12 @@ pub const EXT_P2_Y: u32 = 1 << 0;
 pub const EXT_P2_Z: u32 = 1 << 1;
 pub const EXT_P2_L: u32 = 1 << 2;
 pub const EXT_P2_R: u32 = 1 << 3;
+/// Player 2's PlayStation extras (like player 1's below): R2 (also the Saturn R trigger),
+/// L3, R3, the Analog button
+pub const EXT_P2_R2: u32     = 1 << 4;
+pub const EXT_P2_L3: u32     = 1 << 5;
+pub const EXT_P2_R3: u32     = 1 << 6;
+pub const EXT_P2_ANALOG: u32 = 1 << 7;
 /// Players 3 and 4: one byte each, UP DOWN LEFT RIGHT B A X Y (bits 0-7): the low six bits
 /// are player 1's UP..A, then X and Y.
 pub const EXT_PAD_X: u32 = 1 << 6;
@@ -49,7 +55,8 @@ pub const EXT_P3_START: u32 = 1 << 24;
 pub const EXT_P3_COIN: u32  = 1 << 25;
 pub const EXT_P4_START: u32 = 1 << 26;
 pub const EXT_P4_COIN: u32  = 1 << 27;
-/// Player 1's PlayStation extras: R2, the stick buttons L3 / R3, the Analog button.
+/// Player 1's PlayStation extras: R2 (also the Saturn R trigger), the stick buttons
+/// L3 / R3, the Analog button.
 pub const EXT_P1_R2: u32     = 1 << 28;
 pub const EXT_P1_L3: u32     = 1 << 29;
 pub const EXT_P1_R3: u32     = 1 << 30;

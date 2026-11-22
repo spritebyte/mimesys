@@ -324,7 +324,7 @@ impl Z80Cpu {
     }
 
     pub fn step(&mut self, bus: &mut dyn Bus) -> u32 {
-        let can_process_irq = self.iff1 && self.ei_pending;
+        let _can_process_irq = self.iff1 && self.ei_pending;
         if self.ei_pending { self.ei_pending = false; }
 
         if self.halted {
@@ -758,7 +758,7 @@ impl Z80Cpu {
 
     fn exec_ed(&mut self, op: u8, bus: &mut dyn Bus) -> u32 {
         let (x, y, z) = (op >> 6, (op >> 3) & 7, op & 7);
-        let (p, q) = (y >> 1, y & 1);
+        let (_p, q) = (y >> 1, y & 1);
         match (x, z) {
             (1, 0) => {     // IN r, (C)
                 let port = self.bc();

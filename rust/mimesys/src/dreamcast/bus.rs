@@ -296,7 +296,7 @@ impl Dc {
     fn gd_ev(&mut self, s: Option<String>) {
         if !self.gd_trace_on { self.gd.ev.clear(); return; }
         let now = self.now;
-        let mut add = |t: &mut std::collections::VecDeque<(u64, String)>, e: String| {
+        let add = |t: &mut std::collections::VecDeque<(u64, String)>, e: String| {
             if t.len() >= 300 { t.pop_front(); }
             t.push_back((now, e));
         };

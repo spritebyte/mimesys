@@ -1,3 +1,6 @@
+/* Mapper 69
+
+*/
 use crate::nes::mappers::{Mapper, Mirroring};
 use serde::{Serialize, Deserialize};
 use std::cell::Cell;

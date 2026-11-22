@@ -15,6 +15,18 @@ const PATH := "user://settings.cfg"
 ## Default controller (0-based) for each player's actions.
 const PAD_OF_PREFIX := {"c2_": 1, "c3_": 2, "c4_": 3}
 
+## Systems whose controllers have a real analog stick (sent on its own, main.gd
+## _get_sticks): there the d-pad actions default to the controller's d-pad buttons, so
+## the stick and the d-pad are separate controls (Skies of Arcadia: stick walks, d-pad
+## turns the camera). Everywhere else the left stick is the d-pad.
+const STICK_SYSTEMS := ["ps1", "ps2", "dc"]
+const DPAD_BUTTON := {"up": JOY_BUTTON_DPAD_UP, "down": JOY_BUTTON_DPAD_DOWN,
+	"left": JOY_BUTTON_DPAD_LEFT, "right": JOY_BUTTON_DPAD_RIGHT}
+## Per-system controller defaults that differ from the project's (action -> axis):
+## the Dreamcast's L / R are triggers, so they sit on the controller's triggers.
+const PAD_AXIS_DEFAULTS := {"dc": {"c1_l1": JOY_AXIS_TRIGGER_LEFT, "c1_r1": JOY_AXIS_TRIGGER_RIGHT,
+	"c2_l1": JOY_AXIS_TRIGGER_LEFT, "c2_r1": JOY_AXIS_TRIGGER_RIGHT}}
+
 const ALL_ACTIONS := [
 	"c1_up", "c1_down", "c1_left", "c1_right", "c1_b", "c1_a", "c1_select", "c1_start",
 	"coin", "c2_start", "c1_x", "c2_x", "c1_l1", "c1_r1",
@@ -23,7 +35,7 @@ const ALL_ACTIONS := [
 	"c2_up", "c2_down", "c2_left", "c2_right", "c2_b", "c2_a", "c2_select",
 	"c1_0", "c1_1", "c1_2", "c1_3", "c1_4", "c1_5", "c1_6", "c1_7", "c1_8", "c1_9",
 	"c1_star", "c1_hash",
-	"c2_y", "c2_z", "c2_l1", "c2_r1",
+	"c2_y", "c2_z", "c2_l1", "c2_r1", "c2_r2", "c2_l3", "c2_r3", "c2_analog",
 	"c3_up", "c3_down", "c3_left", "c3_right", "c3_b", "c3_a", "c3_x", "c3_y", "c3_start", "c3_coin",
 	"c4_up", "c4_down", "c4_left", "c4_right", "c4_b", "c4_a", "c4_x", "c4_y", "c4_start", "c4_coin",
 ]
@@ -104,6 +116,7 @@ const OPTION_DEFAULTS := {
 	"ps1_rumble": true,      # PlayStation: DualShock rumble on the controller
 	"ps1_debug": false,      # PlayStation: debug log (CD commands, chip state every 5 s, trace before a crash)
 	"saturn_debug": false,   # Saturn: debug log (SMPC / CD commands, the CPUs every 5 s)
+	"ps2_debug": false,      # PlayStation 2: debug log (chip state every 5 s, unmodelled registers, trace before a crash)
 	"ps1_card": "Card 1",    # PlayStation: the memory card in slot 1 (user://GD_EMU/PS1/MemoryCards/<name>.mcd)
 }
 ## Game Boy boot ROMs: "bios" (above) is the Game Boy Color one, this is the original's.
@@ -118,6 +131,7 @@ const BIOS_DEFAULTS := {
 	"a5200": "user://BIOS/5200.rom",
 	"lynx": "user://BIOS/lynxboot.img",
 	"saturn": "user://BIOS/saturn_bios.bin",   # else the first sega_1*, mpr-17933* or *saturn* 512 KB file
+	"ps2": "user://BIOS/ps2_bios.bin",         # else the first scph* or *ps2* 4 MB file (OpenPS2BIOS too)
 }
 const BIOS_OPTIONAL := ["gb", "gba"]    # these can boot without it
 var _options := {}               # system id -> {option: value} (only changed ones)
@@ -156,17 +170,25 @@ func _init() -> void:
 			["c1_l1", "L1 [L]"], ["c1_r1", "R1 [R]"], ["c1_z", "L2 [Z]"], ["c1_r2", "R2"], ["c1_start", "Start"], ["c1_select", "Select"],
 			["c1_l3", "L3 (left stick press)"], ["c1_r3", "R3 (right stick press)"], ["c1_analog", "Analog button (DualShock mode)"]] + dpad2 + [
 			["c2_b", "P2 Cross [B]"], ["c2_a", "P2 Circle [A]"], ["c2_x", "P2 Square [X]"], ["c2_y", "P2 Triangle [Y]"],
-			["c2_l1", "P2 L1 [L]"], ["c2_r1", "P2 R1 [R]"], ["c2_z", "P2 L2 [Z]"], ["c2_start", "P2 Start"], ["c2_select", "P2 Select"]]},
+			["c2_l1", "P2 L1 [L]"], ["c2_r1", "P2 R1 [R]"], ["c2_z", "P2 L2 [Z]"], ["c2_r2", "P2 R2"], ["c2_start", "P2 Start"], ["c2_select", "P2 Select"],
+			["c2_l3", "P2 L3 (left stick press)"], ["c2_r3", "P2 R3 (right stick press)"], ["c2_analog", "P2 Analog button"]]},
+		"ps2": {"name": "PlayStation 2", "actions": dpad + [
+			["c1_b", "Cross [B]"], ["c1_a", "Circle [A]"], ["c1_x", "Square [X]"], ["c1_y", "Triangle [Y]"],
+			["c1_l1", "L1 [L]"], ["c1_r1", "R1 [R]"], ["c1_z", "L2 [Z]"], ["c1_r2", "R2"], ["c1_start", "Start"], ["c1_select", "Select"],
+			["c1_l3", "L3 (left stick press)"], ["c1_r3", "R3 (right stick press)"], ["c1_analog", "Analog button"]] + dpad2 + [
+			["c2_b", "P2 Cross [B]"], ["c2_a", "P2 Circle [A]"], ["c2_x", "P2 Square [X]"], ["c2_y", "P2 Triangle [Y]"],
+			["c2_l1", "P2 L1 [L]"], ["c2_r1", "P2 R1 [R]"], ["c2_z", "P2 L2 [Z]"], ["c2_r2", "P2 R2"], ["c2_start", "P2 Start"], ["c2_select", "P2 Select"],
+			["c2_l3", "P2 L3 (left stick press)"], ["c2_r3", "P2 R3 (right stick press)"], ["c2_analog", "P2 Analog button"]]},
 		"saturn": {"name": "Sega Saturn", "actions": dpad + [
 			["c1_b", "A [B]"], ["c1_a", "B [A]"], ["c1_r1", "C [R]"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_l1", "Z [L]"],
 			["c1_z", "L trigger [Z]"], ["c1_r2", "R trigger [R2]"], ["c1_start", "Start"]] + dpad2 + [
 			["c2_b", "P2 A [B]"], ["c2_a", "P2 B [A]"], ["c2_r1", "P2 C [R]"], ["c2_x", "P2 X"], ["c2_y", "P2 Y"], ["c2_l1", "P2 Z [L]"],
-			["c2_z", "P2 L trigger [Z]"], ["c2_select", "P2 R trigger [Select]"], ["c2_start", "P2 Start"]]},
+			["c2_z", "P2 L trigger [Z]"], ["c2_r2", "P2 R trigger [R2]"], ["c2_start", "P2 Start"]]},
 		"dc": {"name": "Sega Dreamcast", "actions": dpad + [
 			["c1_b", "A [B]"], ["c1_a", "B [A]"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_start", "Start"],
-			["c1_l1", "L trigger [L]"], ["c1_r1", "R trigger [R]"]] + dpad2 + [
+			["c1_l1", "L trigger [L2]"], ["c1_r1", "R trigger [R2]"]] + dpad2 + [
 			["c2_b", "P2 A [B]"], ["c2_a", "P2 B [A]"], ["c2_x", "P2 X"], ["c2_y", "P2 Y"], ["c2_start", "P2 Start"],
-			["c2_l1", "P2 L trigger [L]"], ["c2_r1", "P2 R trigger [R]"]] + _arcade_pad(3) + _arcade_pad(4)},
+			["c2_l1", "P2 L trigger [L2]"], ["c2_r1", "P2 R trigger [R2]"]] + _arcade_pad(3) + _arcade_pad(4)},
 		"nds": {"name": "Nintendo DS (stylus = mouse on the bottom screen)", "actions": dpad + [
 			["c1_a", "A"], ["c1_b", "B"], ["c1_x", "X"], ["c1_y", "Y"], ["c1_l1", "L"], ["c1_r1", "R"],
 			["c1_select", "Select"], ["c1_start", "Start"], ["c1_z", "Microphone (blow) [Z]"]]},
@@ -393,7 +415,17 @@ func _entry(system_id: String, action: String) -> Dictionary:
 	var table: Dictionary = _bindings.get(system_id, {})
 	if table.has(action):
 		return table[action]
-	return _defaults.get(action, {"key": null, "pad": null})
+	var d: Dictionary = _defaults.get(action, {"key": null, "pad": null})
+	# analog-stick systems: the d-pad actions sit on the controller's d-pad
+	var dir := action.substr(3)
+	if system_id in STICK_SYSTEMS and action.substr(0, 1) == "c" and action.substr(2, 1) == "_" and DPAD_BUTTON.has(dir):
+		d = d.duplicate()
+		d["pad"] = {"t": "btn", "i": DPAD_BUTTON[dir], "dev": PAD_OF_PREFIX.get(action.substr(0, 3), 0)}
+	var axes: Dictionary = PAD_AXIS_DEFAULTS.get(system_id, {})
+	if axes.has(action):
+		d = d.duplicate()
+		d["pad"] = {"t": "axis", "a": axes[action], "d": 1, "dev": PAD_OF_PREFIX.get(action.substr(0, 3), 0)}
+	return d
 
 
 # ---------------- binding <-> InputEvent ----------------

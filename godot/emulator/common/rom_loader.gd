@@ -112,6 +112,12 @@ static func create_system(system_id: String, data: PackedByteArray, name: String
 			if bios.is_empty() and data.size() != 0x80000:
 				OS.alert("PlayStation needs its BIOS: put a 512 KB BIOS (e.g. scph1001.bin) in the BIOS folder.")
 				return null
+		"ps2":
+			bios = ps2_bios()
+			# the BIOS file itself starts the console with no disc
+			if bios.is_empty() and data.size() != 0x400000:
+				OS.alert("PlayStation 2 needs its BIOS: put a 4 MB BIOS dump (e.g. scph39001.bin) or OpenPS2BIOS in the BIOS folder.")
+				return null
 		"saturn":
 			bios = saturn_bios()
 			# the BIOS file itself starts the console with no disc
@@ -300,6 +306,28 @@ static func ps1_bios() -> PackedByteArray:
 		var data := load_bios(BIOS_DIR.path_join(file))
 		if data.size() == 0x80000:
 			print("PlayStation BIOS: %s" % file)
+			return data
+	return PackedByteArray()
+
+
+## The PlayStation 2 BIOS: System Options' choice, else the first 4 MB file in the BIOS
+## folder named like one (scph*, *ps2*, which includes OpenPS2BIOS).
+static func ps2_bios() -> PackedByteArray:
+	var chosen := AppSettings.bios_path("ps2", "")
+	if chosen != "" and FileAccess.file_exists(chosen):
+		return load_bios(chosen)
+	var dir := DirAccess.open(BIOS_DIR)
+	if dir == null:
+		return PackedByteArray()
+	var files := dir.get_files()
+	files.sort()
+	for file in files:
+		var low := file.to_lower()
+		if not (low.begins_with("scph") or "ps2" in low):
+			continue
+		var data := load_bios(BIOS_DIR.path_join(file))
+		if data.size() == 0x400000:
+			print("PlayStation 2 BIOS: %s" % file)
 			return data
 	return PackedByteArray()
 

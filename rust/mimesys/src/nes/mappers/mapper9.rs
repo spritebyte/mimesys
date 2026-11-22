@@ -81,12 +81,14 @@ impl Mapper9 {
             is_mmc4,
         }
     }
-    fn update_latches(&self, addr: u16) {
+    /* doesn't look like we need this anymore. Will remove later.
+    fn _update_latches(&self, addr: u16) {
         if addr >= 0x0FD8 && addr <= 0x0FDF { self.latch_0.set(0xFD); }
         if addr >= 0x0FE8 && addr <= 0x0FEF { self.latch_0.set(0xFE); }
         if addr >= 0x1FD8 && addr <= 0x1FDF { self.latch_1.set(0xFD); }
         if addr >= 0x1FE8 && addr <= 0x1FEF { self.latch_1.set(0xFE); }
     }
+    */
 
     // Changed to &self to keep reads non-mutating
     fn _chr_read(&self, addr: usize) -> u8 {
