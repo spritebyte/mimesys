@@ -302,6 +302,6 @@ impl System for Dk3System {
 }
 
 impl HiScoreMem for Dk3System {
-    fn hs_read(&mut self, addr: u16) -> u8 { self.bus.read(addr) }
-    fn hs_write(&mut self, addr: u16, v: u8) { self.bus.write(addr, v) }
+    fn hs_read(&mut self, addr: u32) -> u8 { self.bus.read(addr as u16) }
+    fn hs_write(&mut self, addr: u32, v: u8) { self.bus.write(addr as u16, v) }
 }

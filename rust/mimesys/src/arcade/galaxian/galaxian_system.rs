@@ -99,7 +99,7 @@ impl GalaxianSystem {
             sound_cycle_debt: 0,
             current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://Arcade/Galaxian/State".to_string(),
+            save_path: "user://GD_EMU/Arcade/Galaxian/State".to_string(),
         })
     }
 }
@@ -247,8 +247,8 @@ impl System for GalaxianSystem {
 }
 
 impl HiScoreMem for GalaxianSystem {
-    fn hs_read(&mut self, addr: u16) -> u8 { self.bus.read(addr) }
-    fn hs_write(&mut self, addr: u16, v: u8) { self.bus.write(addr, v) }
+    fn hs_read(&mut self, addr: u32) -> u8 { self.bus.read(addr as u16) }
+    fn hs_write(&mut self, addr: u32, v: u8) { self.bus.write(addr as u16, v) }
 }
 
 /// Moon Cresta program ROM scramble (MAME decode_mooncrst): two data bits flip each

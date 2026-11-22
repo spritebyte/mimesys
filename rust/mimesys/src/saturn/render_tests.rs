@@ -260,3 +260,44 @@ fn nbg0_line_scroll_and_vertical_cell_scroll() {
     assert_eq!((l0[0], l0[8]), (GREEN, GREEN), "column 0 shows row 1 (green); column 1 is character 2 anyway");
     assert_eq!(l0[16], RED, "column 2 unmoved");
 }
+
+#[test]
+fn special_colour_calculation_by_colour_msb() {
+    let mut v = vdp2();
+    nbg0_cells(&mut v);
+    w16(&mut v.cram, 4, 0x83E0);            // colour 2: green with the top bit set
+    reg(&mut v, 0xEC, 0x0001);              // colour calculation on NBG0
+    reg(&mut v, 0x108, 15);                 // ratio 15: half and half with the back screen (black)
+    let l = line(&v, &Vdp1::new(), 0);
+    assert!(l[0][0] < 200 && l[8][1] < 200, "mode 0: the whole layer blends");
+    reg(&mut v, 0xEE, 0x0003);              // SFCCMD NBG0 = 3: only colours with the MSB set
+    let l = line(&v, &Vdp1::new(), 0);
+    assert_eq!(l[0], RED, "red has no MSB: drawn solid");
+    assert!(l[8][1] < 200, "green has the MSB: still blends");
+}
+
+#[test]
+fn vdp1_end_flags_survive_the_frame_change() {
+    let mut vdp1 = Vdp1::new();
+    w16(&mut vdp1.vram, 0, 0x8000);         // an empty list (END)
+    vdp1.write_reg(0x02, 3);                // manual swap mode, swap at the next frame change
+    vdp1.write_reg(0x04, 1);                // draw now
+    assert_eq!(vdp1.read_reg(0x10) & 2, 2, "CEF: this frame's drawing ended");
+    vdp1.frame_change();
+    assert_eq!(vdp1.read_reg(0x10), 3, "BEF copies CEF; CEF stays until the next drawing starts");
+}
+
+#[test]
+fn bitmap_lines_run_on_into_the_next_row() {
+    let mut v = vdp2();
+    reg(&mut v, 0x20, 0x0001);              // NBG0 on
+    reg(&mut v, 0x28, 0x0032);              // bitmap 512x256, 32K colours
+    reg(&mut v, 0xF8, 0x0001);
+    // row 0 dots 0-511 blue, row 1 dots 0-63 red (32K RGB, MSB = opaque)
+    for x in 0..512 { w16(&mut v.vram, x * 2, 0xFC00); }
+    for x in 0..64 { w16(&mut v.vram, 1024 + x * 2, 0x801F); }
+    reg(&mut v, 0x70, 448);                 // scroll X: line 0 starts at dot 448
+    let l = line(&v, &Vdp1::new(), 0);
+    assert_eq!(l[0], BLUE, "dot 448 of row 0");
+    assert_eq!(l[64], RED, "dot 512 is dot 0 of row 1, not dot 0 of row 0");
+}

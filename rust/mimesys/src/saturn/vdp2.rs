@@ -62,6 +62,12 @@ impl Vdp2 {
         }
     }
 
+    /// A VRAM word (debug)
+    pub fn vram_word(&self, a: u32) -> u16 {
+        let a = a as usize & (VRAM_SIZE - 2);
+        u16::from_be_bytes([self.vram[a], self.vram[a + 1]])
+    }
+
     pub fn interlaced(&self) -> bool { (self.tvmd() >> 6) & 3 == 3 }
 
     /// Lines in a frame (one field)

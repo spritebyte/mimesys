@@ -142551,5 +142551,1354 @@
     ]
    }
   }
+ },
+ "robocop": {
+  "title": "Robocop (World, revision 4)",
+  "driver": "robocop",
+  "rotation": 0,
+  "regions": {
+   "maincpu": {
+    "size": "0x60000",
+    "roms": [
+     {
+      "name": "ep05-4.11c",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "29c35379",
+      "sha1": "a352c2d0dff843c1e0b5cade506a8b33c2d781f1",
+      "step": "0x2"
+     },
+     {
+      "name": "ep01-4.11b",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "77507c69",
+      "sha1": "843b678b4a297d6d99ea7d797dedde33e5003119",
+      "step": "0x2"
+     },
+     {
+      "name": "ep04-3",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "39181778",
+      "sha1": "f91b63e541ef547d34d144c80bc0344b6acf8de0",
+      "step": "0x2"
+     },
+     {
+      "name": "ep00-3",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "e128541f",
+      "sha1": "c123b6ba282b552890319d97348015361264fa3b",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ep03-3",
+      "offset": "0x08000",
+      "size": "0x08000",
+      "crc": "5b164b24",
+      "sha1": "b217a2ac8b26aebd208631a13030487ed27d232e"
+     }
+    ]
+   },
+   "sub": {
+    "size": "0x200000",
+    "roms": [
+     {
+      "name": "en_24_mb7124e.a2",
+      "offset": "0x01e00",
+      "size": "0x0200",
+      "crc": "b8e2ca98",
+      "sha1": "bd1e193c544dc17a665aa6c4d3b844775ed08b43"
+     }
+    ]
+   },
+   "char": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "ep23",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "a77e4ab1",
+      "sha1": "d06cc847192b6c7f642e4ff7128e298d0aa034b2"
+     },
+     {
+      "name": "ep22",
+      "offset": "0x10000",
+      "size": "0x10000",
+      "crc": "9fbd6903",
+      "sha1": "9ac6ac8a18c23e915e8ae3782867d10c0bd65778"
+     }
+    ]
+   },
+   "tiles1": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ep20",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "1d8d38b8",
+      "sha1": "9add6349f8a578fb86b678cef921d6ec0cfccdad"
+     },
+     {
+      "name": "ep21",
+      "offset": "0x10000",
+      "size": "0x10000",
+      "crc": "187929b2",
+      "sha1": "deca1f0a52584769caee1d2302617aa957c56a71"
+     },
+     {
+      "name": "ep18",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "b6580b5e",
+      "sha1": "ee216d8db89b8cb7a51a4e19bf6f17788547156b"
+     },
+     {
+      "name": "ep19",
+      "offset": "0x30000",
+      "size": "0x10000",
+      "crc": "9bad01c7",
+      "sha1": "947c7f9d0facaea13a924274adde0e996be7b999"
+     }
+    ]
+   },
+   "tiles2": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "ep14",
+      "offset": "0x00000",
+      "size": "0x08000",
+      "crc": "ca56ceda",
+      "sha1": "edbaa29fc166cddf071ff5e59cfcfb7eeb127d68"
+     },
+     {
+      "name": "ep15",
+      "offset": "0x08000",
+      "size": "0x08000",
+      "crc": "a945269c",
+      "sha1": "de0b387e8699298f7682d6d7ca803a209888f7a1"
+     },
+     {
+      "name": "ep16",
+      "offset": "0x10000",
+      "size": "0x08000",
+      "crc": "e7fa4d58",
+      "sha1": "32e3f649b4f112a4e6be00068473b82c627bc8d1"
+     },
+     {
+      "name": "ep17",
+      "offset": "0x18000",
+      "size": "0x08000",
+      "crc": "84aae89d",
+      "sha1": "037520bd0f291f862c2211a6f35b2a8a54f10b2a"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x80000",
+    "roms": [
+     {
+      "name": "ep07",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "495d75cf",
+      "sha1": "0ffe677d53b7675073902e9bd40e4150f2cdfb1a"
+     },
+     {
+      "name": "ep06",
+      "offset": "0x10000",
+      "size": "0x08000",
+      "crc": "a2ae32e2",
+      "sha1": "4e8182205563da9d50a831c65951645e278b03e6"
+     },
+     {
+      "name": "ep11",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "62fa425a",
+      "sha1": "be88c1a6436df8a456c405822e28c472e3e79a69"
+     },
+     {
+      "name": "ep10",
+      "offset": "0x30000",
+      "size": "0x08000",
+      "crc": "cce3bd95",
+      "sha1": "00bbb197824d970b0e404167ca4ae53e1955ad94"
+     },
+     {
+      "name": "ep09",
+      "offset": "0x40000",
+      "size": "0x10000",
+      "crc": "11bed656",
+      "sha1": "6a7d984a32982d9aef8ea7d8a720925036e7046e"
+     },
+     {
+      "name": "ep08",
+      "offset": "0x50000",
+      "size": "0x08000",
+      "crc": "c45c7b4c",
+      "sha1": "70e3e475fe767eefa4cc1d6ca052271a099ff7a8"
+     },
+     {
+      "name": "ep13",
+      "offset": "0x60000",
+      "size": "0x10000",
+      "crc": "8fca9f28",
+      "sha1": "cac85bf2b66e49e22c33c85bdb5712feef6aae7e"
+     },
+     {
+      "name": "ep12",
+      "offset": "0x70000",
+      "size": "0x08000",
+      "crc": "3cd1d0c3",
+      "sha1": "ca3546cf51ebb10dfa4e78954f0212e8fcdb3d57"
+     }
+    ]
+   },
+   "oki": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ep02",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "711ce46f",
+      "sha1": "939a8545e53776ff2180d2c7e63bc997689c088e"
+     }
+    ]
+   }
+  }
+ },
+ "robocopw": {
+  "title": "Robocop (World, revision 3)",
+  "driver": "robocop",
+  "rotation": 0,
+  "parent": "robocop",
+  "regions": {
+   "maincpu": {
+    "size": "0x60000",
+    "roms": [
+     {
+      "name": "ep05-3",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "ba69bf84",
+      "sha1": "a9d4d94d1b936d43a610cfe02cc03bdeddb81ac6",
+      "step": "0x2"
+     },
+     {
+      "name": "ep01-3",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "2a9f6e2c",
+      "sha1": "74aeb5be36619d90034d4a8139c3d043fe8d33c2",
+      "step": "0x2"
+     },
+     {
+      "name": "ep04-3",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "39181778",
+      "sha1": "f91b63e541ef547d34d144c80bc0344b6acf8de0",
+      "step": "0x2"
+     },
+     {
+      "name": "ep00-3",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "e128541f",
+      "sha1": "c123b6ba282b552890319d97348015361264fa3b",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ep03-3",
+      "offset": "0x08000",
+      "size": "0x08000",
+      "crc": "5b164b24",
+      "sha1": "b217a2ac8b26aebd208631a13030487ed27d232e"
+     }
+    ]
+   },
+   "sub": {
+    "size": "0x200000",
+    "roms": [
+     {
+      "name": "en_24.a2",
+      "offset": "0x01e00",
+      "size": "0x0200",
+      "crc": "b8e2ca98",
+      "sha1": "bd1e193c544dc17a665aa6c4d3b844775ed08b43"
+     }
+    ]
+   },
+   "char": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "ep23",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "a77e4ab1",
+      "sha1": "d06cc847192b6c7f642e4ff7128e298d0aa034b2"
+     },
+     {
+      "name": "ep22",
+      "offset": "0x10000",
+      "size": "0x10000",
+      "crc": "9fbd6903",
+      "sha1": "9ac6ac8a18c23e915e8ae3782867d10c0bd65778"
+     }
+    ]
+   },
+   "tiles1": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ep20",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "1d8d38b8",
+      "sha1": "9add6349f8a578fb86b678cef921d6ec0cfccdad"
+     },
+     {
+      "name": "ep21",
+      "offset": "0x10000",
+      "size": "0x10000",
+      "crc": "187929b2",
+      "sha1": "deca1f0a52584769caee1d2302617aa957c56a71"
+     },
+     {
+      "name": "ep18",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "b6580b5e",
+      "sha1": "ee216d8db89b8cb7a51a4e19bf6f17788547156b"
+     },
+     {
+      "name": "ep19",
+      "offset": "0x30000",
+      "size": "0x10000",
+      "crc": "9bad01c7",
+      "sha1": "947c7f9d0facaea13a924274adde0e996be7b999"
+     }
+    ]
+   },
+   "tiles2": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "ep14",
+      "offset": "0x00000",
+      "size": "0x08000",
+      "crc": "ca56ceda",
+      "sha1": "edbaa29fc166cddf071ff5e59cfcfb7eeb127d68"
+     },
+     {
+      "name": "ep15",
+      "offset": "0x08000",
+      "size": "0x08000",
+      "crc": "a945269c",
+      "sha1": "de0b387e8699298f7682d6d7ca803a209888f7a1"
+     },
+     {
+      "name": "ep16",
+      "offset": "0x10000",
+      "size": "0x08000",
+      "crc": "e7fa4d58",
+      "sha1": "32e3f649b4f112a4e6be00068473b82c627bc8d1"
+     },
+     {
+      "name": "ep17",
+      "offset": "0x18000",
+      "size": "0x08000",
+      "crc": "84aae89d",
+      "sha1": "037520bd0f291f862c2211a6f35b2a8a54f10b2a"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x80000",
+    "roms": [
+     {
+      "name": "ep07",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "495d75cf",
+      "sha1": "0ffe677d53b7675073902e9bd40e4150f2cdfb1a"
+     },
+     {
+      "name": "ep06",
+      "offset": "0x10000",
+      "size": "0x08000",
+      "crc": "a2ae32e2",
+      "sha1": "4e8182205563da9d50a831c65951645e278b03e6"
+     },
+     {
+      "name": "ep11",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "62fa425a",
+      "sha1": "be88c1a6436df8a456c405822e28c472e3e79a69"
+     },
+     {
+      "name": "ep10",
+      "offset": "0x30000",
+      "size": "0x08000",
+      "crc": "cce3bd95",
+      "sha1": "00bbb197824d970b0e404167ca4ae53e1955ad94"
+     },
+     {
+      "name": "ep09",
+      "offset": "0x40000",
+      "size": "0x10000",
+      "crc": "11bed656",
+      "sha1": "6a7d984a32982d9aef8ea7d8a720925036e7046e"
+     },
+     {
+      "name": "ep08",
+      "offset": "0x50000",
+      "size": "0x08000",
+      "crc": "c45c7b4c",
+      "sha1": "70e3e475fe767eefa4cc1d6ca052271a099ff7a8"
+     },
+     {
+      "name": "ep13",
+      "offset": "0x60000",
+      "size": "0x10000",
+      "crc": "8fca9f28",
+      "sha1": "cac85bf2b66e49e22c33c85bdb5712feef6aae7e"
+     },
+     {
+      "name": "ep12",
+      "offset": "0x70000",
+      "size": "0x08000",
+      "crc": "3cd1d0c3",
+      "sha1": "ca3546cf51ebb10dfa4e78954f0212e8fcdb3d57"
+     }
+    ]
+   },
+   "oki": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ep02",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "711ce46f",
+      "sha1": "939a8545e53776ff2180d2c7e63bc997689c088e"
+     }
+    ]
+   }
+  }
+ },
+ "robocopj": {
+  "title": "Robocop (Japan)",
+  "driver": "robocop",
+  "rotation": 0,
+  "parent": "robocop",
+  "regions": {
+   "maincpu": {
+    "size": "0x60000",
+    "roms": [
+     {
+      "name": "em05-1.c11",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "954ea8f4",
+      "sha1": "2efc6c6bf856bcd86aca439bf85ec9a5c2f89612",
+      "step": "0x2"
+     },
+     {
+      "name": "em01-1.b12",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "1b87b622",
+      "sha1": "4b17e6377a77e8529b038529c12fdb2bd8a5af25",
+      "step": "0x2"
+     },
+     {
+      "name": "ep04-3",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "39181778",
+      "sha1": "f91b63e541ef547d34d144c80bc0344b6acf8de0",
+      "step": "0x2"
+     },
+     {
+      "name": "ep00-3",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "e128541f",
+      "sha1": "c123b6ba282b552890319d97348015361264fa3b",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ep03-3",
+      "offset": "0x08000",
+      "size": "0x08000",
+      "crc": "5b164b24",
+      "sha1": "b217a2ac8b26aebd208631a13030487ed27d232e"
+     }
+    ]
+   },
+   "sub": {
+    "size": "0x200000",
+    "roms": [
+     {
+      "name": "en_24.a2",
+      "offset": "0x01e00",
+      "size": "0x0200",
+      "crc": "b8e2ca98",
+      "sha1": "bd1e193c544dc17a665aa6c4d3b844775ed08b43"
+     }
+    ]
+   },
+   "char": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "ep23",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "a77e4ab1",
+      "sha1": "d06cc847192b6c7f642e4ff7128e298d0aa034b2"
+     },
+     {
+      "name": "ep22",
+      "offset": "0x10000",
+      "size": "0x10000",
+      "crc": "9fbd6903",
+      "sha1": "9ac6ac8a18c23e915e8ae3782867d10c0bd65778"
+     }
+    ]
+   },
+   "tiles1": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ep20",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "1d8d38b8",
+      "sha1": "9add6349f8a578fb86b678cef921d6ec0cfccdad"
+     },
+     {
+      "name": "ep21",
+      "offset": "0x10000",
+      "size": "0x10000",
+      "crc": "187929b2",
+      "sha1": "deca1f0a52584769caee1d2302617aa957c56a71"
+     },
+     {
+      "name": "ep18",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "b6580b5e",
+      "sha1": "ee216d8db89b8cb7a51a4e19bf6f17788547156b"
+     },
+     {
+      "name": "ep19",
+      "offset": "0x30000",
+      "size": "0x10000",
+      "crc": "9bad01c7",
+      "sha1": "947c7f9d0facaea13a924274adde0e996be7b999"
+     }
+    ]
+   },
+   "tiles2": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "ep14",
+      "offset": "0x00000",
+      "size": "0x08000",
+      "crc": "ca56ceda",
+      "sha1": "edbaa29fc166cddf071ff5e59cfcfb7eeb127d68"
+     },
+     {
+      "name": "ep15",
+      "offset": "0x08000",
+      "size": "0x08000",
+      "crc": "a945269c",
+      "sha1": "de0b387e8699298f7682d6d7ca803a209888f7a1"
+     },
+     {
+      "name": "ep16",
+      "offset": "0x10000",
+      "size": "0x08000",
+      "crc": "e7fa4d58",
+      "sha1": "32e3f649b4f112a4e6be00068473b82c627bc8d1"
+     },
+     {
+      "name": "ep17",
+      "offset": "0x18000",
+      "size": "0x08000",
+      "crc": "84aae89d",
+      "sha1": "037520bd0f291f862c2211a6f35b2a8a54f10b2a"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x80000",
+    "roms": [
+     {
+      "name": "ep07",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "495d75cf",
+      "sha1": "0ffe677d53b7675073902e9bd40e4150f2cdfb1a"
+     },
+     {
+      "name": "ep06",
+      "offset": "0x10000",
+      "size": "0x08000",
+      "crc": "a2ae32e2",
+      "sha1": "4e8182205563da9d50a831c65951645e278b03e6"
+     },
+     {
+      "name": "ep11",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "62fa425a",
+      "sha1": "be88c1a6436df8a456c405822e28c472e3e79a69"
+     },
+     {
+      "name": "ep10",
+      "offset": "0x30000",
+      "size": "0x08000",
+      "crc": "cce3bd95",
+      "sha1": "00bbb197824d970b0e404167ca4ae53e1955ad94"
+     },
+     {
+      "name": "ep09",
+      "offset": "0x40000",
+      "size": "0x10000",
+      "crc": "11bed656",
+      "sha1": "6a7d984a32982d9aef8ea7d8a720925036e7046e"
+     },
+     {
+      "name": "ep08",
+      "offset": "0x50000",
+      "size": "0x08000",
+      "crc": "c45c7b4c",
+      "sha1": "70e3e475fe767eefa4cc1d6ca052271a099ff7a8"
+     },
+     {
+      "name": "ep13",
+      "offset": "0x60000",
+      "size": "0x10000",
+      "crc": "8fca9f28",
+      "sha1": "cac85bf2b66e49e22c33c85bdb5712feef6aae7e"
+     },
+     {
+      "name": "ep12",
+      "offset": "0x70000",
+      "size": "0x08000",
+      "crc": "3cd1d0c3",
+      "sha1": "ca3546cf51ebb10dfa4e78954f0212e8fcdb3d57"
+     }
+    ]
+   },
+   "oki": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ep02",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "711ce46f",
+      "sha1": "939a8545e53776ff2180d2c7e63bc997689c088e"
+     }
+    ]
+   }
+  }
+ },
+ "robocopu": {
+  "title": "Robocop (US, revision 1)",
+  "driver": "robocop",
+  "rotation": 0,
+  "parent": "robocop",
+  "regions": {
+   "maincpu": {
+    "size": "0x60000",
+    "roms": [
+     {
+      "name": "ep05-1",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "8de5cb3d",
+      "sha1": "66eb87aa11697d0abdd0c265aaa2048ca3c80c18",
+      "step": "0x2"
+     },
+     {
+      "name": "ep01-1",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "b3c6bc02",
+      "sha1": "380dd241bebfdbdc93450b6cf562bccf8e3b8e27",
+      "step": "0x2"
+     },
+     {
+      "name": "ep04",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "c38b9d18",
+      "sha1": "683bc4ce8dac62ab9ce79679ad44dc9542b814c8",
+      "step": "0x2"
+     },
+     {
+      "name": "ep00",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "374c91aa",
+      "sha1": "d8bccc12278b754fe303eb75204b38126d401c3d",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ep03",
+      "offset": "0x08000",
+      "size": "0x08000",
+      "crc": "1089eab8",
+      "sha1": "088c570b12b681f6751d7ae48560726464bcb79e"
+     }
+    ]
+   },
+   "sub": {
+    "size": "0x200000",
+    "roms": [
+     {
+      "name": "en_24.a2",
+      "offset": "0x01e00",
+      "size": "0x0200",
+      "crc": "b8e2ca98",
+      "sha1": "bd1e193c544dc17a665aa6c4d3b844775ed08b43"
+     }
+    ]
+   },
+   "char": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "ep23",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "a77e4ab1",
+      "sha1": "d06cc847192b6c7f642e4ff7128e298d0aa034b2"
+     },
+     {
+      "name": "ep22",
+      "offset": "0x10000",
+      "size": "0x10000",
+      "crc": "9fbd6903",
+      "sha1": "9ac6ac8a18c23e915e8ae3782867d10c0bd65778"
+     }
+    ]
+   },
+   "tiles1": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ep20",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "1d8d38b8",
+      "sha1": "9add6349f8a578fb86b678cef921d6ec0cfccdad"
+     },
+     {
+      "name": "ep21",
+      "offset": "0x10000",
+      "size": "0x10000",
+      "crc": "187929b2",
+      "sha1": "deca1f0a52584769caee1d2302617aa957c56a71"
+     },
+     {
+      "name": "ep18",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "b6580b5e",
+      "sha1": "ee216d8db89b8cb7a51a4e19bf6f17788547156b"
+     },
+     {
+      "name": "ep19",
+      "offset": "0x30000",
+      "size": "0x10000",
+      "crc": "9bad01c7",
+      "sha1": "947c7f9d0facaea13a924274adde0e996be7b999"
+     }
+    ]
+   },
+   "tiles2": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "ep14",
+      "offset": "0x00000",
+      "size": "0x08000",
+      "crc": "ca56ceda",
+      "sha1": "edbaa29fc166cddf071ff5e59cfcfb7eeb127d68"
+     },
+     {
+      "name": "ep15",
+      "offset": "0x08000",
+      "size": "0x08000",
+      "crc": "a945269c",
+      "sha1": "de0b387e8699298f7682d6d7ca803a209888f7a1"
+     },
+     {
+      "name": "ep16",
+      "offset": "0x10000",
+      "size": "0x08000",
+      "crc": "e7fa4d58",
+      "sha1": "32e3f649b4f112a4e6be00068473b82c627bc8d1"
+     },
+     {
+      "name": "ep17",
+      "offset": "0x18000",
+      "size": "0x08000",
+      "crc": "84aae89d",
+      "sha1": "037520bd0f291f862c2211a6f35b2a8a54f10b2a"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x80000",
+    "roms": [
+     {
+      "name": "ep07",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "495d75cf",
+      "sha1": "0ffe677d53b7675073902e9bd40e4150f2cdfb1a"
+     },
+     {
+      "name": "ep06",
+      "offset": "0x10000",
+      "size": "0x08000",
+      "crc": "a2ae32e2",
+      "sha1": "4e8182205563da9d50a831c65951645e278b03e6"
+     },
+     {
+      "name": "ep11",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "62fa425a",
+      "sha1": "be88c1a6436df8a456c405822e28c472e3e79a69"
+     },
+     {
+      "name": "ep10",
+      "offset": "0x30000",
+      "size": "0x08000",
+      "crc": "cce3bd95",
+      "sha1": "00bbb197824d970b0e404167ca4ae53e1955ad94"
+     },
+     {
+      "name": "ep09",
+      "offset": "0x40000",
+      "size": "0x10000",
+      "crc": "11bed656",
+      "sha1": "6a7d984a32982d9aef8ea7d8a720925036e7046e"
+     },
+     {
+      "name": "ep08",
+      "offset": "0x50000",
+      "size": "0x08000",
+      "crc": "c45c7b4c",
+      "sha1": "70e3e475fe767eefa4cc1d6ca052271a099ff7a8"
+     },
+     {
+      "name": "ep13",
+      "offset": "0x60000",
+      "size": "0x10000",
+      "crc": "8fca9f28",
+      "sha1": "cac85bf2b66e49e22c33c85bdb5712feef6aae7e"
+     },
+     {
+      "name": "ep12",
+      "offset": "0x70000",
+      "size": "0x08000",
+      "crc": "3cd1d0c3",
+      "sha1": "ca3546cf51ebb10dfa4e78954f0212e8fcdb3d57"
+     }
+    ]
+   },
+   "oki": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ep02",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "711ce46f",
+      "sha1": "939a8545e53776ff2180d2c7e63bc997689c088e"
+     }
+    ]
+   }
+  }
+ },
+ "robocopu0": {
+  "title": "Robocop (US, revision 0)",
+  "driver": "robocop",
+  "rotation": 0,
+  "parent": "robocop",
+  "regions": {
+   "maincpu": {
+    "size": "0x60000",
+    "roms": [
+     {
+      "name": "ep05",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "c465bdd8",
+      "sha1": "a1d5435ea2664ac38db84577b97ba74304e09473",
+      "step": "0x2"
+     },
+     {
+      "name": "ep01",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "1352d36e",
+      "sha1": "7bfdce66020b6c9465b768bac2ba7c9fe458242e",
+      "step": "0x2"
+     },
+     {
+      "name": "ep04",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "c38b9d18",
+      "sha1": "683bc4ce8dac62ab9ce79679ad44dc9542b814c8",
+      "step": "0x2"
+     },
+     {
+      "name": "ep00",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "374c91aa",
+      "sha1": "d8bccc12278b754fe303eb75204b38126d401c3d",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ep03",
+      "offset": "0x08000",
+      "size": "0x08000",
+      "crc": "1089eab8",
+      "sha1": "088c570b12b681f6751d7ae48560726464bcb79e"
+     }
+    ]
+   },
+   "sub": {
+    "size": "0x200000",
+    "roms": [
+     {
+      "name": "en_24.a2",
+      "offset": "0x01e00",
+      "size": "0x0200",
+      "crc": "b8e2ca98",
+      "sha1": "bd1e193c544dc17a665aa6c4d3b844775ed08b43"
+     }
+    ]
+   },
+   "char": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "ep23",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "a77e4ab1",
+      "sha1": "d06cc847192b6c7f642e4ff7128e298d0aa034b2"
+     },
+     {
+      "name": "ep22",
+      "offset": "0x10000",
+      "size": "0x10000",
+      "crc": "9fbd6903",
+      "sha1": "9ac6ac8a18c23e915e8ae3782867d10c0bd65778"
+     }
+    ]
+   },
+   "tiles1": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ep20",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "1d8d38b8",
+      "sha1": "9add6349f8a578fb86b678cef921d6ec0cfccdad"
+     },
+     {
+      "name": "ep21",
+      "offset": "0x10000",
+      "size": "0x10000",
+      "crc": "187929b2",
+      "sha1": "deca1f0a52584769caee1d2302617aa957c56a71"
+     },
+     {
+      "name": "ep18",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "b6580b5e",
+      "sha1": "ee216d8db89b8cb7a51a4e19bf6f17788547156b"
+     },
+     {
+      "name": "ep19",
+      "offset": "0x30000",
+      "size": "0x10000",
+      "crc": "9bad01c7",
+      "sha1": "947c7f9d0facaea13a924274adde0e996be7b999"
+     }
+    ]
+   },
+   "tiles2": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "ep14",
+      "offset": "0x00000",
+      "size": "0x08000",
+      "crc": "ca56ceda",
+      "sha1": "edbaa29fc166cddf071ff5e59cfcfb7eeb127d68"
+     },
+     {
+      "name": "ep15",
+      "offset": "0x08000",
+      "size": "0x08000",
+      "crc": "a945269c",
+      "sha1": "de0b387e8699298f7682d6d7ca803a209888f7a1"
+     },
+     {
+      "name": "ep16",
+      "offset": "0x10000",
+      "size": "0x08000",
+      "crc": "e7fa4d58",
+      "sha1": "32e3f649b4f112a4e6be00068473b82c627bc8d1"
+     },
+     {
+      "name": "ep17",
+      "offset": "0x18000",
+      "size": "0x08000",
+      "crc": "84aae89d",
+      "sha1": "037520bd0f291f862c2211a6f35b2a8a54f10b2a"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x80000",
+    "roms": [
+     {
+      "name": "ep07",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "495d75cf",
+      "sha1": "0ffe677d53b7675073902e9bd40e4150f2cdfb1a"
+     },
+     {
+      "name": "ep06",
+      "offset": "0x10000",
+      "size": "0x08000",
+      "crc": "a2ae32e2",
+      "sha1": "4e8182205563da9d50a831c65951645e278b03e6"
+     },
+     {
+      "name": "ep11",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "62fa425a",
+      "sha1": "be88c1a6436df8a456c405822e28c472e3e79a69"
+     },
+     {
+      "name": "ep10",
+      "offset": "0x30000",
+      "size": "0x08000",
+      "crc": "cce3bd95",
+      "sha1": "00bbb197824d970b0e404167ca4ae53e1955ad94"
+     },
+     {
+      "name": "ep09",
+      "offset": "0x40000",
+      "size": "0x10000",
+      "crc": "11bed656",
+      "sha1": "6a7d984a32982d9aef8ea7d8a720925036e7046e"
+     },
+     {
+      "name": "ep08",
+      "offset": "0x50000",
+      "size": "0x08000",
+      "crc": "c45c7b4c",
+      "sha1": "70e3e475fe767eefa4cc1d6ca052271a099ff7a8"
+     },
+     {
+      "name": "ep13",
+      "offset": "0x60000",
+      "size": "0x10000",
+      "crc": "8fca9f28",
+      "sha1": "cac85bf2b66e49e22c33c85bdb5712feef6aae7e"
+     },
+     {
+      "name": "ep12",
+      "offset": "0x70000",
+      "size": "0x08000",
+      "crc": "3cd1d0c3",
+      "sha1": "ca3546cf51ebb10dfa4e78954f0212e8fcdb3d57"
+     }
+    ]
+   },
+   "oki": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ep02",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "711ce46f",
+      "sha1": "939a8545e53776ff2180d2c7e63bc997689c088e"
+     }
+    ]
+   }
+  }
+ },
+ "robocopb": {
+  "title": "Robocop (World bootleg)",
+  "driver": "robocop",
+  "rotation": 0,
+  "parent": "robocop",
+  "regions": {
+   "maincpu": {
+    "size": "0x60000",
+    "roms": [
+     {
+      "name": "robop_05.rom",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "bcef3e9b",
+      "sha1": "0ca099ea7428f877036e6e2a6daddfd9145ed9bb",
+      "step": "0x2"
+     },
+     {
+      "name": "robop_01.rom",
+      "offset": "0x00001",
+      "size": "0x10000",
+      "crc": "c9803685",
+      "sha1": "13b3b0ebee24b4453685616e9a204b4ca6fb0053",
+      "step": "0x2"
+     },
+     {
+      "name": "robop_04.rom",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "9d7b79e0",
+      "sha1": "e0d901b9b3cd62f7c947da04f7447ebfa88bf44a",
+      "step": "0x2"
+     },
+     {
+      "name": "robop_00.rom",
+      "offset": "0x20001",
+      "size": "0x10000",
+      "crc": "80ba64ab",
+      "sha1": "0688f1b483a265c7324f546d38a4a5ac5b1b9214",
+      "step": "0x2"
+     }
+    ]
+   },
+   "audiocpu": {
+    "size": "0x10000",
+    "roms": [
+     {
+      "name": "ep03-3",
+      "offset": "0x08000",
+      "size": "0x08000",
+      "crc": "5b164b24",
+      "sha1": "b217a2ac8b26aebd208631a13030487ed27d232e"
+     }
+    ]
+   },
+   "char": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "ep23",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "a77e4ab1",
+      "sha1": "d06cc847192b6c7f642e4ff7128e298d0aa034b2"
+     },
+     {
+      "name": "ep22",
+      "offset": "0x10000",
+      "size": "0x10000",
+      "crc": "9fbd6903",
+      "sha1": "9ac6ac8a18c23e915e8ae3782867d10c0bd65778"
+     }
+    ]
+   },
+   "tiles1": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ep20",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "1d8d38b8",
+      "sha1": "9add6349f8a578fb86b678cef921d6ec0cfccdad"
+     },
+     {
+      "name": "ep21",
+      "offset": "0x10000",
+      "size": "0x10000",
+      "crc": "187929b2",
+      "sha1": "deca1f0a52584769caee1d2302617aa957c56a71"
+     },
+     {
+      "name": "ep18",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "b6580b5e",
+      "sha1": "ee216d8db89b8cb7a51a4e19bf6f17788547156b"
+     },
+     {
+      "name": "ep19",
+      "offset": "0x30000",
+      "size": "0x10000",
+      "crc": "9bad01c7",
+      "sha1": "947c7f9d0facaea13a924274adde0e996be7b999"
+     }
+    ]
+   },
+   "tiles2": {
+    "size": "0x20000",
+    "roms": [
+     {
+      "name": "ep14",
+      "offset": "0x00000",
+      "size": "0x08000",
+      "crc": "ca56ceda",
+      "sha1": "edbaa29fc166cddf071ff5e59cfcfb7eeb127d68"
+     },
+     {
+      "name": "ep15",
+      "offset": "0x08000",
+      "size": "0x08000",
+      "crc": "a945269c",
+      "sha1": "de0b387e8699298f7682d6d7ca803a209888f7a1"
+     },
+     {
+      "name": "ep16",
+      "offset": "0x10000",
+      "size": "0x08000",
+      "crc": "e7fa4d58",
+      "sha1": "32e3f649b4f112a4e6be00068473b82c627bc8d1"
+     },
+     {
+      "name": "ep17",
+      "offset": "0x18000",
+      "size": "0x08000",
+      "crc": "84aae89d",
+      "sha1": "037520bd0f291f862c2211a6f35b2a8a54f10b2a"
+     }
+    ]
+   },
+   "sprites": {
+    "size": "0x80000",
+    "roms": [
+     {
+      "name": "ep07",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "495d75cf",
+      "sha1": "0ffe677d53b7675073902e9bd40e4150f2cdfb1a"
+     },
+     {
+      "name": "ep06",
+      "offset": "0x10000",
+      "size": "0x08000",
+      "crc": "a2ae32e2",
+      "sha1": "4e8182205563da9d50a831c65951645e278b03e6"
+     },
+     {
+      "name": "ep11",
+      "offset": "0x20000",
+      "size": "0x10000",
+      "crc": "62fa425a",
+      "sha1": "be88c1a6436df8a456c405822e28c472e3e79a69"
+     },
+     {
+      "name": "ep10",
+      "offset": "0x30000",
+      "size": "0x08000",
+      "crc": "cce3bd95",
+      "sha1": "00bbb197824d970b0e404167ca4ae53e1955ad94"
+     },
+     {
+      "name": "ep09",
+      "offset": "0x40000",
+      "size": "0x10000",
+      "crc": "11bed656",
+      "sha1": "6a7d984a32982d9aef8ea7d8a720925036e7046e"
+     },
+     {
+      "name": "ep08",
+      "offset": "0x50000",
+      "size": "0x08000",
+      "crc": "c45c7b4c",
+      "sha1": "70e3e475fe767eefa4cc1d6ca052271a099ff7a8"
+     },
+     {
+      "name": "ep13",
+      "offset": "0x60000",
+      "size": "0x10000",
+      "crc": "8fca9f28",
+      "sha1": "cac85bf2b66e49e22c33c85bdb5712feef6aae7e"
+     },
+     {
+      "name": "ep12",
+      "offset": "0x70000",
+      "size": "0x08000",
+      "crc": "3cd1d0c3",
+      "sha1": "ca3546cf51ebb10dfa4e78954f0212e8fcdb3d57"
+     }
+    ]
+   },
+   "oki": {
+    "size": "0x40000",
+    "roms": [
+     {
+      "name": "ep02",
+      "offset": "0x00000",
+      "size": "0x10000",
+      "crc": "711ce46f",
+      "sha1": "939a8545e53776ff2180d2c7e63bc997689c088e"
+     }
+    ]
+   }
+  }
  }
 }

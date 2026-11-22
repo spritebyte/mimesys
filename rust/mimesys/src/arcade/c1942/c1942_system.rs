@@ -491,6 +491,6 @@ impl C1942System {
 }
 
 impl HiScoreMem for C1942System {
-    fn hs_read(&mut self, addr: u16) -> u8 { self.board.read(addr) }
-    fn hs_write(&mut self, addr: u16, v: u8) { self.board.write(addr, v) }
+    fn hs_read(&mut self, addr: u32) -> u8 { self.board.read(addr as u16) }
+    fn hs_write(&mut self, addr: u32, v: u8) { self.board.write(addr as u16, v) }
 }

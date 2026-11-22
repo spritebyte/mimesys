@@ -190,6 +190,15 @@ impl Bus {
                 self.dma_log.push(format!("L{level} {} src {:08X} dst {:08X} count {:X} add {}/{} factor {}{}{}",
                     if d.indirect { "indirect" } else { "direct" }, d.src, d.dst, d.count, d.src_add, d.dst_add, d.factor,
                     if d.rup { " rup" } else { "" }, if d.wup { " wup" } else { "" }));
+                // a big copy into VDP2 VRAM (a movie frame): the scroll tables as they are now
+                if (d.dst & 0x07F0_0000) == 0x05E0_0000 && d.count >= 0x1_0000 && self.vdp2.regs[0x9A / 2] & 0x0F0F != 0 {
+                    let r = |o: usize| self.vdp2.regs[o / 2] as u32;
+                    let ta = |o: usize| ((r(o) & 7) << 16 | (r(o + 2) & 0xFFFE)) << 1;
+                    let tbl = |a: u32, n: u32| (0..n).map(|k| format!("{:04X}{:04X}", self.vdp2.vram_word(a + k * 4), self.vdp2.vram_word(a + k * 4 + 2))).collect::<Vec<_>>().join(" ");
+                    let (ls, vc) = (ta(0xA0), ta(0x9C));
+                    self.dma_log.push(format!("   SCRCTL {:04X} zoomY {:04X}{:04X} line table @{ls:05X}: {} | +line 100: {} | cell table @{vc:05X}: {}",
+                        r(0x9A), r(0x7C), r(0x7E), tbl(ls, 10), tbl(ls + 100 * 8, 4), tbl(vc, 12)));
+                }
             }
             if d.indirect {
                 let mut table = d.dst;

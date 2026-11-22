@@ -21,6 +21,7 @@ pub mod commando;
 pub mod c1942;
 pub mod gunsmoke;
 pub mod bionicc;
+pub mod dec0;
 pub mod state;
 pub mod hiscore;
 
@@ -60,6 +61,7 @@ pub fn load_arcade(driver: &str, set_name: &str, mut regions: HashMap<String, Ve
         "cps1" => Ok(Box::new(cps1::cps1_system::Cps1System::new(set_name, regions)?)),
         "jedi" => Ok(Box::new(jedi::jedi_system::JediSystem::new(set_name, regions)?)),
         "rastan" => Ok(Box::new(rastan::rastan_system::RastanSystem::new(set_name, regions)?)),
+        "robocop" => Ok(wrap(dec0::dec0_system::Dec0System::new(set_name, regions)?, hs, "Robocop")),
         "pacman" => Ok(wrap(pacman::pacman_system::PacmanSystem::new(
             pacman::pacman_system::Variant::Pacman, set_name, regions)?, hs, "Pacman")),
         "mspacman" => Ok(wrap(pacman::pacman_system::PacmanSystem::new(

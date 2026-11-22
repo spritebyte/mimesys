@@ -153,10 +153,12 @@ pub struct SaturnSystem {
     /// each CPU's DMAC channels seen running, so each start is logged once
     dmac_on: [[bool; 2]; 2],
     /// idle-loop detection, per CPU: the last short backward branch's target and the state there
-    idle: [(u32, [u32; 22]); 2],
+    idle: [(u32, [u32; 24]); 2],
     /// clocks skipped as idle (debug report)
     idle_clocks: [u64; 2],
     last_step_pc: [u32; 2],
+    /// debug: wall time in master, slave, sound, devices, VDP2 lines, VDP1 (seconds since the last report)
+    wall: [f64; 6],
     current_frame: u64,
     save_filename: String,
     save_path: String,
@@ -185,7 +187,7 @@ impl SaturnSystem {
         let mut s = Self {
             msh: Sh7604::new(), ssh: { let mut s = Sh7604::new(); s.p.slave = true; s }, bus: Bus::new(bios, region, pal),
             debt: [0; 2], slave_irq: 0, nmi: false, disc: disc.map(|d| std::sync::Arc::new(std::sync::Mutex::new(d))), region,
-            frame: vec![0; 320 * 224 * 4], frame_w: 320, frame_h: 224, m68k: M68000::new(), snd_frac: 0, smp_frac: 0, snd_debt: 0, hirq_pc: 0, tracing: false, pcs: [[(0, 0); 64]; 2], pc_at: [0; 2], last_pc: [0; 2], crashed: [false; 2], rebooted: false, game_on: false, in_rom: [false; 2], dmac_on: [[false; 2]; 2], idle: [(u32::MAX, [0; 22]); 2], idle_clocks: [0; 2], last_step_pc: [0; 2], current_frame: 0,
+            frame: vec![0; 320 * 224 * 4], frame_w: 320, frame_h: 224, m68k: M68000::new(), snd_frac: 0, smp_frac: 0, snd_debt: 0, hirq_pc: 0, tracing: false, pcs: [[(0, 0); 64]; 2], pc_at: [0; 2], last_pc: [0; 2], crashed: [false; 2], rebooted: false, game_on: false, in_rom: [false; 2], dmac_on: [[false; 2]; 2], idle: [(u32::MAX, [0; 24]); 2], idle_clocks: [0; 2], last_step_pc: [0; 2], wall: [0.0; 6], current_frame: 0,
             save_filename: "saturn_internal".into(), save_path: "user://GD_EMU/Saturn/Save".into(), ext: 0,
         };
         s.frame.chunks_exact_mut(4).for_each(|p| p[3] = 0xFF);
@@ -251,17 +253,25 @@ impl SaturnSystem {
         // only at branch targets: the pc went backwards a little
         let prev = self.last_step_pc[k];
         self.last_step_pc[k] = pc;
-        if !(pc < prev && prev - pc <= 32) { return; }
+        if !(pc < prev && prev - pc <= 256) { return; }
         let cpu = &c.cpu;
-        let mut snap = [0u32; 22];
+        let mut snap = [0u32; 24];
         snap[..16].copy_from_slice(&cpu.r);
         snap[16] = cpu.sr.get();
         snap[17] = cpu.gbr;
         snap[18] = cpu.mach;
         snap[19] = cpu.macl;
         snap[20] = cpu.pr;
-        snap[21] = c.p.writes;
-        if last_pc == pc && self.idle[k].1 == snap && self.debt[k] > 0 && !c.dma_busy() {
+        // the writes of this pass (only RAM / on-chip, and the same ones as last pass)
+        snap[21] = c.p.wsig as u32;
+        snap[22] = (c.p.wsig >> 32) as u32;
+        snap[23] = c.p.wdev as u32;
+        let dev = c.p.wdev;
+        let p = if k == 0 { &mut self.msh.p } else { &mut self.ssh.p };
+        p.wsig = 0;
+        p.wdev = false;
+        let c = if k == 0 { &self.msh } else { &self.ssh };
+        if !dev && last_pc == pc && self.idle[k].1 == snap && self.debt[k] > 0 && !c.dma_busy() {
             let left = self.debt[k] as u32;
             if k == 0 { self.msh.burn(left) } else { self.ssh.burn(left) }
             self.idle_clocks[k] += left as u64;
@@ -275,11 +285,27 @@ impl SaturnSystem {
         let mut left = cycles;
         while left > 0 {
             let n = left.min(SLICE);
-            self.run_cpu(0, n);
-            if self.bus.smpc.slave_on { self.run_cpu(1, n); } else { self.debt[1] = 0; }
             let hz = self.hz();
-            self.run_sound(n, hz);
-            self.bus.tick(n, hz);
+            if self.tracing {
+                let t = std::time::Instant::now();
+                self.run_cpu(0, n);
+                let t1 = std::time::Instant::now();
+                if self.bus.smpc.slave_on { self.run_cpu(1, n); } else { self.debt[1] = 0; }
+                let t2 = std::time::Instant::now();
+                self.run_sound(n, hz);
+                let t3 = std::time::Instant::now();
+                self.bus.tick(n, hz);
+                let t4 = std::time::Instant::now();
+                self.wall[0] += (t1 - t).as_secs_f64();
+                self.wall[1] += (t2 - t1).as_secs_f64();
+                self.wall[2] += (t3 - t2).as_secs_f64();
+                self.wall[3] += (t4 - t3).as_secs_f64();
+            } else {
+                self.run_cpu(0, n);
+                if self.bus.smpc.slave_on { self.run_cpu(1, n); } else { self.debt[1] = 0; }
+                self.run_sound(n, hz);
+                self.bus.tick(n, hz);
+            }
             self.bus.vdp2.dot += n / 4;
             if !self.bus.smpc.actions.is_empty() { self.smpc_actions(); }
             left -= n;
@@ -435,10 +461,16 @@ impl SaturnSystem {
             self.bus.vdp2.vblank = true;
             self.bus.scu.raise(scu::IST_VBLANK_IN, Some(scu::Event::VBlankIn));
             self.slave_irq |= 1;
+            let t = std::time::Instant::now();
             self.bus.vdp1.frame_change();
+            if self.tracing { self.wall[5] += t.elapsed().as_secs_f64(); }
         }
         if line == 0 { self.start_frame(); }
-        if line < vres { self.draw_line(line); }
+        if line < vres {
+            let t = std::time::Instant::now();
+            self.draw_line(line);
+            if self.tracing { self.wall[4] += t.elapsed().as_secs_f64(); }
+        }
         let clocks = self.line_clocks();
         let (vis, dots) = if self.bus.smpc.dot352 { (352, 455) } else { (320, 427) };
         let active = clocks * vis / dots;
@@ -559,6 +591,10 @@ impl System for SaturnSystem {
             crate::dlog!("Saturn:   idle (skipped wait loops) in the last 300 frames: master {}M clocks, slave {}M clocks",
                 self.idle_clocks[0] / 1_000_000, self.idle_clocks[1] / 1_000_000);
             self.idle_clocks = [0; 2];
+            let w = self.wall;
+            crate::dlog!("Saturn:   time for the last 300 frames (5 s at full speed): master {:.2}s slave {:.2}s sound {:.2}s devices {:.2}s VDP2 {:.2}s VDP1 {:.2}s = {:.2}s",
+                w[0], w[1], w[2], w[3], w[4], w[5], w.iter().sum::<f64>());
+            self.wall = [0.0; 6];
             let (m, s, b) = (&self.msh.cpu, &self.ssh.cpu, &self.bus);
             crate::dlog!("Saturn: frame {} master pc {:08X} pr {:08X} sr {:03X} | slave {} pc {:08X} | IMS {:08X} IST {:08X} | TVMD {:04X} VDP1 draws {} | SMPC {:02X?} | CD hirq {:04X} cmds {}",
                 self.current_frame + 1, m.instruction_pc(), m.pr, m.sr.get(), if b.smpc.slave_on { "on" } else { "off" }, s.instruction_pc(),
@@ -571,6 +607,13 @@ impl System for SaturnSystem {
             crate::dlog!("Saturn:   VDP2 NBG0 scroll/zoom {} | NBG1 {} | ZMCTL {:04X} SCRCTL {:04X} VCSTA {} LSTA0 {} LSTA1 {} | MPOFN {:04X} BMPNA {:04X} MPAB0 {:04X} | DSP {}",
                 rr(0x70, 8), rr(0x80, 8), r(0x98), r(0x9A), rr(0x9C, 2), rr(0xA0, 2), rr(0xA4, 2), r(0x3C), r(0x2C), r(0x40),
                 if b.scu.dsp.running() { "running" } else { "stopped" });
+            crate::dlog!("Saturn:   VDP2 SFSEL {:04X} SFCODE {:04X} SFCCMD {:04X} SFPRMD {:04X} CCRSA-D {} CCRNA/B {} LNCLEN {:04X}", r(0x24), r(0x26), r(0xEE), r(0xEA), rr(0xF0, 4), rr(0x108, 2), r(0xE8));
+            if r(0x9A) & 0x0F0F != 0 {
+                let tbl = |a: u32, n: u32| (0..n).map(|k| format!("{:04X}{:04X}", b.vdp2.vram_word(a + k * 4), b.vdp2.vram_word(a + k * 4 + 2))).collect::<Vec<_>>().join(" ");
+                let ta = |o: usize| ((r(o) as u32 & 7) << 16 | (r(o + 2) as u32 & 0xFFFE)) << 1;
+                crate::dlog!("Saturn:   line scroll table 0 @{:05X}: {}", ta(0xA0), tbl(ta(0xA0), 12));
+                crate::dlog!("Saturn:   vertical cell table @{:05X}: {}", ta(0x9C), tbl(ta(0x9C), 44));
+            }
             if r(0x20) & 0x30 != 0 { crate::dlog!("Saturn:   (rotation screens are on: not drawn yet)"); }
             for c in &b.cd.log { crate::dlog!("Saturn:   CD {:04X} {:04X} {:04X} {:04X}", c[0], c[1], c[2], c[3]); }
             self.bus.cd.log.clear();

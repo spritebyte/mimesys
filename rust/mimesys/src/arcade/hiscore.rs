@@ -16,7 +16,7 @@ use crate::common::system::{System, DisplayInfo};
 
 #[derive(Clone, Debug, PartialEq)]
 struct Row {
-    addr: u16,
+    addr: u32,
     size: usize,
     first: u8,
     last: u8,
@@ -36,10 +36,10 @@ pub struct HiScore {
     dirty: bool,
 }
 
-/// The parts of the main CPU's address space the table lives in.
+/// The parts of the main CPU's address space the table lives in (8-bit CPUs use the low 16 bits).
 pub trait HiScoreMem {
-    fn hs_read(&mut self, addr: u16) -> u8;
-    fn hs_write(&mut self, addr: u16, v: u8);
+    fn hs_read(&mut self, addr: u32) -> u8;
+    fn hs_write(&mut self, addr: u32, v: u8);
 }
 
 impl HiScore {
@@ -82,7 +82,7 @@ impl HiScore {
             }
             let hex = |s: &str| u32::from_str_radix(s, 16).ok();
             rows.push(Row {
-                addr: hex(f[2])? as u16,
+                addr: hex(f[2])?,
                 size: hex(f[3])? as usize,
                 first: hex(f[4])? as u8,
                 last: hex(f[5])? as u8,
@@ -102,7 +102,7 @@ impl HiScore {
     pub fn reset(&mut self, mem: &mut dyn HiScoreMem) {
         for r in &self.rows {
             if let Some(v) = r.fill {
-                for i in 0..r.size { mem.hs_write(r.addr.wrapping_add(i as u16), v); }
+                for i in 0..r.size { mem.hs_write(r.addr.wrapping_add(i as u32), v); }
             }
         }
         if self.table_found && !self.snapshot.is_empty() {
@@ -125,14 +125,14 @@ impl HiScore {
     fn defaults_in_place(&self, mem: &mut dyn HiScoreMem) -> bool {
         self.rows.iter().all(|r| {
             mem.hs_read(r.addr) == r.first
-                && mem.hs_read(r.addr.wrapping_add(r.size as u16 - 1)) == r.last
+                && mem.hs_read(r.addr.wrapping_add(r.size as u32 - 1)) == r.last
         })
     }
 
     fn read_table(&self, mem: &mut dyn HiScoreMem) -> Vec<u8> {
         let mut t = Vec::with_capacity(self.total_len());
         for r in &self.rows {
-            for i in 0..r.size { t.push(mem.hs_read(r.addr.wrapping_add(i as u16))); }
+            for i in 0..r.size { t.push(mem.hs_read(r.addr.wrapping_add(i as u32))); }
         }
         t
     }
@@ -149,7 +149,7 @@ impl HiScore {
                 let mut i = 0;
                 for r in self.rows.clone() {
                     for k in 0..r.size {
-                        mem.hs_write(r.addr.wrapping_add(k as u16), saved[i]);
+                        mem.hs_write(r.addr.wrapping_add(k as u32), saved[i]);
                         i += 1;
                     }
                 }
@@ -238,8 +238,8 @@ galaxian:
 
     struct Mem([u8; 0x10000]);
     impl HiScoreMem for Mem {
-        fn hs_read(&mut self, a: u16) -> u8 { self.0[a as usize] }
-        fn hs_write(&mut self, a: u16, v: u8) { self.0[a as usize] = v; }
+        fn hs_read(&mut self, a: u32) -> u8 { self.0[a as usize] }
+        fn hs_write(&mut self, a: u32, v: u8) { self.0[a as usize] = v; }
     }
 
     #[test]

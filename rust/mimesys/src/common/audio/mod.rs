@@ -5,6 +5,7 @@ pub mod pokey;
 pub mod ym2151;
 pub mod ym2612;
 pub mod ym2203;
+pub mod ym3812;
 pub mod tms5220;
 pub mod okim6295;pub mod hc55516;
 pub mod k007232;

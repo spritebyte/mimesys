@@ -388,3 +388,24 @@ fn bench_two_cpus_waiting() {
     for _ in 0..120 { s.run_frame(0); }
     println!("120 frames waiting: {:?} (idle {:?})", t.elapsed(), s.idle_clocks);
 }
+
+#[test]
+fn idle_loops_may_rewrite_the_same_ram_but_not_count() {
+    // loop A: store the same value each pass (idle); loop B (other test bench): a counter (busy)
+    let mut m = Asm::new(0x400);
+    m.li(1, 0x0600_0100).op(0xE205)            // r2 = 5
+        .op(0x2122)                             // loop: mov.l r2, @r1
+        .op(0x6012)                             // mov.l @r1, r0
+        .op(0x8800)                             // cmp/eq #0, r0
+        .op(0x8BFC)                             // bf loop
+        .op(0x0009).spin();
+    let mut s = system(bios(&mut m, None));
+    for _ in 0..3 { s.run_frame(0); }
+    assert!(s.idle_clocks[0] > 500_000, "same-value stores still idle ({})", s.idle_clocks[0]);
+    let mut m = Asm::new(0x400);
+    m.li(1, 0x0600_0100).op(0x6012).op(0x7001).op(0x2102).op(0xAFFA).op(0x0009);
+    let mut s = system(bios(&mut m, None));
+    for _ in 0..3 { s.run_frame(0); }
+    assert_eq!(s.idle_clocks[0], 0, "a counter loop is real work");
+    assert!(hw32(&s, 0x100) > 10_000);
+}

@@ -2,13 +2,15 @@ Systems currently supported:
 Atari 2600,5200,7800,Lynx
 Colecovision
 NES
-SNES 
+PS1
+SNES
 Sega Master System/Game Gear
-Sega Genesis (Sega CD and 32X in progress)
+Sega Genesis/Sega CD/Sega 32X 
+Sega Saturn
 Gameboy/Gameboy Color
 GBA
 NDS
-TG-16
+PCE (TG-16)
 Some Arcade - list below
 
 Arcade games need a json file installed in $USERDATA/mimesys folder. File named arcade_games.json
@@ -16,18 +18,26 @@ Arcade Games currently supported:
 Donkey Kong, Donkey Kong Jr.
 Pacman, Ms Pacman, Pengo
 Popeye
+Bagman
+Qbert
 Galaxian, Frogger, Moon Cresta, Amidar, Turtles
 Double Dragon 1&2
 Paperboy
 Green Beret/Rush N' Attack
+Kung Fu Master
 Simpsons
 Rastan
 TMNT
+Robocop
+Return of the Jedi
+1942, Commando, Ghosts N' Goblins, Gunsmoke
+Capcom CPS1/CPS2
+Defender,Stargate, Robotron, Joust, Bubbles, Splat, and Sinistar
 
 Fullscreen Mode - use F11
 
 Can enter Game Genie codes in cheat menu (Under EmulationMenu or hit CTRL+H)
-Only supported for Gameboy and NES currently 
+(Not supported yet on all systems)
 
 Zapper support using mouse - Only for NES currently. Need to go under Settings menu and check option to enable.
 
@@ -62,8 +72,7 @@ NES Mapper Support:
 Total: 49
 
 Planned for future:
-Dreamcast and Naomi arcade boards work in progress.
-Other classic arcade games such as Bubble Bobble and Bagman.
+Other classic arcade games 
 Allow custom palette for Gameboy games
 Wheel controls for Colecovision
 Cheats for all systems.

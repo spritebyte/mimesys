@@ -144,3 +144,15 @@ fn no_disc_still_answers() {
     let r = cmd(&mut c, [0x0100, 0, 0, 0]);
     assert_eq!(r[0] & 0x0F00, 0x0700, "NODISC");
 }
+
+#[test]
+fn play_after_a_stop_seeks_from_the_start() {
+    let mut c = CdBlock::new(Some(cue_with_audio()));
+    run(&mut c, 20);
+    cmd(&mut c, [0x1100, 0, 0, 0]);             // seek with no position: stop (standby)
+    run(&mut c, 50);
+    cmd(&mut c, [0x1080, 160, 0x0080, 4]);      // play FAD 160, 4 sectors
+    run(&mut c, 200);
+    let r = cmd(&mut c, [0x0000, 0, 0, 0]);
+    assert_ne!(r[0] & 0x0F00, 0x0400, "not stuck seeking (status {:04X})", r[0]);
+}

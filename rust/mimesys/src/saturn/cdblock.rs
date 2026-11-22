@@ -470,6 +470,8 @@ impl CdBlock {
             }
             STAT_SEEK => {
                 if !self.has_disc() { return; }
+                // after a stop (standby) the head is "nowhere" (FFFFFFFF): seek from the start
+                if self.curfad > self.leadout() + 150 { self.curfad = 150; }
                 let step = 75 * 10 * self.speed.max(1) as i64;
                 let diff = self.fad_seek as i64 - self.curfad as i64;
                 if diff > step { self.curfad += step as u32; }

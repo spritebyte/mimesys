@@ -130,7 +130,8 @@ impl Vdp1 {
             self.swap_asked = false;
             self.erase_asked = false;
             self.draw ^= 1;
-            self.edsr = (self.edsr & 2) >> 1;     // CEF -> BEF
+            // CEF is copied to BEF; CEF itself only clears when the next drawing starts
+            self.edsr = (self.edsr & 2) | (self.edsr & 2) >> 1;
             self.erase();
             if self.ptmr == 2 { self.run(); }
         } else if self.erase_asked {

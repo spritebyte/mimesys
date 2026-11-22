@@ -315,7 +315,7 @@ impl DdSystem {
             sub_was_reset: false,
             current_frame: 0,
             save_filename: set_name.to_string(),
-            save_path: "user://Arcade/Technos/State".to_string(),
+            save_path: "user://GD_EMU/Arcade/Technos/State".to_string(),
         };
         sys.reset();
         Ok(sys)
@@ -587,6 +587,6 @@ impl System for DdSystem {
 }
 
 impl HiScoreMem for DdSystem {
-    fn hs_read(&mut self, addr: u16) -> u8 { self.board.read(addr) }
-    fn hs_write(&mut self, addr: u16, v: u8) { self.board.write(addr, v) }
+    fn hs_read(&mut self, addr: u32) -> u8 { self.board.read(addr as u16) }
+    fn hs_write(&mut self, addr: u32, v: u8) { self.board.write(addr as u16, v) }
 }

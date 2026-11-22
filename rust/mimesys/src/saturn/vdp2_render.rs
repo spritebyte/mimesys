@@ -44,6 +44,12 @@ struct Nbg {
     prio: u8,
     cc: Option<u8>,
     offset: Option<bool>,
+    /// special colour calculation (SFCCMD): 0 per screen, 1 per character, 2 per dot, 3 colour MSB
+    sccm: u16,
+    /// the special function codes enabled for this layer (SFCODE A or B, by SFSEL)
+    sfcode: u8,
+    /// 1-word names / bitmaps: the layer-wide special colour calculation bit
+    spcc: bool,
 }
 
 impl Vdp2 {
@@ -60,6 +66,14 @@ impl Vdp2 {
     }
 
     fn vbyte(&self, a: u32) -> u8 { self.vram[a as usize & (VRAM_SIZE - 1)] }
+
+    /// A colour RAM entry's top bit (special colour calculation mode 3)
+    fn cram_msb(&self, i: u32) -> bool {
+        match (self.reg(0x0E) >> 12) & 3 {
+            2 | 3 => self.cram[(i as usize & 0x3FF) * 4] & 0x80 != 0,
+            mode => self.cram[(i as usize & if mode == 0 { 0x3FF } else { 0x7FF }) * 2] & 0x80 != 0,
+        }
+    }
 
     /// A colour RAM entry as RGB888
     fn cram_rgb(&self, i: u32) -> [u8; 3] {
@@ -145,14 +159,19 @@ impl Vdp2 {
             prio,
             cc: (self.reg(0xEC) & (1 << n) != 0).then_some(ccr),
             offset: self.offset_of(n as u16),
+            sccm: (self.reg(0xEE) >> (n * 2)) & 3,
+            sfcode: (self.reg(0x26) >> if self.reg(0x24) & (1 << n) != 0 { 8 } else { 0 }) as u8,
+            spcc: if bmen { bmpna & 0x10 != 0 } else { pncn & 0x100 != 0 },
         })
     }
 
     /// NBG dot at screen coordinates (x, y): its colour, or None for transparent
-    fn nbg_dot(&self, g: &Nbg, x: u32, y: u32) -> Option<[u8; 3]> {
-        let (dot, palnum) = if let Some((w, h, base)) = g.bitmap {
-            let (bx, by) = (x & (w - 1), y & (h - 1));
-            (self.read_dot(base, by * w + bx, g.ccc), g.bmp_pal << 4)
+    fn nbg_dot(&self, g: &Nbg, x: u32, y: u32) -> Option<([u8; 3], bool)> {
+        let (dot, palnum, spcc) = if let Some((w, h, base)) = g.bitmap {
+            // linear: a line that runs past the right edge carries on into the next row
+            // (Mega Man 8 packs 320-dot movie lines end to end this way)
+            let i = (y & (h - 1)).wrapping_mul(w).wrapping_add(x) & (w * h - 1);
+            (self.read_dot(base, i, g.ccc), g.bmp_pal << 4, g.spcc)
         } else {
             let (pw, ph) = match g.plsz { 0 => (1, 1), 1 => (2, 1), _ => (2, 2) };
             let (plw, plh) = (512 * pw, 512 * ph);
@@ -168,34 +187,40 @@ impl Vdp2 {
             let (lx, ly) = (px % 512, py % 512);
             let index = if g.char2x2 { (ly / 16) * 32 + lx / 16 } else { (ly / 8) * 64 + lx / 8 };
             let a = (map + page) * page_bytes + index * pn_bytes;
-            let (charno, pal, hf, vf) = self.pattern_name(g, a);
+            let (charno, pal, hf, vf, spcc) = self.pattern_name(g, a);
             let (mut cx, mut cy) = ((lx >> 3) & 1, (ly >> 3) & 1);
             let (mut dx, mut dy) = (lx & 7, ly & 7);
             if hf { cx ^= 1; dx = 7 - dx; }
             if vf { cy ^= 1; dy = 7 - dy; }
             let cell_bytes = [32, 64, 128, 128, 256][g.ccc.min(4) as usize];
             let cell = if g.char2x2 { cy * 2 + cx } else { 0 };
-            (self.read_dot(charno * 0x20 + cell * cell_bytes, dy * 8 + dx, g.ccc), pal)
+            (self.read_dot(charno * 0x20 + cell * cell_bytes, dy * 8 + dx, g.ccc), pal, spcc)
         };
+        // special colour calculation: may this dot take part?
+        let code_ok = |d: u32| g.sfcode & (1 << ((d >> 1) & 7)) != 0;
         let bpp_ccc = g.ccc;
         match bpp_ccc {
             0 | 1 => {
                 if dot == 0 && !g.opaque0 { return None; }
                 let idx = if bpp_ccc == 0 { palnum * 16 + dot } else { (palnum & 0x70) * 16 + dot };
-                Some(self.cram_rgb((g.caos << 8) + idx))
+                let i = (g.caos << 8) + idx;
+                let ok = match g.sccm { 0 => true, 1 => spcc, 2 => code_ok(dot), _ => self.cram_msb(i) };
+                Some((self.cram_rgb(i), ok))
             }
             2 => {
                 let d = dot & 0x7FF;
                 if d == 0 && !g.opaque0 { return None; }
-                Some(self.cram_rgb((g.caos << 8) + d))
+                let i = (g.caos << 8) + d;
+                let ok = match g.sccm { 0 => true, 1 => spcc, 2 => code_ok(d), _ => self.cram_msb(i) };
+                Some((self.cram_rgb(i), ok))
             }
             3 => {
                 if dot & 0x8000 == 0 { return None; }
-                Some(rgb555(dot as u16))
+                Some((rgb555(dot as u16), match g.sccm { 1 => spcc, 2 => false, _ => true }))
             }
             _ => {
                 if dot & 0x8000_0000 == 0 { return None; }
-                Some([dot as u8, (dot >> 8) as u8, (dot >> 16) as u8])
+                Some(([dot as u8, (dot >> 8) as u8, (dot >> 16) as u8], match g.sccm { 1 => spcc, 2 => false, _ => true }))
             }
         }
     }
@@ -211,10 +236,10 @@ impl Vdp2 {
     }
 
     /// (character number, palette number, h flip, v flip)
-    fn pattern_name(&self, g: &Nbg, a: u32) -> (u32, u32, bool, bool) {
+    fn pattern_name(&self, g: &Nbg, a: u32) -> (u32, u32, bool, bool, bool) {
         if !g.pn1 {
             let w = (self.vword(a) as u32) << 16 | self.vword(a + 2) as u32;
-            return (w & 0x7FFF, (w >> 16) & 0x7F, w & 0x4000_0000 != 0, w & 0x8000_0000 != 0);
+            return (w & 0x7FFF, (w >> 16) & 0x7F, w & 0x4000_0000 != 0, w & 0x8000_0000 != 0, w & 0x1000_0000 != 0);
         }
         let w = self.vword(a) as u32;
         let pal = if g.ccc == 0 { (w >> 12) & 0xF | g.splt << 4 } else { ((w >> 12) & 7) << 4 };
@@ -224,7 +249,7 @@ impl Vdp2 {
             (true, false) => ((w & 0xFFF) | (g.scn & 0x1C) << 10, false, false),
             (true, true) => ((w & 0xFFF) << 2 | (g.scn & 3) | (g.scn & 0x10) << 10, false, false),
         };
-        (cn, pal, hf, vf)
+        (cn, pal, hf, vf, g.spcc)
     }
 
     /// The sprite layer's dot at (x, y) of VDP1's display buffer
@@ -319,8 +344,8 @@ impl Vdp2 {
                 let sx = ((g.x + g.dx * x as i64) >> 8) as u32;
                 let vy = if g.vcs.is_empty() { 0 } else { g.vcs[(x / 8).min(g.vcs.len() - 1)] };
                 let sy = ((g.y + vy) >> 8) as u32;
-                if let Some(rgb) = self.nbg_dot(g, sx, sy) {
-                    consider(Dot { rgb, prio: g.prio, order: 1 + *n as u8, cc: g.cc, offset: g.offset });
+                if let Some((rgb, cc_ok)) = self.nbg_dot(g, sx, sy) {
+                    consider(Dot { rgb, prio: g.prio, order: 1 + *n as u8, cc: if cc_ok { g.cc } else { None }, offset: g.offset });
                 }
             }
             let mut rgb = top.rgb;

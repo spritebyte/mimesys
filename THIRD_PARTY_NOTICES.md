@@ -97,7 +97,7 @@ code. ares is (c) 2004-2025 Near and the ares team, under the ISC license:
 | SNES test cartridge | `rust/mimesys/src/snes/test_rom/` (`test.s` → `test.sfc`, ca65) | written for mimesys | MIT (this project) |
 
 ## Code ported from ymfm
-`common/audio/ym2151.rs`, `common/audio/ym2612.rs`, `common/audio/ym2203.rs`: ports of Aaron Giles' ymfm.
+`common/audio/ym2151.rs`, `common/audio/ym2612.rs`, `common/audio/ym2203.rs`, `common/audio/ym3812.rs`: ports of Aaron Giles' ymfm.
 Copyright (c) 2021, Aaron Giles. BSD-3-Clause (`licenses/ymfm-BSD-3-Clause.txt`).
 
 ## Code ported from or modelled on MAME
@@ -140,6 +140,7 @@ and MAME's `src/devices/` or `src/mame/`.
 | `arcade/c1942/*` | `capcom/1942.cpp, 1942_v.cpp` | Paul Leaman, Couriersud |
 | `arcade/gunsmoke/*` | `capcom/gunsmoke.cpp` | Paul Leaman |
 | `arcade/bionicc/*` | `capcom/bionicc.cpp`, `capcom/tigeroad_spr.cpp` (and MAME 0.139's `bionicc.c` for the no-MCU fallback) | Phil Stroffolino, Paul Leaman, Dirk Best, David Haywood |
+| `arcade/dec0/*` | `dataeast/dec0.cpp`, `dec0_m.cpp`, `dec0_v.cpp`, `decbac06.cpp`, `decmxc06.cpp`, `machine/mb8421.cpp` | Bryan McPhail, Richard Bush; hap, AJR (MB8421) |
 | `arcade/gberet/*` | `konami/gberet.cpp` | Nicola Salmoria |
 | `arcade/gottlieb/*` | `gottlieb/gottlieb.cpp; shared/gottlieb_a.cpp` | Fabrice Frances, Nicola Salmoria, Aaron Giles |
 | `arcade/irem/*` | `irem/m62.cpp, m62_v.cpp` | smf, David Haywood |

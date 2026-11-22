@@ -168,6 +168,9 @@ pub struct Frt {
     pub olvla: bool, pub olvlb: bool, pub ocrs: bool, pub ficr: u16,
     counter: u32,
     pub pending_irq: bool,
+    /// FTCSR flags read as 1 since the last write: only those can be cleared by writing 0
+    #[serde(default)]
+    pub seen: u8,
 }
 
 impl Frt {
@@ -252,9 +255,14 @@ pub struct Periph {
     /// debug: the last data addresses read (any kind, cached or not), when switched on
     #[serde(skip)]
     pub watch: Option<std::collections::VecDeque<(u32, u32)>>,
-    /// writes so far (any kind): idle-loop detection checks nothing was written
+    /// idle-loop detection: a signature of the writes since it last looked (address, value,
+    /// size), and whether any of them went to a device rather than RAM / the chip itself
     #[serde(skip)]
     pub writes: u32,
+    #[serde(skip)]
+    pub wsig: u64,
+    #[serde(skip)]
+    pub wdev: bool,
 }
 
 impl Periph {
@@ -269,7 +277,7 @@ impl Periph {
         regs[0x1EA] = 0xAA;          // WCR = AAFF
         regs[0x1EB] = 0xFF;
         Self { cache: Cache::new(), dmac: Dmac::default(), frt: Frt::default(), wdt: Wdt::default(), divu: Divu::default(),
-               divuip: 0, dmacip: 0, wdtip: 0, sciip: 0, frtip: 0, focv: 0, witv: 0, regs, waits: 0, lag: 0, slave: false, watch: None, writes: 0 }
+               divuip: 0, dmacip: 0, wdtip: 0, sciip: 0, frtip: 0, focv: 0, witv: 0, regs, waits: 0, lag: 0, slave: false, watch: None, writes: 0, wsig: 0, wdev: false }
     }
 
     // ---------------- on-chip registers ----------------
@@ -288,7 +296,11 @@ impl Periph {
         let b = |v: u32, k: u32| (v >> (8 * k)) as u8;
         match a {
             0xFFFF_FE10 => 1 | (self.frt.ovie as u8) << 1 | (self.frt.ocibe as u8) << 2 | (self.frt.ociae as u8) << 3 | (self.frt.icie as u8) << 7,
-            0xFFFF_FE11 => self.frt.cclra as u8 | (self.frt.ovf as u8) << 1 | (self.frt.ocfb as u8) << 2 | (self.frt.ocfa as u8) << 3 | (self.frt.icf as u8) << 7,
+            0xFFFF_FE11 => {
+                let v = self.frt.cclra as u8 | (self.frt.ovf as u8) << 1 | (self.frt.ocfb as u8) << 2 | (self.frt.ocfa as u8) << 3 | (self.frt.icf as u8) << 7;
+                self.frt.seen |= v & 0x8E;
+                v
+            }
             0xFFFF_FE12 => (self.frt.frc >> 8) as u8,
             0xFFFF_FE13 => self.frt.frc as u8,
             0xFFFF_FE14 => (if self.frt.ocrs { self.frt.ocrb } else { self.frt.ocra } >> 8) as u8,
@@ -354,7 +366,13 @@ impl Periph {
             0xFFFF_FE11 => {
                 let f = &mut self.frt;
                 f.cclra = v & 1 != 0;
-                f.ovf &= v & 2 != 0; f.ocfb &= v & 4 != 0; f.ocfa &= v & 8 != 0; f.icf &= v & 0x80 != 0;
+                // a flag clears on a 0 only if it was read as 1 first (one set since then stays)
+                let clear = f.seen & !v;
+                if clear & 2 != 0 { f.ovf = false; }
+                if clear & 4 != 0 { f.ocfb = false; }
+                if clear & 8 != 0 { f.ocfa = false; }
+                if clear & 0x80 != 0 { f.icf = false; }
+                f.seen = 0;
             }
             0xFFFF_FE12 => self.frt.frc = (self.frt.frc & 0xFF) | (v as u16) << 8,
             0xFFFF_FE13 => self.frt.frc = (self.frt.frc & 0xFF00) | v as u16,
@@ -542,6 +560,12 @@ impl<E: ExtBus + ?Sized> ChipBus<'_, E> {
 
     pub fn write(&mut self, a: u32, size: u32, v: u32, through_cache: bool) {
         self.p.writes = self.p.writes.wrapping_add(1);
+        self.p.wsig = (self.p.wsig ^ (a as u64) << 32 ^ v as u64 ^ (size as u64) << 61).wrapping_mul(0x100_0000_01B3);
+        if matches!(a >> 29, 0 | 1) {
+            // only work RAM (low / high) counts as harmless to write again
+            let p = a & 0x07FF_FFFF;
+            if !((0x20_0000..0x30_0000).contains(&p) || p >= 0x600_0000) { self.p.wdev = true; }
+        }
         match a >> 29 {
             0 => {
                 if through_cache && self.p.cache.enable {
@@ -734,4 +758,21 @@ impl Sh7604 {
 
 impl Default for Sh7604 {
     fn default() -> Self { Self::new() }
+}
+
+#[cfg(test)]
+mod frt_flag_tests {
+    use super::*;
+
+    #[test]
+    fn ftcsr_flags_clear_only_after_being_read_as_one() {
+        let mut p = Periph::new();
+        p.io_read(0xFFFF_FE11);                 // ICF read as 0
+        p.frt.capture();                        // the other CPU signals now
+        p.io_write(0xFFFF_FE11, 0x00);          // "clear" based on the stale read
+        assert!(p.frt.icf, "a flag set after the read survives the write");
+        assert_eq!(p.io_read(0xFFFF_FE11) & 0x80, 0x80);
+        p.io_write(0xFFFF_FE11, 0x00);
+        assert!(!p.frt.icf, "read as 1, then written 0: cleared");
+    }
 }
