@@ -318,6 +318,14 @@ impl R5900 {
         }
     }
 
+    /// Debugging: the last `n` instructions as (pc, instr), oldest first (empty with the
+    /// trace off)
+    pub fn recent(&self, n: usize) -> Vec<(u32, u32)> {
+        if self.trace.len() != TRACE_LEN { return Vec::new(); }
+        let n = n.min(TRACE_LEN);
+        (TRACE_LEN - n..TRACE_LEN).map(|k| { let t = self.trace[(self.trace_pos + k) % TRACE_LEN]; (t.0, t.1) }).collect()
+    }
+
     // ------------------------------------------------------------------ TLB
 
     /// Flatten the TLB into the page table (after a TLB write, an ASID change, or a load)

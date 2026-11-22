@@ -125,6 +125,9 @@ pub struct Hw {
     pub logged: HashSet<u32>,
     #[serde(skip)]
     pub debug: bool,
+    /// debugging: the last EE I/O accesses (address, value, write?)
+    #[serde(skip)]
+    pub io_ring: VecDeque<(u32, u32, bool)>,
 }
 
 impl Hw {
@@ -159,6 +162,7 @@ impl Hw {
             iop_tty: String::new(),
             logged: HashSet::new(),
             debug: false,
+            io_ring: VecDeque::new(),
         }
     }
 
@@ -193,6 +197,19 @@ impl Hw {
     // ================================================================== EE I/O (32-bit)
 
     pub fn ee_io_read(&mut self, a: u32) -> u32 {
+        let v = self.ee_io_read_inner(a);
+        if self.debug { self.ring(a, v, false); }
+        v
+    }
+
+    fn ring(&mut self, a: u32, v: u32, w: bool) {
+        // a loop polling one register would flood the ring: repeats only count once
+        if self.io_ring.back() == Some(&(a, v, w)) { return; }
+        if self.io_ring.len() >= 16 { self.io_ring.pop_front(); }
+        self.io_ring.push_back((a, v, w));
+    }
+
+    fn ee_io_read_inner(&mut self, a: u32) -> u32 {
         let off = a & 0xFFFF;
         match off {
             0x0000..=0x1FFF => self.timers[(off >> 11) as usize].read(off & 0x7FF),
@@ -220,6 +237,7 @@ impl Hw {
 
     /// `mask`: the bytes being written (narrow stores)
     pub fn ee_io_write(&mut self, a: u32, v: u32, mask: u32) {
+        if self.debug { self.ring(a, v & mask, true); }
         let off = a & 0xFFFF;
         match off {
             0x0000..=0x1FFF => self.timers[(off >> 11) as usize].write(off & 0x7FF, v),

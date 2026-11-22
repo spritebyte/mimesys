@@ -32,6 +32,8 @@ static DEBUG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
+/// Printed at the top of the debug log so a log says which build made it
+const PATCH: &str = "0217";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;
@@ -170,6 +172,23 @@ impl Ps2System {
         if let Some((code, epc, bad)) = e.last_exception {
             crate::dlog!("PS2:   EE last exception {code} at {epc:08X} (BadVAddr {bad:08X})");
         }
+        // where the EE is spinning: its last instructions, registers, recent I/O
+        let recent = e.recent(48);
+        if !recent.is_empty() {
+            let mut line = String::from("PS2:   EE last instructions:");
+            for (k, (pc, op)) in recent.iter().enumerate() {
+                if k % 6 == 0 { crate::dlog!("{line}"); line = String::from("     "); }
+                line += &format!(" {pc:08X}:{op:08X}");
+            }
+            crate::dlog!("{line}");
+            for row in 0..4 {
+                let r: Vec<String> = (0..8).map(|k| { let n = row * 8 + k; format!("r{n:02} {:016X}", e.gpr[n] as u64) }).collect();
+                crate::dlog!("PS2:   {}", r.join(" "));
+            }
+            crate::dlog!("PS2:   COP0 Count {:08X} Compare {:08X} EPC {:08X}", e.cop0[9], e.cop0[11], e.cop0[14]);
+        }
+        let io: Vec<String> = h.io_ring.iter().map(|&(a, v, w)| format!("{}{a:08X}={v:08X}", if w { "W " } else { "R " })).collect();
+        if !io.is_empty() { crate::dlog!("PS2:   recent EE I/O: {}", io.join(" ")); }
     }
 }
 
@@ -235,6 +254,7 @@ impl System for Ps2System {
 
     fn set_option(&mut self, key: &str, value: i64) {
         if key == "debug_report" {
+            if value != 0 { crate::dlog!("PS2 core: patch {PATCH}"); }
             DEBUG.store(value != 0, std::sync::atomic::Ordering::Relaxed);
             self.hw.debug = value != 0;
             self.ee.set_trace(value != 0);
