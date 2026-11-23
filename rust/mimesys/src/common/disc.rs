@@ -16,7 +16,8 @@
 //! tracks from the CHT2 / CHTR / CHGD metadata, each padded to 4 frames in the file; audio
 //! is stored big-endian (swapped back here; old "CHGT" GD-ROMs are little-endian). Track
 //! layout after MAME src/lib/util/cdrom.cpp (BSD-3); for a GD-ROM the third track is put at
-//! LBA 45000.
+//! LBA 45000. A DVD CHD (chdman createdvd: 2048-byte units, no track list) is one cooked
+//! data track.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -82,6 +83,8 @@ struct ChdSource {
     cmp: Vec<u8>,
     cached: Option<u32>,
     frames_per_hunk: u32,
+    /// bytes per unit: CHD_FRAME for CDs, 2048 for DVDs
+    unit: usize,
 }
 
 /// CHD frame: 2352 bytes of sector + 96 of subcode.
@@ -96,8 +99,9 @@ impl ChdSource {
             if hk.read_hunk_in(&mut self.cmp, &mut self.hunk).is_err() { return false; }
             self.cached = Some(h);
         }
-        let at = (n % self.frames_per_hunk) as usize * CHD_FRAME;
-        out.copy_from_slice(&self.hunk[at..at + SECTOR]);
+        let at = (n % self.frames_per_hunk) as usize * self.unit;
+        let len = self.unit.min(SECTOR);
+        out[..len].copy_from_slice(&self.hunk[at..at + len]);
         true
     }
 }
@@ -217,6 +221,13 @@ impl Disc {
         let f = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut chd = chd::Chd::open(f, None).map_err(|e| format!("{}: {e} (a CHD that needs a parent isn't supported)", path.display()))?;
         let hunk_bytes = chd.header().hunk_size();
+        // a DVD: 2048-byte units, one data track
+        if chd.header().unit_bytes() == 2048 && hunk_bytes % 2048 == 0 {
+            let sectors = (chd.header().logical_bytes() / 2048) as u32;
+            let t = Track { number: 1, kind: TrackKind::Mode1Cooked, start: 0, pregap: 0, length: sectors, file: 0, offset: 0, swap: false, silent_until: 0, sector_size: 2048 };
+            let src = ChdSource { hunk: vec![0; hunk_bytes as usize], cmp: Vec::new(), cached: None, frames_per_hunk: hunk_bytes / 2048, unit: 2048, chd };
+            return Ok(Self { files: Vec::new(), chd: Some(Box::new(src)), tracks: vec![t], leadout: sectors, gd: false });
+        }
         if chd.header().unit_bytes() != CHD_FRAME as u32 || hunk_bytes % CHD_FRAME as u32 != 0 {
             return Err(format!("{}: not a CD / GD-ROM CHD", path.display()));
         }
@@ -271,7 +282,7 @@ impl Disc {
         let leadout = tracks.last().map_or(0, |t| t.start + t.length);
         let src = ChdSource {
             hunk: vec![0; hunk_bytes as usize], cmp: Vec::new(), cached: None,
-            frames_per_hunk: hunk_bytes / CHD_FRAME as u32, chd,
+            frames_per_hunk: hunk_bytes / CHD_FRAME as u32, unit: CHD_FRAME, chd,
         };
         Ok(Self { files: Vec::new(), chd: Some(Box::new(src)), tracks, leadout, gd })
     }

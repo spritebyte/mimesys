@@ -74,6 +74,8 @@ pub fn open_disc(blob: &[u8]) -> Result<Disc, String> {
     let path = crate::segacd::disc_path(blob).ok_or("not a disc image path")?;
     let mut d = Disc::open(&path)?;
     if !is_ps1_disc(&mut d) { return Err("not a PlayStation disc".into()); }
+    // a PS2 disc's volume descriptor says PLAYSTATION too
+    if crate::ps2::iso::says_boot2(&mut d) { return Err("a PlayStation 2 disc (SYSTEM.CNF says BOOT2)".into()); }
     Ok(d)
 }
 

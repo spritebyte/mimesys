@@ -448,6 +448,11 @@ impl EmuSystem {
     #[func]
     fn card_info(system: GString, data: PackedByteArray) -> PackedStringArray {
         let mut out = PackedStringArray::new();
+        if system.to_string() == "ps2" {
+            // PS2: [formatted / unformatted]
+            for t in crate::ps2::memcard::summary(data.as_slice()).unwrap_or_default() { out.push(&GString::from(t.as_str())); }
+            return out;
+        }
         let summary = if system.to_string() == "ps1" {
             crate::ps1::memcard::summary(data.as_slice())
         } else {

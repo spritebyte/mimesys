@@ -26,7 +26,7 @@
 
 use serde::{Deserialize, Serialize};
 
-mod fpu;
+pub mod fpu;
 mod mmi;
 #[cfg(test)]
 mod tests;
@@ -451,14 +451,29 @@ impl R5900 {
         self.delay_slot = self.branch_pending;
         self.branch_pending = false;
         let cycles = self.step_inner(bus);
-        // the COP0 timer
+        self.advance(cycles);
+        cycles
+    }
+
+    /// Time passing: the COP0 timer (Count / Compare) and the cycle count
+    #[inline]
+    fn advance(&mut self, cycles: u32) {
         let old = self.cop0[COUNT];
-        let new = old.wrapping_add(cycles);
-        self.cop0[COUNT] = new;
+        self.cop0[COUNT] = old.wrapping_add(cycles);
         let cmp = self.cop0[COMPARE];
         if cmp.wrapping_sub(old.wrapping_add(1)) < cycles { self.cop0[CAUSE] |= IP_TIMER; }
         self.cycles += cycles as u64;
-        cycles
+    }
+
+    /// `cycles` go by without running anything (the CPU is in an idle loop that only an
+    /// interrupt ends)
+    pub fn idle(&mut self, cycles: u32) { self.advance(cycles); }
+
+    /// The next step would take an interrupt
+    pub fn irq_ready(&self) -> bool {
+        let st = self.cop0[STATUS];
+        st & (ST_IE | ST_EIE) == ST_IE | ST_EIE && st & (ST_EXL | ST_ERL) == 0
+            && st & self.cause() & (IP_INT0 | IP_INT1 | IP_TIMER) != 0
     }
 
     fn step_inner(&mut self, bus: &mut dyn EeBus) -> u32 {

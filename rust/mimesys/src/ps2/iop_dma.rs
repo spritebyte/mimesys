@@ -2,17 +2,22 @@
 //! SIO2in, SIO2out), DPCR / DPCR2, DICR / DICR2 interrupts (I_STAT bit 3). From ps2tek.
 //!
 //! SIF0 (channel 9) reads its tags from TADR: word 0 = address (bit 30 IRQ, bit 31 end),
-//! word 1 = word count; with CHCR bit 8 the next two words (the EE's DMAtag) go into the
-//! FIFO first, and TADR steps 16. SIF1 (channel 10) takes its tags from the FIFO. Counts
+//! word 1 = word count; with CHCR bit 8 a quadword from TADR + 8 (the EE's DMAtag) goes
+//! into the FIFO first, and TADR steps 16. SIF1 (channel 10) takes its tags from the FIFO,
+//! a quadword each (the first two words count). Counts
 //! round up to whole quadwords (the EE side moves quadwords). Channels without a device
 //! yet finish at once.
 
 use serde::{Deserialize, Serialize};
 
 use super::hw::Sif;
+use super::sio2::Sio2;
 
+pub const CDVD: usize = 3;
 pub const SIF0: usize = 9;
 pub const SIF1: usize = 10;
+pub const SIO2_IN: usize = 11;
+pub const SIO2_OUT: usize = 12;
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct IopChannel {
@@ -132,12 +137,15 @@ impl IopDma {
     }
 
     /// Move data on every running channel; true when the master flag rises (I_STAT 3)
-    pub fn step(&mut self, ram: &mut [u8], sif: &mut Sif) -> bool {
+    pub fn step(&mut self, ram: &mut [u8], sif: &mut Sif, sio2: &mut Sio2) -> bool {
         for n in 0..13 {
             if self.ch[n].chcr >> 24 & 1 == 0 || !self.enabled(n) || self.dmacen & 1 == 0 { continue; }
             match n {
                 SIF0 => self.sif0(ram, sif),
                 SIF1 => self.sif1(ram, sif),
+                SIO2_IN => self.sio2_in(ram, sio2),
+                SIO2_OUT => self.sio2_out(ram, sio2),
+                CDVD => {}                                       // the drive feeds it (cdvd.rs)
                 _ => self.finish(n),
             }
         }
@@ -145,6 +153,67 @@ impl IopDma {
         let rise = m && !self.irq_was;
         self.irq_was = m;
         rise
+    }
+
+    /// The master flag rose since the last check (I_STAT 3), outside `step`
+    pub fn irq_rise(&mut self) -> bool {
+        let m = self.dicr_value() >> 31 != 0;
+        let rise = m && !self.irq_was;
+        self.irq_was = m;
+        rise
+    }
+
+    /// Channel 3 is running (the CDVD drive may write)
+    pub fn cdvd_active(&self) -> bool {
+        self.ch[CDVD].chcr >> 24 & 1 != 0 && self.enabled(CDVD) && self.dmacen & 1 != 0
+    }
+
+    /// Channel 3 has room for an `n`-byte block
+    pub fn cdvd_room(&self, n: usize) -> bool { self.cdvd_active() && self.block_words(CDVD) * 4 >= n }
+
+    /// The drive puts a block at MADR: MADR moves on, BCR's count drops by the block's
+    /// share; the channel ends when the count runs out (or at once for `last`: the TOC)
+    pub fn cdvd_put(&mut self, ram: &mut [u8], data: &[u8], last: bool) {
+        let c = &mut self.ch[CDVD];
+        for &b in data {
+            ram[(c.madr & 0x1F_FFFF) as usize] = b;
+            c.madr = (c.madr + 1) & 0xFF_FFFF;
+        }
+        let bs = (c.bcr & 0xFFFF).max(1) * 4;
+        let blocks = (c.bcr >> 16).saturating_sub(data.len() as u32 / bs);
+        c.bcr = (c.bcr & 0xFFFF) | blocks << 16;
+        if (last || blocks == 0) && self.ch[CDVD].chcr >> 24 & 1 != 0 { self.finish(CDVD); }
+    }
+
+    /// Words in a block transfer (BCR: block size × count, 0 counts as 1)
+    fn block_words(&self, n: usize) -> usize {
+        let bcr = self.ch[n].bcr;
+        ((bcr & 0xFFFF).max(1) * (bcr >> 16).max(1)) as usize
+    }
+
+    /// SIO2in: IOP memory -> SIO2's FIFOIN (bytes)
+    fn sio2_in(&mut self, ram: &[u8], sio2: &mut Sio2) {
+        let words = self.block_words(SIO2_IN);
+        // each command sits in its own block of BCR's block size
+        sio2.dma_block = ((self.ch[SIO2_IN].bcr & 0xFFFF) * 4) as usize;
+        let c = &mut self.ch[SIO2_IN];
+        for _ in 0..words * 4 {
+            sio2.fifo_in.push_back(ram[(c.madr & 0x1F_FFFF) as usize]);
+            c.madr = (c.madr + 1) & 0xFF_FFFF;
+        }
+        self.finish(SIO2_IN);
+    }
+
+    /// SIO2out: the replies -> IOP memory, once the transfer has run
+    fn sio2_out(&mut self, ram: &mut [u8], sio2: &mut Sio2) {
+        if !sio2.done { return; }
+        let words = self.block_words(SIO2_OUT);
+        let c = &mut self.ch[SIO2_OUT];
+        for _ in 0..words * 4 {
+            ram[(c.madr & 0x1F_FFFF) as usize] = sio2.fifo_out.pop_front().unwrap_or(0xFF);
+            c.madr = (c.madr + 1) & 0xFF_FFFF;
+        }
+        self.finish(SIO2_OUT);
     }
 
     fn sif0(&mut self, ram: &[u8], sif: &mut Sif) {
@@ -164,8 +233,12 @@ impl IopDma {
             c.words = ((t1 & 0xFF_FFFF) + 3) & !3;
             c.tag_end = t0 >> 30 & 3 != 0;
             if c.chcr >> 8 & 1 != 0 {
-                sif.fifo0.push_back(w(2));
-                sif.fifo0.push_back(w(3));
+                // a quadword for the EE: the DMAtag and the two words after it
+                let t = (c.tadr & 0x1F_FFFC) as usize;
+                for k in 2..6 {
+                    let a = (t + 4 * k) & 0x1F_FFFC;
+                    sif.fifo0.push_back(u32::from_le_bytes(ram[a..a + 4].try_into().unwrap()));
+                }
                 c.tadr = (c.tadr + 16) & 0xFF_FFFF;
             } else {
                 c.tadr = (c.tadr + 8) & 0xFF_FFFF;
@@ -184,9 +257,12 @@ impl IopDma {
                 c.words -= 1;
             }
             if c.tag_end { self.finish(SIF1); return; }
-            if sif.fifo1.len() < 2 { return; }
+            // the tag is a quadword from the EE: the first two words count
+            if sif.fifo1.len() < 4 { return; }
             let t0 = sif.fifo1.pop_front().unwrap();
             let t1 = sif.fifo1.pop_front().unwrap();
+            sif.fifo1.pop_front();
+            sif.fifo1.pop_front();
             c.madr = t0 & 0xFF_FFFF;
             c.words = ((t1 & 0xFF_FFFF) + 3) & !3;
             c.tag_end = t0 >> 30 & 3 != 0;

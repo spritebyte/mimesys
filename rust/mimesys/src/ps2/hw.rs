@@ -9,11 +9,15 @@
 //! Registers nobody has modelled yet read back what was written (`io` / `iop_io`), and
 //! with the debug log on, the first access to each such address is logged.
 
+use super::vif::{Vif, VifCtx};
+use super::vu::Vu;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 
 use super::cdvd::Cdvd;
 use super::dmac::Dmac;
+use super::sio2::Sio2;
+use super::gs::Gs;
 use super::iop_dma::IopDma;
 use super::timers::{EeTimer, IopTimer};
 use crate::common::cpu::r3000::R3000Bus;
@@ -52,45 +56,18 @@ pub struct Sif {
     pub fifo1: VecDeque<u32>,
 }
 
-/// The GS's privileged registers (the drawing side comes in stage 3)
-#[derive(Serialize, Deserialize)]
-pub struct GsPriv {
-    /// PMODE .. BGCOLOR (1200_0000 + 10h steps)
-    pub regs: [u64; 15],
-    /// CSR flags: SIGNAL, FINISH, HSINT, VSINT, EDWINT
-    pub csr: u64,
-    pub imr: u64,
-    pub busdir: u64,
-    pub siglblid: u64,
-    /// the field being displayed (CSR.FIELD)
-    pub field: bool,
-}
-
-impl Default for GsPriv {
-    fn default() -> Self { Self { regs: [0; 15], csr: 0, imr: 0x7F00, busdir: 0, siglblid: 0, field: false } }
-}
-
-impl GsPriv {
-    /// CSR as read: the flags, FIFO empty, FIELD, revision 1B, ID 55
-    pub fn csr_read(&self) -> u64 {
-        (self.csr & 0x1F) | 0x4000 | (self.field as u64) << 13 | 0x1B << 16 | 0x55 << 24
-    }
-
-    pub fn csr_write(&mut self, v: u64) {
-        self.csr &= !(v & 0x1F);
-        if v & 0x200 != 0 { self.csr = 0; }
-    }
-
-    /// An unmasked flag (the GS interrupt line to INTC)
-    pub fn irq(&self) -> bool { self.csr & 0x1F & !(self.imr >> 8) != 0 }
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct Hw {
     pub ram: Vec<u8>,
     #[serde(skip)]
     pub bios: Vec<u8>,
     pub iop_ram: Vec<u8>,
+    pub vu0: Vu,
+    pub vu1: Vu,
+    pub vif0: Vif,
+    pub vif1: Vif,
+    /// COP2 CMSAR0 (VCALLMSR's start address, in 8-byte units)
+    pub cmsar0: u32,
     pub vu0_code: Vec<u8>,
     pub vu0_data: Vec<u8>,
     pub vu1_code: Vec<u8>,
@@ -102,7 +79,7 @@ pub struct Hw {
     pub dmac: Dmac,
     pub timers: [EeTimer; 4],
     pub sif: Sif,
-    pub gs: GsPriv,
+    pub gs: Gs,
     pub mch_ricm: u32,
     pub mch_drd: u32,
     pub rdram_sdevid: u32,
@@ -116,6 +93,8 @@ pub struct Hw {
     pub iop_dma: IopDma,
     pub iop_timers: [IopTimer; 6],
     pub cdvd: Cdvd,
+    #[serde(default)]
+    pub sio2: Sio2,
     // ---- debugging
     #[serde(skip)]
     pub tty: String,
@@ -128,14 +107,27 @@ pub struct Hw {
     /// debugging: the last EE I/O accesses (address, value, write?)
     #[serde(skip)]
     pub io_ring: VecDeque<(u32, u32, bool)>,
+    /// debugging: the last IOP I/O accesses (address, value, write?)
+    #[serde(skip)]
+    pub iop_ring: VecDeque<(u32, u32, bool)>,
+    /// 1A00_0006: an undocumented status the BIOS waits on ("# Initialize Start."); it
+    /// counts 0, 1, 2 on each read, as PCSX2 found works
+    #[serde(default)]
+    pub ba6: u16,
 }
 
 impl Hw {
     pub fn new(bios: Vec<u8>) -> Self {
+        let cdvd = Cdvd::with_bios(&bios);
         Self {
             ram: vec![0; RAM_SIZE],
             bios,
             iop_ram: vec![0; IOP_RAM_SIZE],
+            vu0: Vu::new(false),
+            vu1: Vu::new(true),
+            vif0: Vif::new(false),
+            vif1: Vif::new(true),
+            cmsar0: 0,
             vu0_code: vec![0; 0x1000],
             vu0_data: vec![0; 0x1000],
             vu1_code: vec![0; 0x4000],
@@ -146,7 +138,7 @@ impl Hw {
             dmac: Dmac::default(),
             timers: Default::default(),
             sif: Sif::default(),
-            gs: GsPriv::default(),
+            gs: Gs::new(),
             mch_ricm: 0,
             mch_drd: 0,
             rdram_sdevid: 0,
@@ -157,12 +149,15 @@ impl Hw {
             i_ctrl: 0,
             iop_dma: IopDma::default(),
             iop_timers: Default::default(),
-            cdvd: Cdvd::default(),
+            cdvd,
+            sio2: Sio2::default(),
             tty: String::new(),
             iop_tty: String::new(),
             logged: HashSet::new(),
             debug: false,
             io_ring: VecDeque::new(),
+            iop_ring: VecDeque::new(),
+            ba6: 0,
         }
     }
 
@@ -258,6 +253,9 @@ impl Hw {
                 self.mch_ricm = v & !0x8000_0000;
             }
             0xF440 => self.mch_drd = v,
+            // memory-controller command: bit 31 = busy, which the BIOS polls (9FC41918):
+            // done at once
+            0xF410 => self.io[(off >> 2) as usize] = v & mask & 0x7FFF_FFFF,
             0xF590 => self.dmac.enable = v,
             _ => {
                 self.note("EE I/O", a, Some(v));
@@ -282,7 +280,7 @@ impl Hw {
 
     fn gs_read(&mut self, a: u32) -> u64 {
         match a & 0x1FFF {
-            o @ 0x0000..=0x00EF => self.gs.regs[(o >> 4) as usize],
+            o @ 0x0000..=0x00EF => self.gs.pregs[(o >> 4) as usize],
             0x1000 => self.gs.csr_read(),
             0x1010 => self.gs.imr,
             0x1040 => self.gs.busdir,
@@ -293,7 +291,7 @@ impl Hw {
 
     fn gs_write(&mut self, a: u32, v: u64) {
         match a & 0x1FFF {
-            o @ 0x0000..=0x00EF => self.gs.regs[(o >> 4) as usize] = v,
+            o @ 0x0000..=0x00EF => self.gs.pregs[(o >> 4) as usize] = v,
             0x1000 => self.gs.csr_write(v),
             0x1010 => { self.gs.imr = v & 0x7F00; self.update_gs_irq(); }
             0x1040 => self.gs.busdir = v,
@@ -305,6 +303,23 @@ impl Hw {
     // ================================================================== the IOP's I/O
 
     fn iop_io_read(&mut self, a: u32) -> u32 {
+        let v = self.iop_io_read_inner(a);
+        if self.debug { iop_ring(&mut self.iop_ring, a, v, false); }
+        v
+    }
+
+    /// One 16-bit SPU2 register (index = byte offset / 2). Mostly the value
+    /// last written, except the per-core status register STATX (0x344 / 0x744):
+    /// our SPU2 DMA finishes instantly, so bit 7 ("DMA ready") is always set and
+    /// bit 10 ("busy") always clear. The sound driver polls bit 7 after each DMA.
+    fn spu2_reg(&self, i: usize) -> u16 {
+        match i {
+            0x1A2 | 0x3A2 => 0x0080,
+            _ => self.spu2_regs[i],
+        }
+    }
+
+    fn iop_io_read_inner(&mut self, a: u32) -> u32 {
         match a {
             0x1F80_1070 => self.i_stat,
             0x1F80_1074 => self.i_mask,
@@ -312,14 +327,10 @@ impl Hw {
             0x1F80_1080..=0x1F80_10FF | 0x1F80_1500..=0x1F80_157F => self.iop_dma.read(a),
             0x1F80_1100..=0x1F80_112F => self.iop_timers[((a >> 4) & 3) as usize].read(a & 0xF),
             0x1F80_1480..=0x1F80_14AF => self.iop_timers[3 + ((a >> 4) & 3) as usize].read(a & 0xF),
-            // SIO2: RECV1 = no device in either port (stage 6)
-            0x1F80_826C => 0x1D100,
-            0x1F80_8270 => 0xF,
-            0x1F80_8274 => 0,
-            0x1F80_8268 => 0,
+            0x1F80_8200..=0x1F80_82FF => self.sio2.read(a),
             0x1F90_0000..=0x1F90_07FF => {
                 let i = ((a & 0x7FF) >> 1) as usize;
-                self.spu2_regs[i] as u32 | (self.spu2_regs[i + 1] as u32) << 16
+                self.spu2_reg(i) as u32 | (self.spu2_reg((i + 1) & 0x3FF) as u32) << 16
             }
             _ => {
                 self.note("IOP I/O", a, None);
@@ -329,9 +340,11 @@ impl Hw {
     }
 
     fn iop_io_write(&mut self, a: u32, v: u32, mask: u32) {
+        if self.debug { iop_ring(&mut self.iop_ring, a, v & mask, true); }
         match a {
             0x1F80_1070 => self.i_stat &= v | !mask,
             0x1F80_2080 => self.iop_putc(v as u8),
+            0x1F80_8200..=0x1F80_82FF => self.sio2.write(a, v & mask),
             0x1F80_1074 => self.i_mask = (self.i_mask & !mask) | (v & mask),
             0x1F80_1078 => self.i_ctrl = v & 1,
             0x1F80_1080..=0x1F80_10FF | 0x1F80_1500..=0x1F80_157F => self.iop_dma.write(a, v, mask),
@@ -340,7 +353,7 @@ impl Hw {
             0x1F90_0000..=0x1F90_07FF => {
                 let i = ((a & 0x7FF) >> 1) as usize;
                 if mask & 0xFFFF != 0 { self.spu2_regs[i] = v as u16; }
-                if mask >> 16 != 0 { self.spu2_regs[i + 1] = (v >> 16) as u16; }
+                if mask >> 16 != 0 { self.spu2_regs[(i + 1) & 0x3FF] = (v >> 16) as u16; }
             }
             _ => {
                 self.note("IOP I/O", a, Some(v));
@@ -374,6 +387,13 @@ impl Hw {
     }
 }
 
+/// A loop polling one register would flood the ring: repeats only count once
+fn iop_ring(r: &mut VecDeque<(u32, u32, bool)>, a: u32, v: u32, w: bool) {
+    if r.back() == Some(&(a, v, w)) { return; }
+    if r.len() >= 16 { r.pop_front(); }
+    r.push_back((a, v, w));
+}
+
 fn console(buf: &mut String, who: &str, c: u8) {
     if c == b'\n' {
         let line = std::mem::take(buf);
@@ -398,6 +418,12 @@ impl EeView<'_> {
             0x1200_0000..=0x1200_1FFF => (h.gs_read(pa & !7) >> (8 * (pa & 4))) as u32,
             0x1C00_0000..=0x1C1F_FFFF => rd32(&h.iop_ram, (pa & 0x1F_FFFF) as usize),
             0x1FC0_0000..=0x1FFF_FFFF => rd32(&h.bios, (pa as usize) & (BIOS_SIZE - 1)),
+            0x1A00_0004 => {
+                let v = h.ba6;
+                h.ba6 = (h.ba6 + 1) % 3;
+                (v as u32) << 16
+            }
+            0x1A00_0000..=0x1A00_FFFF => 0,
             _ => { h.note("EE bus", pa, None); 0 }
         }
     }
@@ -423,6 +449,7 @@ impl EeView<'_> {
                 if base & 0x1FFF == 0x1000 { h.gs.csr_write((v as u64) << sh & m64); } else { h.gs_write(base, new); }
             }
             0x1C00_0000..=0x1C1F_FFFF => wr32m(&mut h.iop_ram, (pa & 0x1F_FFFF) as usize, v, mask),
+            0x1A00_0000..=0x1A00_FFFF => {}
             _ => h.note("EE bus", pa, Some(v)),
         }
     }
@@ -483,7 +510,14 @@ impl EeBus for EeView<'_> {
     }
     fn write128(&mut self, pa: u32, v: u128) {
         if pa < RAM_SIZE as u32 { let o = pa as usize; self.0.ram[o..o + 16].copy_from_slice(&v.to_le_bytes()); return; }
-        // the FIFOs (1000_4000-1000_7FFF) take whole quadwords: VIF / GIF / IPU in later stages
+        // the FIFOs (1000_4000-1000_7FFF) take whole quadwords: the GIF's (1000_6000) goes
+        // to the GS (PATH3); VIF / IPU in later stages
+        if (0x1000_6000..0x1000_7000).contains(&pa) { self.0.gs.feed(v); self.0.update_gs_irq(); return; }
+        if (0x1000_4000..0x1000_6000).contains(&pa) {
+            let words: [u32; 4] = std::array::from_fn(|k| (v >> (32 * k)) as u32);
+            self.0.vif_feed(pa >= 0x1000_5000, &words);
+            return;
+        }
         if (0x1000_4000..0x1000_8000).contains(&pa) { return; }
         self.write64(pa, v as u64);
         self.write64(pa + 8, (v >> 64) as u64);
@@ -494,6 +528,76 @@ impl EeBus for EeView<'_> {
         self.rd32(pa)
     }
     fn cpcond0(&mut self) -> bool { self.0.dmac.cpcond0() }
+
+    /// COP2: moves between EE and VU0 registers (QMFC2 / CFC2 / QMTC2 / CTC2), VU0
+    /// macro instructions, VCALLMS / VCALLMSR, and CTC2 CMSAR1 starting VU1. Programs
+    /// run to the end at once, so VPU_STAT always reads 0 (nothing busy).
+    fn cop2_op(&mut self, op: u32, gpr: &mut [u128; 32]) -> u32 {
+        let h = &mut *self.0;
+        let rs = op >> 21 & 31;
+        let rt = (op >> 16 & 31) as usize;
+        let rd = (op >> 11 & 31) as usize;
+        match rs {
+            1 => if rt != 0 { gpr[rt] = h.vu0.get_vf(rd); },
+            2 => if rt != 0 {
+                let v = match rd { 27 => h.cmsar0, 28 | 29 | 31 => 0, _ => h.vu0.ctrl_read(rd) };
+                gpr[rt] = v as i32 as i64 as u64 as u128;
+            },
+            5 => h.vu0.set_vf(rd, gpr[rt]),
+            6 => {
+                let v = gpr[rt] as u32;
+                match rd {
+                    27 => h.cmsar0 = v & 0xFFFF,
+                    28 | 29 => {}                              // FBRST, VPU_STAT
+                    31 => h.run_vu1((v & 0xFFFF) * 8),         // CMSAR1: start VU1
+                    _ => h.vu0.ctrl_write(rd, v),
+                }
+            }
+            0x10..=0x1F => match op & 0x3F {
+                0x38 => h.run_vu0((op >> 6 & 0x7FFF) * 8),   // VCALLMS
+                0x39 => { let a = h.cmsar0 * 8; h.run_vu0(a); } // VCALLMSR
+                _ => h.vu0.macro_op(op, &mut h.vu0_data),
+            },
+            _ => {}
+        }
+        0
+    }
+    fn cop2_vf_read(&mut self, reg: u32) -> u128 { self.0.vu0.get_vf(reg as usize) }
+    fn cop2_vf_write(&mut self, reg: u32, v: u128) { self.0.vu0.set_vf(reg as usize, v); }
+}
+
+impl Hw {
+    /// Words for VIF0 (`vif1` false) or VIF1; what they send to the GS goes there
+    pub fn vif_feed(&mut self, vif1: bool, words: &[u32]) {
+        let mut gs = Vec::new();
+        if vif1 {
+            let mut cx = VifCtx { code: &mut self.vu1_code, data: &mut self.vu1_data, vu: &mut self.vu1, gs: &mut gs };
+            for &w in words { self.vif1.word(w, &mut cx); }
+        } else {
+            let mut cx = VifCtx { code: &mut self.vu0_code, data: &mut self.vu0_data, vu: &mut self.vu0, gs: &mut gs };
+            for &w in words { self.vif0.word(w, &mut cx); }
+        }
+        self.to_gs(gs);
+    }
+
+    pub fn run_vu1(&mut self, addr: u32) {
+        let mut gs = Vec::new();
+        self.vu1.start(addr);
+        self.vu1.run(&self.vu1_code, &mut self.vu1_data, &mut gs);
+        self.to_gs(gs);
+    }
+
+    pub fn run_vu0(&mut self, addr: u32) {
+        let mut none = Vec::new();
+        self.vu0.start(addr);
+        self.vu0.run(&self.vu0_code, &mut self.vu0_data, &mut none);
+    }
+
+    fn to_gs(&mut self, qs: Vec<u128>) {
+        if qs.is_empty() { return; }
+        for q in qs { self.gs.feed(q); }
+        self.update_gs_irq();
+    }
 }
 
 // ====================================================================== the IOP's view
@@ -512,6 +616,8 @@ impl IopView<'_> {
             }
             0x1F80_0000..=0x1F80_FFFF | 0x1F90_0000..=0x1F90_FFFF => h.iop_io_read(pa),
             0x1FC0_0000..=0x1FFF_FFFF => rd32(&h.bios, pa as usize & (BIOS_SIZE - 1)),
+            // ROM1 (the DVD player's ROM on later models): none, the BIOS scans it anyway
+            0x1E00_0000..=0x1E3F_FFFF => 0,
             _ => { h.note("IOP bus", pa, None); 0 }
         }
     }

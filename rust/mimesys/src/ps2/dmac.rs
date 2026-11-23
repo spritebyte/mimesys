@@ -3,12 +3,13 @@
 //! From ps2tek's DMAC pages.
 //!
 //! Transfers run as soon as the channel starts (no bus timing yet), except the SIF0 one,
-//! which waits for the IOP to fill its FIFO. VIF / GIF / IPU data is dropped until those
-//! units exist (later stages); `gif_out` collects GIF quadwords for the GS (stage 3).
+//! which waits for the IOP to fill its FIFO. IPU data is dropped until it exists
+//! (a later stage); VIF0's / VIF1's words go to `vif0_out` / `vif1_out`; `gif_out` collects GIF quadwords for the GS (stage 3).
 //!
-//! SIF tags: in both directions the tag crossing the FIFO is two 32-bit words (SIF1:
-//! the EE DMAtag's bits 64-127 with TTE, read by the IOP as its tag; SIF0: the two words
-//! the IOP sends after its own tag, read here as the EE DMAtag).
+//! SIF tags: in both directions the tag crossing the FIFO is a whole quadword, 4 words
+//! (SIF1: the EE DMAtag's bits 64-127 with TTE, then 2 padding words, read by the IOP as
+//! its tag; SIF0: the 4 words the IOP sends from TADR + 8, read here as the EE DMAtag,
+//! low 64 bits). Two-word tags left the Sony BIOS's first SIF1 packet two words out.
 
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +58,11 @@ pub struct Dmac {
     /// GIF PATH3 quadwords for the GS
     #[serde(skip)]
     pub gif_out: Vec<u128>,
+    /// words for VIF0's / VIF1's command streams
+    #[serde(skip)]
+    pub vif0_out: Vec<u32>,
+    #[serde(skip)]
+    pub vif1_out: Vec<u32>,
     /// debugging: transfers finished per channel
     #[serde(skip)]
     pub done: [u64; 10],
@@ -65,7 +71,7 @@ pub struct Dmac {
 impl Default for Dmac {
     fn default() -> Self {
         Self { ch: Default::default(), ctrl: 0, stat: 0, pcr: 0, sqwc: 0, rbsr: 0, rbor: 0, stadr: 0,
-            enable: 0x1201, gif_out: Vec::new(), done: [0; 10] }
+            enable: 0x1201, gif_out: Vec::new(), vif0_out: Vec::new(), vif1_out: Vec::new(), done: [0; 10] }
     }
 }
 
@@ -261,15 +267,21 @@ impl Dmac {
                 c.sadr = (c.sadr + 16) & 0x3FF0;
             }
             GIF => self.gif_out.push(q),
+            VIF0 => for k in 0..4 { self.vif0_out.push((q >> (32 * k)) as u32); },
+            VIF1 => for k in 0..4 { self.vif1_out.push((q >> (32 * k)) as u32); },
             _ => {}
         }
     }
 
     fn sink_tag(&mut self, n: usize, hi: u64, sif: &mut Sif) {
+        // the SIF FIFO is a quadword wide on the EE's side: the tag's upper half travels as
+        // a whole quadword (the IOP reads 4 words, using the first two)
         if n == SIF1 {
-            sif.fifo1.push_back(hi as u32);
-            sif.fifo1.push_back((hi >> 32) as u32);
+            sif.fifo1.extend([hi as u32, (hi >> 32) as u32, 0, 0]);
         }
+        // VIF: the tag's upper two words are VIF codes
+        if n == VIF0 { self.vif0_out.extend([hi as u32, (hi >> 32) as u32]); }
+        if n == VIF1 { self.vif1_out.extend([hi as u32, (hi >> 32) as u32]); }
     }
 
     /// SIF0: destination chain, tags and data from the IOP through the FIFO
@@ -285,8 +297,11 @@ impl Dmac {
                 c.qwc -= 1;
             }
             if self.ch[SIF0].tag_end { self.finish(SIF0); return; }
-            if sif.fifo0.len() < 2 { return; }
+            // the tag is a whole quadword; its low 64 bits are the DMAtag
+            if sif.fifo0.len() < 4 { return; }
             let lo = sif.fifo0.pop_front().unwrap() as u64 | (sif.fifo0.pop_front().unwrap() as u64) << 32;
+            sif.fifo0.pop_front();
+            sif.fifo0.pop_front();
             let c = &mut self.ch[SIF0];
             c.chcr = (c.chcr & 0xFFFF) | ((lo as u32) & 0xFFFF_0000);
             c.qwc = (lo & 0xFFFF) as u32;

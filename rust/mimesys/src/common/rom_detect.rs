@@ -60,6 +60,11 @@ pub fn detect(data: &[u8], path: &str) -> Vec<Guess> {
     // ---- 1. headers ----
     // a disc image: the frontend sends its path ("MCDP" + path), the disc is read here
     if data.starts_with(crate::segacd::PATH_MAGIC) {
+        // PlayStation 2: SYSTEM.CNF says BOOT2 (checked first: a PS2 disc's volume
+        // descriptor says PLAYSTATION too)
+        if matches!(ext.as_str(), "cue" | "iso" | "chd") && crate::ps2::iso::is_ps2_disc(data) {
+            return vec![Guess { system: "ps2", score: 100, why: format!("PlayStation 2 disc (.{ext})") }];
+        }
         // PlayStation: the disc's volume descriptor says PLAYSTATION
         if matches!(ext.as_str(), "cue" | "iso" | "chd") && crate::ps1::open_disc(data).is_ok() {
             return vec![Guess { system: "ps1", score: 100, why: format!("PlayStation disc (.{ext})") }];

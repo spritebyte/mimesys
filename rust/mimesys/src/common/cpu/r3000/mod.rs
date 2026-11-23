@@ -162,6 +162,12 @@ impl R3000 {
 
     pub fn set_irq(&mut self, on: bool) { self.irq_line = on; }
 
+    /// The next step would take an interrupt
+    pub fn irq_ready(&self) -> bool { self.cop0[SR] & SR_IEC != 0 && self.cop0[SR] & self.cause() & 0xFF00 != 0 }
+
+    /// `cycles` go by without running anything (an idle loop only an interrupt ends)
+    pub fn idle(&mut self, cycles: u32) { self.cycles += cycles as u64; }
+
     pub fn cause(&self) -> u32 { self.cop0[CAUSE] | (self.irq_line as u32) << 10 }
 
     // ------------------------------------------------------------------ registers
@@ -214,6 +220,14 @@ impl R3000 {
         self.pc = vec;
         self.next_pc = vec + 4;
         self.branch_pending = false;
+    }
+
+    /// Debugging: the last `n` instructions as (pc, instr), oldest first (empty with the
+    /// trace off)
+    pub fn recent(&self, n: usize) -> Vec<(u32, u32)> {
+        if self.trace.len() != TRACE_LEN { return Vec::new(); }
+        let n = n.min(TRACE_LEN);
+        (TRACE_LEN - n..TRACE_LEN).map(|k| { let t = self.trace[(self.trace_pos + k) % TRACE_LEN]; (t.0, t.1) }).collect()
     }
 
     /// Debugging: keep the last instructions (for `dump_trace`), or stop
