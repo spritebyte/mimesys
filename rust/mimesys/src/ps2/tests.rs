@@ -11,7 +11,15 @@ fn boot_bios() {
     let path = std::env::var("PS2_BIOS").expect("PS2_BIOS=path to a 4 MB BIOS");
     let frames: u64 = std::env::var("PS2_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
     let bios = std::fs::read(&path).unwrap();
-    let mut s = Ps2System::from_rom(&bios, &path, &[]).unwrap();
+    // PS2_ISO=path: boot with that disc in the drive
+    let mut s = match std::env::var("PS2_ISO") {
+        Ok(iso) => {
+            let mut blob = crate::segacd::PATH_MAGIC.to_vec();
+            blob.extend_from_slice(iso.as_bytes());
+            Ps2System::from_rom(&blob, &iso, &bios).unwrap()
+        }
+        Err(_) => Ps2System::from_rom(&bios, &path, &[]).unwrap(),
+    };
     s.set_option("debug_report", 1);
     let t = std::time::Instant::now();
     for f in 0..frames {
@@ -67,7 +75,7 @@ fn sif1_carries_a_source_chain_to_iop_memory() {
     io.write(0x1F80_1574, 1 << 19, u32::MAX);    // its interrupt on
     io.write(0x1F80_10F4, 1 << 23, u32::MAX);    // master
     io.write(0x1F80_1538, 0x0100_0000 | 0x200, u32::MAX);
-    let irq = io.step(&mut iop_ram, &mut sif, &mut Default::default());
+    let irq = io.step(&mut iop_ram, &mut sif, &mut Default::default(), &mut Default::default());
     let w = |a: usize| u32::from_le_bytes(iop_ram[a..a + 4].try_into().unwrap());
     assert_eq!([w(0x400), w(0x40C), w(0x800), w(0x80C)], [0x11, 0x44, 0x55, 0x88]);
     assert!(irq, "DICR master flag -> I_STAT 3");
@@ -88,7 +96,7 @@ fn sif0_carries_iop_memory_to_the_ee() {
     io.write(0x1F80_1570, 0x8 << 8, u32::MAX);
     io.write(0x1F80_152C, 0x100, u32::MAX);
     io.write(0x1F80_1528, 0x0100_0000 | 0x100 | 0x200, u32::MAX);   // start, tags with the EE tag
-    io.step(&mut iop_ram, &mut sif, &mut Default::default());
+    io.step(&mut iop_ram, &mut sif, &mut Default::default(), &mut Default::default());
     assert_eq!(sif.fifo0.len(), 8, "a quadword tag and a quadword of data");
     let mut ram = vec![0u8; 0x10000];
     let mut spr = vec![0u8; 0x4000];
@@ -253,7 +261,7 @@ fn sio2_cmd(h: &mut Hw, port: u32, bytes: &[u8]) -> (Vec<u8>, u32) {
     use crate::common::cpu::r3000::R3000Bus;
     let mut v = hw::IopView(h);
     v.write32(0x1F80_8268, 0x3BC | 0xC);                  // reset
-    v.write32(0x1F80_8200, port | (bytes.len() as u32) << 8 | ((bytes.len() as u32) & 0x7F) << 18);
+    v.write32(0x1F80_8200, port | (bytes.len() as u32) << 8 | (bytes.len() as u32) << 18);
     v.write32(0x1F80_8204, 0);
     for &b in bytes { v.write32(0x1F80_8260, b as u32); }
     v.write32(0x1F80_8268, 0x3BC | 1);                    // go
@@ -287,7 +295,16 @@ fn sio2_dualshock2_digital_then_pressure() {
     assert_eq!(r[1], 0xF3);
     assert_eq!(r[3], 0x03, "DualShock 2");
     sio2_cmd(&mut h, 0, &[0x01, 0x44, 0, 1, 3, 0, 0, 0, 0]);            // analog, locked
-    sio2_cmd(&mut h, 0, &[0x01, 0x4F, 0, 0xFF, 0xFF, 0x03, 0, 0, 0]);  // all 18 bytes
+    let (r, _) = sio2_cmd(&mut h, 0, &[0x01, 0x4F, 0, 0xFF, 0xFF, 0x03, 0, 0, 0]);  // all 18 bytes
+    assert_eq!(r[8], 0x5A);
+    // Breath of Fire V's pdman (libpad2): 40h for each of the 12 pressure buttons, each
+    // reply ending 5Ah (else it decides there's no controller)
+    for k in 0..12 {
+        let (r, _) = sio2_cmd(&mut h, 0, &[0x01, 0x40, 0, k, 2, 0, 0, 0, 0]);
+        assert_eq!((r[1], r[8]), (0xF3, 0x5A), "40h for button {k}");
+    }
+    let (r, _) = sio2_cmd(&mut h, 0, &[0x01, 0x41, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!((r[3], r[4], r[5], r[8]), (0xFF, 0xFF, 0x03, 0x5A), "41h: the poll mask");
     sio2_cmd(&mut h, 0, &[0x01, 0x43, 0, 0, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A]); // exit config
     let mut cmd = vec![0x01, 0x42, 0];
     cmd.extend([0; 18]);
@@ -439,7 +456,7 @@ fn vif_unpack_formats_mask_and_skip() {
         0x5000_0001, 0xA, 0xB, 0xC, 0xD,                // DIRECT 1 qw
     ];
     {
-        let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs };
+        let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs, gif_running: false, gif_held: false };
         for &w in ws { vif.word(w, &mut cx); }
     }
     let row = |r: usize| u128::from_le_bytes(data[r * 16..r * 16 + 16].try_into().unwrap());
@@ -465,7 +482,7 @@ fn vif1_mscal_runs_vu1_with_tops() {
     ]);
     let mut vif = super::vif::Vif::new(true);
     {
-        let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs };
+        let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs, gif_running: false, gif_held: false };
         for &w in &[0x0300_0010u32, 0x0200_0020, 0x1400_0000] { vif.word(w, &mut cx); }  // BASE 16, OFFSET 32, MSCAL 0
         assert_eq!(cx.vu.vi[1], 16);
         vif.word(0x1400_0000, &mut cx);
@@ -570,7 +587,7 @@ fn memory_card_page_read_in_dma_blocks() {
         vec![0x81, 0x81, 0, 0],                                      // end
     ];
     for (k, c) in cmds.iter().enumerate() {
-        s.send3[k] = 2 | (c.len() as u32) << 8 | ((c.len() as u32) & 0x7F) << 18;   // port 2 = slot 1
+        s.send3[k] = 2 | (c.len() as u32) << 8 | (c.len() as u32) << 18;   // port 2 = slot 1
         let mut block = c.clone();
         block.resize(0x90, 0);
         s.fifo_in.extend(block);
@@ -616,7 +633,10 @@ fn make_iso(cnf: &str, sectors: u32, dvd: bool) -> std::path::PathBuf {
     dir[32] = name.len() as u8;
     dir[33..33 + name.len()].copy_from_slice(name);
     img[21 * 2048..21 * 2048 + cnf.len()].copy_from_slice(cnf.as_bytes());
-    let dir = std::env::temp_dir().join(format!("mimesys_ps2_{}_{}.iso", std::process::id(), if dvd { "dvd" } else { "cd" }));
+    // a file each: tests run in parallel and rewrote each other's image
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("mimesys_ps2_{}_{n}_{}.iso", std::process::id(), if dvd { "dvd" } else { "cd" }));
     std::fs::write(&dir, &img).unwrap();
     dir
 }
@@ -670,7 +690,7 @@ fn cdvd_reads_sectors_into_dma_channel_3() {
     let mut t = 0;
     while c.istat & 2 == 0 && t < 4000 { c.tick(10_000, &mut dma, &mut ram, &mut i_stat); t += 1; }
     assert!(c.istat & 2 != 0 && i_stat & super::hw::IOP_CDVD != 0, "finished with the interrupt");
-    assert_eq!(c.read(0x1F40_2005), 0x40);
+    assert_eq!(c.read(0x1F40_2005) & 0xC1, 0x40);
     assert_eq!(&ram[0x1000..0x1003], &[30, 30, 30]);
     assert_eq!(&ram[0x1800..0x1803], &[31, 31, 31]);
     assert_eq!(dma.ch[3].chcr >> 24 & 1, 0, "channel 3 ended");
@@ -715,4 +735,505 @@ fn ps2_iso_probe() {
     blob.extend_from_slice(p.as_bytes());
     let g = crate::common::rom_detect::detect(&blob, &p);
     println!("detect: {:?}", g.iter().map(|g| (g.system, g.why.clone())).collect::<Vec<_>>());
+}
+
+/// The BIOS's settings survive: config written through S 40 / 42 / 43 reads back through
+/// S 40 / 41, from the NVRAM file; S 0B / 0A words too
+#[test]
+fn nvram_config_is_kept() {
+    let dir = std::env::temp_dir().join(format!("mimesys_nvm_{}", std::process::id()));
+    crate::common::debug_log::set_data_dir(dir.to_str().unwrap());
+    let mut i = 0u32;
+    let s = |c: &mut super::cdvd::Cdvd, i: &mut u32, cmd: u8, params: &[u8]| -> Vec<u8> {
+        for &b in params { c.write(0x1F40_2017, b, i); }
+        c.write(0x1F40_2016, cmd, i);
+        let mut out = Vec::new();
+        while c.read(0x1F40_2017) & 0x40 == 0 { out.push(c.read(0x1F40_2018)); }
+        out
+    };
+    let mut c = super::cdvd::Cdvd::default();
+    s(&mut c, &mut i, 0x40, &[1, 1, 2]);
+    let block: Vec<u8> = (1..=16).collect();
+    s(&mut c, &mut i, 0x42, &block);
+    s(&mut c, &mut i, 0x42, &[0x80; 16]);
+    s(&mut c, &mut i, 0x43, &[]);
+    s(&mut c, &mut i, 0x0B, &[0x00, 0x10, 0xAB, 0xCD]);
+    // a fresh drive (next boot) reads it back from the file
+    let mut c = super::cdvd::Cdvd::default();
+    s(&mut c, &mut i, 0x40, &[0, 1, 2]);
+    assert_eq!(s(&mut c, &mut i, 0x41, &[]), block);
+    assert_eq!(s(&mut c, &mut i, 0x41, &[]), vec![0x80; 16]);
+    s(&mut c, &mut i, 0x43, &[]);
+    assert_eq!(s(&mut c, &mut i, 0x0A, &[0x00, 0x10]), [0, 0xAB, 0xCD]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// CDVDMAN waits for the ready register's 08h (mechacon initialised)
+#[test]
+fn cdvd_ready_has_mecha_init() {
+    let mut c = super::cdvd::Cdvd::default();
+    assert_eq!(c.read(0x1F40_2005) & 0x4C, 0x4C);
+}
+
+/// The SIF RPC log names binds, their replies and calls by server id
+#[test]
+fn rpc_log_names_calls_by_sid() {
+    let mut r = super::hw::RpcLog::default();
+    r.note(&[0x2400_0000, 0, 0x8000_0009, 0, 1, 2, 3, 4, 0x8000_0592], true);
+    r.note(&[0x3000_0000, 0, 0x8000_0008, 0, 1, 2, 3, 4, 0x8000_0009, 0x1234, 0, 0], false);
+    r.note(&[0x3800_0000, 0, 0x8000_000A, 0, 1, 2, 3, 4, 5, 16, 0, 16, 0, 0x1234], true);
+    assert!(r.counts.contains_key("bind 80000592"));
+    assert!(r.counts.contains_key("bound 80000592"));
+    assert!(r.counts.contains_key("call 80000592 f5"), "{:?}", r.counts);
+    assert_eq!(r.waiting.len(), 1);
+    r.note(&[0x3000_0000, 0, 0x8000_0008, 0, 1, 2, 3, 4, 0x8000_000A, 0, 0, 0], false);
+    assert!(r.waiting.is_empty());
+    assert!(r.counts.contains_key("answered 80000592 f5"), "{:?}", r.counts);
+}
+
+/// A compare value past the wrap still fires (the EE kernel's alarms set COMP = COUNT +
+/// delay, mod 10000h); same for the IOP's 16-bit targets
+#[test]
+fn timer_compare_fires_across_the_wrap() {
+    let mut t = super::timers::EeTimer::default();
+    t.write(0x10, 0x80 | 0x100);         // bus clock, count, compare interrupt
+    t.write(0x00, 0xFF00);
+    t.write(0x20, 0x0050);
+    assert!(t.tick(0x200, 0), "compare in the wrapped part");
+    assert_eq!(t.count, 0x100);
+    let mut i = super::timers::IopTimer::default();
+    i.write(0x4, 0x10 | 0x40);           // target interrupt, repeat
+    i.count = 0xFFF0;
+    i.write(0x8, 0x0008);
+    assert!(i.tick(0, 0x20, 0), "IOP target in the wrapped part");
+}
+
+/// The EE reads the CDVD registers too (OSDSYS polls the disc type at 1F40_200F)
+#[test]
+fn ee_reads_the_cdvd_registers() {
+    use crate::common::cpu::r5900::EeBus;
+    let mut h = super::hw::Hw::new(vec![0; super::hw::BIOS_SIZE]);
+    {
+        let mut v = super::hw::EeView(&mut h);
+        assert_eq!(v.read8(0x1F40_200F), 0, "no disc");
+        assert_eq!(v.read8(0x1F40_2005) & 0x4C, 0x4C, "drive ready");
+    }
+    assert_eq!(h.cdvd.reads[0x0F], 1, "went to the drive");
+}
+
+/// A read that runs past the image's last sector finishes (zeros there); one that
+/// starts past it fails with 32h
+#[test]
+fn cdvd_read_past_the_end() {
+    use crate::common::disc::Disc;
+    let p = make_iso("BOOT2 = cdrom0:\\SLUS_200.62;1\r\n", 64, false);
+    let mut c = super::cdvd::Cdvd::default();
+    let d = Disc::open(&p).unwrap();
+    let end = d.leadout;
+    c.insert(d);
+    let mut dma = super::iop_dma::IopDma::default();
+    let mut ram = vec![0u8; 0x20_0000];
+    let mut i = 0u32;
+    let run = |c: &mut super::cdvd::Cdvd, dma: &mut super::iop_dma::IopDma, ram: &mut Vec<u8>, i: &mut u32, lba: u32| {
+        dma.write(0x1F80_10F0, 1 << 15, u32::MAX);
+        dma.write(0x1F80_1578, 1, u32::MAX);
+        dma.write(0x1F80_10B0, 0x1000, u32::MAX);
+        dma.write(0x1F80_10B4, 2 << 16 | 512, u32::MAX);
+        dma.write(0x1F80_10B8, 0x0100_0000, u32::MAX);
+        c.istat = 0;
+        let l = lba.to_le_bytes();
+        for b in [l[0], l[1], l[2], l[3], 2, 0, 0, 0, 0, 0, 0] { c.write(0x1F40_2005, b, i); }
+        c.write(0x1F40_2004, 0x06, i);
+        let mut t = 0;
+        while c.istat & 2 == 0 && t < 4000 { c.tick(10_000, dma, ram, i); t += 1; }
+        c.read(0x1F40_2005) & 0x41
+    };
+    assert_eq!(run(&mut c, &mut dma, &mut ram, &mut i, end - 1), 0x40, "runs past the end: fine");
+    assert_eq!(run(&mut c, &mut dma, &mut ram, &mut i, end), 0x41, "starts past the end: error");
+    assert_eq!(c.read(0x1F40_2006), 0x32);
+}
+
+/// Metal Gear Solid 2 Substance reads DEMO2.DAT, a padding file past its (trimmed)
+/// image's end: reads up to the ISO volume size get zeros, past it they fail
+#[test]
+fn cdvd_reads_up_to_the_volume_size_of_a_trimmed_image() {
+    use crate::common::disc::Disc;
+    let p = make_iso("BOOT2 = cdrom0:\\SLUS_200.62;1\r\n", 64, false);
+    let mut img = std::fs::read(&p).unwrap();
+    img[16 * 2048 + 80..16 * 2048 + 84].copy_from_slice(&100u32.to_le_bytes());
+    std::fs::write(&p, &img).unwrap();
+    let mut c = super::cdvd::Cdvd::default();
+    c.insert(Disc::open(&p).unwrap());
+    assert_eq!(c.volume_end, 100);
+    let mut dma = super::iop_dma::IopDma::default();
+    let mut ram = vec![0u8; 0x20_0000];
+    let mut i = 0u32;
+    let mut run = |lba: u32| {
+        dma.write(0x1F80_10F0, 1 << 15, u32::MAX);
+        dma.write(0x1F80_1578, 1, u32::MAX);
+        dma.write(0x1F80_10B0, 0x1000, u32::MAX);
+        dma.write(0x1F80_10B4, 2 << 16 | 512, u32::MAX);
+        dma.write(0x1F80_10B8, 0x0100_0000, u32::MAX);
+        c.istat = 0;
+        let l = lba.to_le_bytes();
+        for b in [l[0], l[1], l[2], l[3], 2, 0, 0, 0, 0, 0, 0] { c.write(0x1F40_2005, b, &mut i); }
+        c.write(0x1F40_2004, 0x06, &mut i);
+        let mut t = 0;
+        while c.istat & 2 == 0 && t < 4000 { c.tick(10_000, &mut dma, &mut ram, &mut i); t += 1; }
+        c.read(0x1F40_2005) & 0x41
+    };
+    assert_eq!(run(70), 0x40, "past the image, inside the volume: zeros");
+    assert_eq!(run(100), 0x41, "past the volume: error");
+}
+
+/// A dual-layer (PTP) DVD image: layer 0's volume size is smaller than the image and
+/// layer 1's volume descriptor sits there (Metal Gear Solid 2 Substance reads its layer-1
+/// files through it)
+#[test]
+fn cdvd_finds_layer_1_of_a_dual_layer_image() {
+    use crate::common::disc::Disc;
+    let p = make_iso("BOOT2 = cdrom0:\\SLUS_200.62;1\r\n", 96, true);
+    let mut img = std::fs::read(&p).unwrap();
+    img[16 * 2048 + 80..16 * 2048 + 84].copy_from_slice(&40u32.to_le_bytes());
+    let l1 = (40 + 16) * 2048;
+    img[l1..l1 + 6].copy_from_slice(b"\x01CD001");
+    std::fs::write(&p, &img).unwrap();
+    let mut c = super::cdvd::Cdvd::default();
+    c.insert(Disc::open(&p).unwrap());
+    assert_eq!(c.layer1, 40);
+    // a single-layer image stays single
+    let p = make_iso("BOOT2 = cdrom0:\\SLUS_200.62;1\r\n", 96, true);
+    let mut c = super::cdvd::Cdvd::default();
+    c.insert(Disc::open(&p).unwrap());
+    assert_eq!(c.layer1, 0);
+}
+
+/// CDVDMAN's 2340-byte read: BCR 15 words × 39 blocks per sector, 8 sectors
+#[test]
+fn cdvd_reads_2340_byte_sectors() {
+    use crate::common::disc::Disc;
+    let p = make_iso("BOOT2 = cdrom0:\\SLUS_200.62;1\r\n", 64, false);
+    let mut c = super::cdvd::Cdvd::default();
+    c.insert(Disc::open(&p).unwrap());
+    let mut dma = super::iop_dma::IopDma::default();
+    let mut ram = vec![0u8; 0x20_0000];
+    let mut i = 0u32;
+    dma.write(0x1F80_10F0, 1 << 15, u32::MAX);
+    dma.write(0x1F80_1578, 1, u32::MAX);
+    dma.write(0x1F80_10B0, 0x1000, u32::MAX);
+    dma.write(0x1F80_10B4, (39 * 8) << 16 | 15, u32::MAX);
+    dma.write(0x1F80_10B8, 0x4100_0200, u32::MAX);
+    for b in [40u8, 0, 0, 0, 8, 0, 0, 0, 0, 4, 2] { c.write(0x1F40_2005, b, &mut i); }
+    c.write(0x1F40_2004, 0x06, &mut i);
+    let mut t = 0;
+    while c.istat & 2 == 0 && t < 40_000 { c.tick(1_000, &mut dma, &mut ram, &mut i); t += 1; }
+    println!("2340 read: {} k cycles, ready {:02X}, sectors {}", t, c.read(0x1F40_2005), c.sectors);
+    assert_eq!(c.read(0x1F40_2005) & 0x41, 0x40);
+    assert_eq!(c.sectors, 8);
+}
+
+/// MFIFO (D_CTRL MFD 2): SPR_FROM fills a ring buffer, VIF1 follows the tags in it up to
+/// SPR_FROM's MADR and waits there (STR stays on); the write wraps at the ring's end
+#[test]
+fn mfifo_vif1_drains_the_ring() {
+    use super::dmac::{Dmac, VIF1};
+    let mut d = Dmac::default();
+    let mut ram = vec![0u8; 0x200_0000];
+    let mut spr = vec![0u8; 0x4000];
+    let mut sif = super::hw::Sif::default();
+    let w = |d: &mut Dmac, a: u32, v: u32| d.write(a & 0xFFFF, v, u32::MAX);
+    w(&mut d, 0x1000_E000, 1 | 2 << 2);                  // DMAE, MFD = VIF1
+    w(&mut d, 0x1000_E050, 0x80_0000);                   // RBOR
+    w(&mut d, 0x1000_E040, 0x30);                        // RBSR: 4 quadwords
+    // VIF1: source chain + TTE, from the ring's start
+    w(&mut d, 0x1000_9030, 0x80_0000);
+    w(&mut d, 0x1000_9000, 0x1C5);
+    let put = |spr: &mut Vec<u8>, i: usize, q: u128| spr[i * 16..i * 16 + 16].copy_from_slice(&q.to_le_bytes());
+    // packet 1: CNT tag (1 qw) + data, written by SPR_FROM at the ring's start
+    put(&mut spr, 0, 0x1000_0001 | 0x1111u128 << 64);
+    put(&mut spr, 1, 0xAAAA);
+    w(&mut d, 0x1000_D010, 0x80_0000);
+    w(&mut d, 0x1000_D080, 0);
+    w(&mut d, 0x1000_D020, 2);
+    w(&mut d, 0x1000_D000, 0x100);
+    d.step(&mut ram, &mut spr, &mut sif);                // SPR_FROM fills
+    d.step(&mut ram, &mut spr, &mut sif);                // VIF1 drains
+    assert_eq!(d.vif1_out, vec![0x1111, 0, 0xAAAA, 0, 0, 0]);
+    assert_eq!(d.ch[VIF1].tadr, 0x80_0020);
+    assert!(d.ch[VIF1].chcr & 0x100 != 0, "waits for more");
+    // packet 2 wraps: tag at ring +20h, data at +30h, the next tag back at +0
+    d.vif1_out.clear();
+    put(&mut spr, 2, 0x1000_0001 | 0x2222u128 << 64);
+    put(&mut spr, 3, 0xBBBB);
+    w(&mut d, 0x1000_D080, 0x20);
+    w(&mut d, 0x1000_D020, 2);
+    w(&mut d, 0x1000_D000, 0x100);
+    d.step(&mut ram, &mut spr, &mut sif);
+    d.step(&mut ram, &mut spr, &mut sif);
+    assert_eq!(d.vif1_out, vec![0x2222, 0, 0xBBBB, 0, 0, 0]);
+    assert_eq!(d.ch[VIF1].tadr, 0x80_0000, "wrapped");
+    assert_eq!(d.ch[super::dmac::SPR_FROM].madr, 0x80_0000);
+}
+
+/// SPU2 auto-DMA lasts as long as its samples play: 12 KB on core 1 is 64 ms
+#[test]
+fn spu2_auto_dma_runs_at_the_audio_rate() {
+    let mut d = super::iop_dma::IopDma::default();
+    let mut ram = vec![0u8; 0x20_0000];
+    let mut sif = super::hw::Sif::default();
+    let mut sio2 = super::sio2::Sio2::default();
+    let mut spu2 = super::spu2::Spu2::default();
+    d.write(0x1F80_1578, 1, u32::MAX);              // DMACEN
+    d.write(0x1F80_1570, 0x8888_8888, u32::MAX);    // DPCR2: channels on
+    d.write(0x1F80_1500, 0xE_7DF0, u32::MAX);
+    d.write(0x1F80_1504, 0x00C0_0000, u32::MAX);
+    d.write(0x1F80_1508, 0x0100_0201, u32::MAX);
+    spu2.write16(0x5B0, 2);                         // core 1 ADMAS
+    d.step(&mut ram, &mut sif, &mut sio2, &mut spu2);
+    let ms = |c: i64| c * 1000 / 36_864_000;
+    let mut t = 0i64;
+    while d.ch[7].chcr >> 24 & 1 != 0 && t < 36_864_000 {
+        d.tick_spu(10_000);
+        d.step(&mut ram, &mut sif, &mut sio2, &mut spu2);
+        t += 10_000;
+    }
+    assert!((63..=65).contains(&ms(t)), "{} ms", ms(t));
+    // without auto-DMA: at once
+    spu2.write16(0x5B0, 0);
+    d.write(0x1F80_1508, 0x0100_0201, u32::MAX);
+    d.step(&mut ram, &mut sif, &mut sio2, &mut spu2);
+    assert_eq!(d.ch[7].chcr >> 24 & 1, 0);
+}
+
+/// Suikoden 3: the kernel acknowledges INTC_STAT and ERETs; INT0 must be gone by then,
+/// or the handler runs again with STAT & MASK = 0 and jumps through table entry -1
+#[test]
+fn acknowledging_intc_drops_int0_at_once() {
+    use crate::common::cpu::r5900::R5900;
+    let mut h = Hw::new(vec![0; hw::BIOS_SIZE]);
+    h.intc_mask = hw::INT_VBON;
+    h.raise_intc(hw::INT_VBON);
+    // LUI r2, B000; ORI r2, F000; ADDIU r1, r0, 4; SW r1, 0(r2)
+    let code = [0x3C02_B000u32, 0x3442_F000, 0x2401_0004, 0xAC41_0000];
+    for (k, w) in code.iter().enumerate() { h.ram[0x1000 + 4 * k..0x1004 + 4 * k].copy_from_slice(&w.to_le_bytes()); }
+    let mut ee = R5900::new();
+    ee.jump(0x8000_1000);
+    ee.set_int0(true);
+    let mut bus = hw::EeView(&mut h);
+    for _ in 0..4 { ee.step(&mut bus); }
+    assert_eq!(h.intc_stat & hw::INT_VBON, 0);
+    assert_eq!(ee.cause() & 0x400, 0, "INT0 still up after the acknowledge");
+}
+
+/// Dragon Quest 8: a VIF command with the I bit interrupts (INTC VIF1) and stalls the VIF
+/// until FBRST.STC; ERR.MII turns that off
+#[test]
+fn vif_i_bit_interrupts_and_stalls() {
+    let mut h = Hw::new(vec![0; hw::BIOS_SIZE]);
+    // NOP + I, then MARK 1234
+    h.vif_feed(true, &[0x8000_0000, 0x0700_1234]);
+    assert_ne!(h.intc_stat & hw::INT_VIF1, 0);
+    assert_eq!(h.vif1.mark, 0, "the MARK must wait for the stall to end");
+    let stat = h.ee_io_read(0x1000_3C00);
+    assert_eq!(stat >> 10 & 3, 3, "VIS + INT");
+    assert_eq!(stat >> 24 & 0x1F, 1, "FQC");
+    // more data while stalled waits too
+    h.vif_feed(true, &[0x0700_5678]);
+    assert_eq!(h.vif1.mark, 0);
+    h.ee_io_write(0x1000_3C10, 8, !0);
+    assert_eq!(h.vif1.mark, 0x5678);
+    assert_eq!(h.ee_io_read(0x1000_3C00), 0);
+    // MII: no interrupt, no stall
+    h.intc_stat = 0;
+    h.ee_io_write(0x1000_3C20, 1, !0);
+    h.vif_feed(true, &[0x8700_0042, 0x0700_0043]);
+    assert_eq!((h.intc_stat, h.vif1.mark), (0, 0x43));
+    // an I-bit UNPACK interrupts after its data, not before
+    h.ee_io_write(0x1000_3C20, 0, !0);
+    h.vif_feed(true, &[0x0100_0404, 0xEC01_0000, 1, 2, 3]);
+    assert_eq!(h.intc_stat & hw::INT_VIF1, 0);
+    h.vif_feed(true, &[4]);
+    assert_ne!(h.intc_stat & hw::INT_VIF1, 0);
+    assert_eq!(&h.vu1_data[0..16], &[1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0]);
+}
+
+/// Persona 3 FES: VIF1 MSKPATH3 shows in GIF_STAT (M3P, which it polls) and holds the GIF
+/// channel until unmasked; GIF_MODE M3R / IMT read back too
+#[test]
+fn mskpath3_masks_path3_and_shows_in_gif_stat() {
+    let mut h = Hw::new(vec![0; hw::BIOS_SIZE]);
+    h.vif_feed(true, &[0x0600_8000, 0]);
+    assert_eq!(h.ee_io_read(0x1000_3020) & 2, 2);
+    // a GIF transfer of one quadword waits
+    h.ee_io_write(0x1000_E000, 1, !0);
+    h.ee_io_write(0x1000_A010, 0x1000, !0);
+    h.ee_io_write(0x1000_A020, 1, !0);
+    h.ee_io_write(0x1000_A000, 0x100, !0);
+    let mut spr = vec![0u8; 0x4000];
+    h.dmac.step(&mut h.ram, &mut spr, &mut h.sif);
+    assert!(h.dmac.gif_out.is_empty());
+    // Persona then waits for the GIF FIFO to fill (FQC) before starting VIF1
+    assert_eq!(h.ee_io_read(0x1000_3020) >> 24 & 0x1F, 1);
+    h.vif_feed(true, &[0x0600_0000]);
+    assert_eq!(h.ee_io_read(0x1000_3020) & 2, 0);
+    h.dmac.step(&mut h.ram, &mut spr, &mut h.sif);
+    assert_eq!(h.dmac.gif_out.len(), 1);
+    h.ee_io_write(0x1000_3010, 5, !0);
+    assert_eq!(h.ee_io_read(0x1000_3020) & 0xF, 5);
+    assert!(h.dmac.gif_hold);
+}
+
+/// Persona 3 FES's SECRMAN resets card auth with 81 F3 sent as 2 bytes and 5 received
+/// (SEND3 bits 8-16 / 18-26): the 5-byte reply must come back
+#[test]
+fn sio2_send_and_receive_lengths_differ() {
+    let mut s = super::sio2::Sio2::default();
+    s.cards[0] = Some(super::memcard::MemCard::new(&[]));
+    s.send3[0] = 2 | 2 << 8 | 5 << 18;
+    s.fifo_in.extend([0x81, 0xF3]);
+    s.write(0x1F80_8268, 1);
+    assert!(s.run());
+    let p: Vec<u8> = s.fifo_out.iter().copied().collect();
+    assert_eq!(p, [0, 0, 0, 0x2B, 0x55]);
+}
+
+/// Persona 3 FES's title: MSKPATH3 0 then FLUSHA, then the draws that use the textures
+/// PATH3 was unmasked to send. The VIF must wait at FLUSHA until the GIF channel is done.
+#[test]
+fn flusha_waits_for_path3() {
+    let mut h = Hw::new(vec![0; hw::BIOS_SIZE]);
+    let mut spr = vec![0u8; 0x4000];
+    // no GIF transfer: FLUSHA goes straight through
+    h.vif_feed(true, &[0x1300_0000, 0x0700_0001]);
+    assert_eq!(h.vif1.mark, 1);
+    // a masked GIF transfer waiting
+    h.vif_feed(true, &[0x0600_8000]);
+    h.ee_io_write(0x1000_E000, 1, !0);
+    h.ee_io_write(0x1000_A010, 0x1000, !0);
+    h.ee_io_write(0x1000_A020, 1, !0);
+    h.ee_io_write(0x1000_A000, 0x100, !0);
+    h.dmac.step(&mut h.ram, &mut spr, &mut h.sif);
+    assert!(h.dmac.gif_out.is_empty(), "masked");
+    // unmask, FLUSHA, MARK: the MARK waits for PATH3 (first at the unmask itself)
+    h.vif_feed(true, &[0x0600_0000, 0x1300_0000, 0x0700_1234]);
+    assert_eq!(h.vif1.mark, 1);
+    assert!(h.vif1.p3_packet_wait || h.vif1.flusha_wait);
+    h.vif1_flusha_check();
+    assert_eq!(h.vif1.mark, 1, "the GIF hasn't run yet");
+    h.dmac.step(&mut h.ram, &mut spr, &mut h.sif);
+    assert_eq!(h.dmac.gif_out.len(), 1);
+    h.vif1_flusha_check();
+    assert_eq!(h.vif1.mark, 0x1234);
+    // MSKPATH3 1 before FLUSHA: a masked PATH3 doesn't hold FLUSHA up
+    h.ee_io_write(0x1000_A020, 1, !0);
+    h.ee_io_write(0x1000_A000, 0x100, !0);
+    h.vif_feed(true, &[0x0600_8000, 0x1300_0000, 0x0700_0042]);
+    assert_eq!(h.vif1.mark, 0x42);
+}
+
+/// Persona 3 FES streams textures: PATH3 holds one upload packet per texture, and the VIF
+/// unmasks it (MSKPATH3 0, then 1 again) before each draw. Each unmask lets exactly one GS
+/// packet through before the VIF goes on.
+#[test]
+fn each_path3_unmask_lets_one_packet_through() {
+    let mut h = Hw::new(vec![0; hw::BIOS_SIZE]);
+    let mut spr = vec![0u8; 0x4000];
+    // two image packets of 2 quadwords each at 0x1000: tag (NLOOP 2, EOP, IMAGE), data x2
+    let tag = 2u128 | 1 << 15 | 2u128 << 58;
+    for (k, q) in [tag, 0xA1, 0xA2, tag, 0xB1, 0xB2].iter().enumerate() {
+        h.ram[0x1000 + 16 * k..0x1010 + 16 * k].copy_from_slice(&q.to_le_bytes());
+    }
+    h.vif_feed(true, &[0x0600_8000]);
+    h.ee_io_write(0x1000_E000, 1, !0);
+    h.ee_io_write(0x1000_A010, 0x1000, !0);
+    h.ee_io_write(0x1000_A020, 6, !0);
+    h.ee_io_write(0x1000_A000, 0x100, !0);
+    h.vif_feed(true, &[0x0600_0000, 0x0600_8000, 0x0700_0001, 0x0600_0000, 0x0600_8000, 0x0700_0002]);
+    assert!(h.vif1.p3_packet_wait);
+    assert_eq!(h.vif1.mark, 0);
+    let mut step = |h: &mut Hw| {
+        h.dmac.step(&mut h.ram, &mut spr, &mut h.sif);
+        let q = std::mem::take(&mut h.dmac.gif_out);
+        h.vif1_flusha_check();
+        q
+    };
+    assert_eq!(step(&mut h), [tag, 0xA1, 0xA2], "the first packet only");
+    assert_eq!(h.vif1.mark, 1);
+    assert_eq!(step(&mut h), [tag, 0xB1, 0xB2]);
+    assert_eq!(h.vif1.mark, 2);
+    assert_eq!(h.dmac.ch[super::dmac::GIF].chcr & 0x100, 0, "the channel finished");
+}
+
+// ---- SPU2
+
+/// A voice playing a looping sample passes IRQA every loop: IRQINFO bit 2 (core 0),
+/// IOP interrupt; once until IRQINFO is written; voices keep reading when off
+#[test]
+fn spu2_voice_reaching_irqa_raises_an_interrupt() {
+    use super::spu2::Spu2;
+    let mut s = Spu2::default();
+    // 4 blocks at 5000h: loop start on the first, end + repeat on the last
+    for b in 0..4u32 {
+        let flags: u16 = match b { 0 => 4, 3 => 3, _ => 0 };
+        s.ram[(0x5000 + 8 * b) as usize] = flags << 8;
+    }
+    s.write16(0x19C, 0);         // IRQA 05010 (block 2's first word... header of block 2)
+    s.write16(0x19E, 0x5010);
+    s.write16(0x19A, 0x8040);    // core on, IRQ on
+    s.write16(0x1C0, 0);         // voice 0 SSA 05000
+    s.write16(0x1C2, 0x5000);
+    s.write16(0x004, 0x1000);    // pitch 48 kHz
+    s.write16(0x1A0, 1);         // key on
+    assert_eq!(s.read16(0x1C8), 0, "NAX hi");
+    assert_eq!(s.read16(0x1CA) & !7, 0x5000);
+    // block 2 starts after 56 samples
+    s.tick(768 * 50);
+    assert!(!s.irq);
+    s.tick(768 * 10);
+    assert!(s.irq);
+    assert_eq!(s.read16(0x7C2), 4);
+    s.irq = false;
+    // a whole loop later: no new interrupt until IRQINFO is cleared
+    s.tick(768 * 112);
+    assert!(!s.irq);
+    s.write16(0x7C2, 0);
+    s.tick(768 * 112);
+    assert!(s.irq);
+    // the end flag set ENDX bit 0
+    assert_eq!(s.read16(0x340) & 1, 1);
+    // key off: the voice still reads memory, so IRQA still fires
+    s.irq = false;
+    s.write16(0x7C2, 0);
+    s.write16(0x1A4, 1);
+    s.tick(768 * 112 * 8);
+    assert!(s.irq);
+}
+
+/// SPU2 DMA (IOP channel 4) writes sound RAM at TSA; a write across IRQA interrupts;
+/// the data port 1AC writes too
+#[test]
+fn spu2_dma_writes_sound_ram_at_tsa() {
+    let mut d = super::iop_dma::IopDma::default();
+    let mut ram = vec![0u8; 0x20_0000];
+    let mut sif = super::hw::Sif::default();
+    let mut sio2 = super::sio2::Sio2::default();
+    let mut spu2 = super::spu2::Spu2::default();
+    for i in 0..64u32 { ram[0x1000 + 2 * i as usize..][..2].copy_from_slice(&(i as u16 + 0x100).to_le_bytes()); }
+    spu2.write16(0x1A8, 0);
+    spu2.write16(0x1AA, 0x3000);        // TSA 03000
+    spu2.write16(0x19E, 0x3020);        // IRQA 03020
+    spu2.write16(0x19A, 0x8040);
+    d.write(0x1F80_10F0, 0x0008_0000, u32::MAX);    // DPCR: channel 4 on
+    d.write(0x1F80_1578, 1, u32::MAX);
+    d.write(0x1F80_10C0, 0x1000, u32::MAX);         // MADR
+    d.write(0x1F80_10C4, 0x0002_0010, u32::MAX);    // 2 blocks of 16 words
+    d.write(0x1F80_10C8, 0x0100_0201, u32::MAX);    // from RAM, start
+    d.step(&mut ram, &mut sif, &mut sio2, &mut spu2);
+    assert_eq!(d.ch[4].chcr >> 24 & 1, 0);
+    assert_eq!(spu2.ram[0x3000], 0x100);
+    assert_eq!(spu2.ram[0x303F], 0x13F);
+    assert!(spu2.irq);
+    assert_eq!(spu2.read16(0x1AA), 0x3040);
+    spu2.write16(0x1AC, 0xBEEF);
+    assert_eq!(spu2.ram[0x3040], 0xBEEF);
 }

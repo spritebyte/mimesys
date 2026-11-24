@@ -32,7 +32,7 @@ use std::collections::VecDeque;
 /// CPU cycles per 44100 Hz sample
 const CYCLES_PER_SAMPLE: u32 = 768;
 
-const GAUSS: [i32; 512] = [
+pub(crate) const GAUSS: [i32; 512] = [
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 3, 3,
     3, 4, 4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 11, 12, 13, 14,
@@ -68,13 +68,13 @@ const GAUSS: [i32; 512] = [
 ];
 
 /// SPU-ADPCM filters: (old, older) weights / 64
-const FILTERS: [(i32, i32); 5] = [(0, 0), (60, 0), (115, -52), (98, -55), (122, -60)];
+pub(crate) const FILTERS: [(i32, i32); 5] = [(0, 0), (60, 0), (115, -52), (98, -55), (122, -60)];
 
-fn clamp16(v: i32) -> i32 { v.clamp(-0x8000, 0x7FFF) }
+pub(crate) fn clamp16(v: i32) -> i32 { v.clamp(-0x8000, 0x7FFF) }
 
 /// One envelope step (ADSR phases and volume sweeps), from PSX-SPX's "Envelope Operation".
 /// `rate` is shift << 2 | step (7 bits); returns the new level.
-fn envelope(level: i32, counter: &mut u32, rate: u32, exp: bool, dec: bool, neg: bool) -> i32 {
+pub(crate) fn envelope(level: i32, counter: &mut u32, rate: u32, exp: bool, dec: bool, neg: bool) -> i32 {
     let shift = (rate >> 2) as i32;
     let step_val = (rate & 3) as i32;
     let mut step = 7 - step_val;
@@ -98,20 +98,20 @@ fn envelope(level: i32, counter: &mut u32, rate: u32, exp: bool, dec: bool, neg:
 
 /// A volume register: a fixed level, or a sweep
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]
-struct Volume {
-    reg: u16,
-    level: i32,
-    counter: u32,
+pub(crate) struct Volume {
+    pub(crate) reg: u16,
+    pub(crate) level: i32,
+    pub(crate) counter: u32,
 }
 
 impl Volume {
-    fn set(&mut self, v: u16) {
+    pub(crate) fn set(&mut self, v: u16) {
         self.reg = v;
         if v & 0x8000 == 0 { self.level = ((v << 1) as i16) as i32; }
         self.counter = 0;
     }
 
-    fn tick(&mut self) {
+    pub(crate) fn tick(&mut self) {
         let v = self.reg;
         if v & 0x8000 == 0 { return; }
         let exp = v & 0x4000 != 0;
@@ -123,7 +123,7 @@ impl Volume {
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-enum Phase {
+pub(crate) enum Phase {
     #[default]
     Off,
     Attack,
@@ -133,29 +133,29 @@ enum Phase {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct Voice {
-    vol_l: Volume,
-    vol_r: Volume,
-    pitch: u16,
-    start: u16,
-    adsr: u32,
+pub(crate) struct Voice {
+    pub(crate) vol_l: Volume,
+    pub(crate) vol_r: Volume,
+    pub(crate) pitch: u16,
+    pub(crate) start: u16,
+    pub(crate) adsr: u32,
     /// the envelope (ENVX)
-    level: i32,
-    env_counter: u32,
-    phase: Phase,
+    pub(crate) level: i32,
+    pub(crate) env_counter: u32,
+    pub(crate) phase: Phase,
     /// byte addresses: the block being played and the repeat point
-    cur: u32,
-    repeat: u32,
+    pub(crate) cur: u32,
+    pub(crate) repeat: u32,
     /// software wrote the repeat address: loop-start flags don't move it
-    ignore_loop: bool,
-    counter: u32,
-    flags: u8,
+    pub(crate) ignore_loop: bool,
+    pub(crate) counter: u32,
+    pub(crate) flags: u8,
     /// the previous block's last three samples, then this block's 28
-    buf: Vec<i16>,
-    s1: i32,
-    s2: i32,
+    pub(crate) buf: Vec<i16>,
+    pub(crate) s1: i32,
+    pub(crate) s2: i32,
     /// the last output (after the envelope), for PMON and capture
-    out: i32,
+    pub(crate) out: i32,
 }
 
 impl Default for Voice {
@@ -169,7 +169,7 @@ impl Default for Voice {
 }
 
 impl Voice {
-    fn rate_and_mode(&self) -> Option<(u32, bool, bool, i32)> {
+    pub(crate) fn rate_and_mode(&self) -> Option<(u32, bool, bool, i32)> {
         // (rate, exponential, decreasing, target)
         let lo = self.adsr & 0xFFFF;
         let hi = self.adsr >> 16;
@@ -185,7 +185,7 @@ impl Voice {
         }
     }
 
-    fn tick_envelope(&mut self) {
+    pub(crate) fn tick_envelope(&mut self) {
         let Some((rate, exp, dec, target)) = self.rate_and_mode() else { return };
         self.level = envelope(self.level, &mut self.env_counter, rate, exp, dec, false);
         match self.phase {
@@ -197,7 +197,7 @@ impl Voice {
     }
 
     /// Gaussian interpolation of the current sample
-    fn interpolate(&self) -> i32 {
+    pub(crate) fn interpolate(&self) -> i32 {
         let s = (self.counter >> 12) as usize;
         let i = ((self.counter >> 4) & 0xFF) as usize;
         let b = &self.buf;

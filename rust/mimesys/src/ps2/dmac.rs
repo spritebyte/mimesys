@@ -41,6 +41,9 @@ pub struct Channel {
     pub sadr: u32,
     /// chain mode: the last tag ends the transfer once QWC is done
     tag_end: bool,
+    /// MFIFO drain: the data being sent lies in the ring buffer (wraps there)
+    #[serde(default)]
+    ring_data: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -66,12 +69,31 @@ pub struct Dmac {
     /// debugging: transfers finished per channel
     #[serde(skip)]
     pub done: [u64; 10],
+    /// MFIFO: the drain channel caught up with SPR_FROM (D_STAT MEIS raised once)
+    #[serde(default)]
+    mfifo_empty: bool,
+    /// PATH3 masked (GIF_MODE M3R, VIF1 MSKPATH3) or paused (GIF_CTRL PSE): the GIF
+    /// channel waits
+    #[serde(default)]
+    pub gif_hold: bool,
+    /// PATH3 just unmasked by the VIF: send the GIF channel's data up to the end of one
+    /// GS packet (EOP) even if it's masked again, then stop
+    #[serde(default)]
+    pub gif_one_packet: bool,
+    /// GIFtag parsing of what the channel sends: quadwords left in the current tag's data,
+    /// that tag's EOP, and "a packet just ended" (stop for `gif_one_packet`)
+    #[serde(default)]
+    gif_left: u32,
+    #[serde(default)]
+    gif_eop: bool,
+    #[serde(default)]
+    gif_stop: bool,
 }
 
 impl Default for Dmac {
     fn default() -> Self {
         Self { ch: Default::default(), ctrl: 0, stat: 0, pcr: 0, sqwc: 0, rbsr: 0, rbor: 0, stadr: 0,
-            enable: 0x1201, gif_out: Vec::new(), vif0_out: Vec::new(), vif1_out: Vec::new(), done: [0; 10] }
+            enable: 0x1201, gif_out: Vec::new(), vif0_out: Vec::new(), vif1_out: Vec::new(), done: [0; 10], mfifo_empty: false, gif_hold: false, gif_one_packet: false, gif_left: 0, gif_eop: false, gif_stop: false }
     }
 }
 
@@ -180,6 +202,22 @@ impl Dmac {
         self.done[n] += 1;
     }
 
+    /// VIF1 running towards memory (CHCR DIR 0): the GS's local -> host data
+    pub fn vif1_from_gs(&mut self, ram: &mut [u8], spr: &mut [u8], src: &mut std::collections::VecDeque<u128>) {
+        if self.ctrl & 1 == 0 || self.enable & 0x1_0000 != 0 { return; }
+        let c = &mut self.ch[VIF1];
+        if c.chcr & STR == 0 || c.chcr & 1 != 0 { return; }
+        // (it waits for the GS's data, as the hardware does: the GS may get the
+        // transfer's TRXDIR after the channel starts)
+        while c.qwc > 0 {
+            let Some(q) = src.pop_front() else { return };
+            mem_write(ram, spr, c.madr, q);
+            c.madr = c.madr.wrapping_add(16);
+            c.qwc -= 1;
+        }
+        self.finish(VIF1);
+    }
+
     /// Move data on every running channel
     pub fn step(&mut self, ram: &mut [u8], spr: &mut [u8], sif: &mut Sif) {
         if self.ctrl & 1 == 0 || self.enable & 0x1_0000 != 0 { return; }
@@ -188,8 +226,10 @@ impl Dmac {
             match n {
                 SIF0 => self.sif0(ram, spr, sif),
                 SPR_FROM => self.spr_from(ram, spr),
-                IPU_FROM | SIF2 => {}
+                IPU_FROM | IPU_TO | SIF2 => {}
                 VIF1 if self.ch[n].chcr & 1 == 0 => {}
+                GIF if self.gif_hold && !self.gif_one_packet => {}
+                VIF1 | GIF if self.mfifo_drain() == Some(n) && self.ch[n].chcr >> 2 & 3 == 1 => self.mfifo(n, ram, spr, sif),
                 _ => self.source(n, ram, spr, sif),
             }
         }
@@ -210,7 +250,13 @@ impl Dmac {
                 c.qwc -= 1;
                 guard += 1;
                 if guard > 0x10_0000 { return; }
+                // one PATH3 packet sent while masked: stop here (unless that was the end)
+                if self.gif_stop && !(self.ch[n].qwc == 0 && (!chain || self.ch[n].tag_end)) {
+                    self.gif_stop = false;
+                    return;
+                }
             }
+            self.gif_stop = false;
             if !chain || self.ch[n].tag_end { self.finish(n); return; }
             // the next tag
             let c = &mut self.ch[n];
@@ -266,7 +312,25 @@ impl Dmac {
                 mem_write(ram, spr, 0x8000_0000 | c.sadr, q);
                 c.sadr = (c.sadr + 16) & 0x3FF0;
             }
-            GIF => self.gif_out.push(q),
+            GIF => {
+                self.gif_out.push(q);
+                // follow the GIFtags to see where a packet ends
+                let ended = if self.gif_left == 0 {
+                    let lo = q as u64;
+                    let (nloop, flg) = ((lo & 0x7FFF) as u32, (lo >> 58 & 3) as u32);
+                    let nreg = match (lo >> 60) as u32 { 0 => 16, n => n };
+                    self.gif_left = match flg { 0 => nloop * nreg, 1 => (nloop * nreg).div_ceil(2), _ => nloop };
+                    self.gif_eop = lo >> 15 & 1 != 0;
+                    self.gif_left == 0 && self.gif_eop
+                } else {
+                    self.gif_left -= 1;
+                    self.gif_left == 0 && self.gif_eop
+                };
+                if ended && self.gif_one_packet {
+                    self.gif_one_packet = false;
+                    self.gif_stop = true;
+                }
+            }
             VIF0 => for k in 0..4 { self.vif0_out.push((q >> (32 * k)) as u32); },
             VIF1 => for k in 0..4 { self.vif1_out.push((q >> (32 * k)) as u32); },
             _ => {}
@@ -314,14 +378,161 @@ impl Dmac {
 
     /// SPR_FROM (normal mode): scratchpad -> memory
     fn spr_from(&mut self, ram: &mut [u8], spr: &mut [u8]) {
+        let mfifo = self.mfifo_drain().is_some();
+        let (rbor, rbsr) = (self.rbor, self.rbsr);
         let c = &mut self.ch[SPR_FROM];
         while c.qwc > 0 {
             let q = mem_read(ram, spr, 0x8000_0000 | c.sadr);
+            // MFIFO: SPR_FROM fills the ring buffer (RBOR + offset & RBSR)
+            if mfifo { c.madr = rbor | (c.madr & rbsr); }
             mem_write(ram, spr, c.madr & 0x7FFF_FFFF, q);
             c.sadr = (c.sadr + 16) & 0x3FF0;
             c.madr = c.madr.wrapping_add(16);
+            if mfifo { c.madr = rbor | (c.madr & rbsr); }
             c.qwc -= 1;
         }
+        if mfifo { self.mfifo_empty = false; }
         self.finish(SPR_FROM);
+    }
+
+    /// IPU_TO (channel 4): the next quadword for the IPU's input FIFO (normal or source
+    /// chain); the channel ends as soon as its last quadword goes
+    pub fn ipu_to_pull(&mut self, ram: &mut [u8], spr: &mut [u8]) -> Option<u128> {
+        if self.ctrl & 1 == 0 || self.enable & 0x1_0000 != 0 { return None; }
+        let n = IPU_TO;
+        if self.ch[n].chcr & STR == 0 { return None; }
+        let chain = self.ch[n].chcr >> 2 & 3 == 1;
+        for _ in 0..64 {
+            if self.ch[n].qwc > 0 {
+                let a = self.ch[n].madr;
+                let q = mem_read(ram, spr, a);
+                let c = &mut self.ch[n];
+                c.madr = c.madr.wrapping_add(16);
+                c.qwc -= 1;
+                if c.qwc == 0 && (!chain || c.tag_end) { self.finish(n); }
+                return Some(q);
+            }
+            if !chain || self.ch[n].tag_end { self.finish(n); return None; }
+            self.load_tag(n, ram, spr);
+        }
+        None
+    }
+
+    /// A source chain's next tag (no TTE: the IPU's channel)
+    fn load_tag(&mut self, n: usize, ram: &mut [u8], spr: &mut [u8]) {
+        let c = &mut self.ch[n];
+        let tag = mem_read(ram, spr, c.tadr);
+        let lo = tag as u64;
+        c.chcr = (c.chcr & 0xFFFF) | ((lo as u32) & 0xFFFF_0000);
+        c.qwc = (lo & 0xFFFF) as u32;
+        let id = (lo >> 28 & 7) as u32;
+        let irq = lo >> 31 & 1 != 0;
+        let addr = (lo >> 32) as u32 & 0xFFFF_FFF0;
+        let tadr = c.tadr;
+        let asp = c.chcr >> 4 & 3;
+        let mut end = false;
+        match id {
+            0 => { c.madr = addr; c.tadr = tadr + 16; end = true; }
+            1 => { c.madr = tadr + 16; c.tadr = c.madr + c.qwc * 16; }
+            2 => { c.madr = tadr + 16; c.tadr = addr; }
+            3 | 4 => { c.madr = addr; c.tadr = tadr + 16; }
+            5 => {
+                c.madr = tadr + 16;
+                if asp < 2 { c.asr[asp as usize] = c.madr + c.qwc * 16; }
+                c.tadr = addr;
+                c.chcr = (c.chcr & !0x30) | ((asp + 1).min(2) << 4);
+            }
+            6 => {
+                c.madr = tadr + 16;
+                if asp > 0 {
+                    c.tadr = c.asr[asp as usize - 1];
+                    c.chcr = (c.chcr & !0x30) | ((asp - 1) << 4);
+                } else {
+                    end = true;
+                }
+            }
+            _ => { c.madr = tadr + 16; end = true; }
+        }
+        if irq && c.chcr & (1 << 7) != 0 { end = true; }
+        c.tag_end = end;
+    }
+
+    /// IPU_FROM (channel 3, normal mode): one quadword of the IPU's output to memory;
+    /// false when the channel isn't taking any
+    pub fn ipu_from_push(&mut self, ram: &mut [u8], spr: &mut [u8], q: u128) -> bool {
+        if self.ctrl & 1 == 0 || self.enable & 0x1_0000 != 0 { return false; }
+        let n = IPU_FROM;
+        let c = &mut self.ch[n];
+        if c.chcr & STR == 0 || c.qwc == 0 { return false; }
+        mem_write(ram, spr, c.madr, q);
+        c.madr = c.madr.wrapping_add(16);
+        c.qwc -= 1;
+        if c.qwc == 0 { self.finish(n); }
+        true
+    }
+
+    /// D_CTRL MFD: 2 = VIF1 drains the MFIFO, 3 = the GIF
+    fn mfifo_drain(&self) -> Option<usize> {
+        match self.ctrl >> 2 & 3 { 2 => Some(VIF1), 3 => Some(GIF), _ => None }
+    }
+
+    /// An address in the ring buffer
+    fn ring(&self, a: u32) -> u32 { self.rbor | (a & self.rbsr) }
+
+    /// The MFIFO drain (VIF1 or GIF in source chain mode): tags come from the ring buffer
+    /// at TADR (wrapping), up to where SPR_FROM has written (its MADR); CNT / NEXT / END
+    /// data follows the tag in the ring, REF / REFS / REFE data is read where it lies.
+    /// Caught up: the channel waits (STR stays set), D_STAT MEIS once.
+    fn mfifo(&mut self, n: usize, ram: &mut [u8], spr: &mut [u8], sif: &mut Sif) {
+        let mut guard = 0;
+        loop {
+            while self.ch[n].qwc > 0 {
+                let (a, rd) = (self.ch[n].madr, self.ch[n].ring_data);
+                let q = mem_read(ram, spr, a);
+                self.sink(n, q, ram, spr, sif);
+                let next = a.wrapping_add(16);
+                let c_madr = if rd { self.ring(next) } else { next };
+                let c = &mut self.ch[n];
+                c.madr = c_madr;
+                c.qwc -= 1;
+                guard += 1;
+                if guard > 0x10_0000 { return; }
+            }
+            if self.ch[n].tag_end { self.finish(n); return; }
+            let tadr = self.ring(self.ch[n].tadr);
+            if tadr == self.ring(self.ch[SPR_FROM].madr) {
+                self.ch[n].tadr = tadr;
+                if !self.mfifo_empty { self.mfifo_empty = true; self.stat |= 1 << 14; }
+                return;
+            }
+            let tag = mem_read(ram, spr, tadr);
+            let lo = tag as u64;
+            let qwc = (lo & 0xFFFF) as u32;
+            let id = (lo >> 28 & 7) as u32;
+            let irq = lo >> 31 & 1 != 0;
+            let addr = (lo >> 32) as u32 & 0xFFFF_FFF0;
+            let after = self.ring(tadr + 16);
+            let after_data = self.ring(tadr + 16 + qwc * 16);
+            let c = &mut self.ch[n];
+            c.chcr = (c.chcr & 0xFFFF) | ((lo as u32) & 0xFFFF_0000);
+            c.qwc = qwc;
+            let mut end = false;
+            match id {
+                0 => { c.madr = addr; c.ring_data = false; c.tadr = after; end = true; }   // refe
+                1 => { c.madr = after; c.ring_data = true; c.tadr = after_data; }          // cnt
+                2 => { c.madr = after; c.ring_data = true; c.tadr = addr; }                // next
+                3 | 4 => { c.madr = addr; c.ring_data = false; c.tadr = after; }           // ref / refs
+                7 => { c.madr = after; c.ring_data = true; c.tadr = after_data; end = true; } // end
+                _ => { c.madr = after; c.ring_data = true; c.tadr = after_data; }          // call / ret: as cnt
+            }
+            if irq && c.chcr & (1 << 7) != 0 { end = true; }
+            c.tag_end = end;
+            if self.ch[n].chcr & (1 << 6) != 0 {
+                let hi = (tag >> 64) as u64;
+                self.sink_tag(n, hi, sif);
+            }
+            guard += 1;
+            if guard > 0x10_0000 { return; }
+        }
     }
 }

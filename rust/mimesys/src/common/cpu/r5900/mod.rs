@@ -27,6 +27,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod fpu;
+pub mod jit;
 mod mmi;
 #[cfg(test)]
 mod tests;
@@ -47,6 +48,11 @@ pub trait EeBus {
     fn write64(&mut self, pa: u32, v: u64) { self.write32(pa, v as u32); self.write32(pa + 4, (v >> 32) as u32); }
     fn write128(&mut self, pa: u32, v: u128) { self.write64(pa, v as u64); self.write64(pa + 8, (v >> 64) as u64); }
     fn fetch32(&mut self, pa: u32) -> u32 { self.read32(pa) }
+    /// For the JIT: where RAM (and ROM) are in host memory
+    fn jit_mem(&mut self) -> Option<jit::JitMem> { None }
+    /// After a store to I/O: if it changed the interrupt controllers, the INT0 / INT1
+    /// lines now (they drop at once when software acknowledges)
+    fn irq_lines(&mut self) -> Option<(bool, bool)> { None }
     /// BC0F / BC0T test CPCOND0 (the DMAC: all channels named in D_PCR finished)
     fn cpcond0(&mut self) -> bool { true }
     /// A COP2 (VU0 macro mode) instruction other than LQC2 / SQC2: QMFC2 / QMTC2 / CFC2 /
@@ -96,6 +102,7 @@ pub const ST_IE: u32 = 1;
 pub const ST_EXL: u32 = 1 << 1;
 pub const ST_ERL: u32 = 1 << 2;
 pub const ST_EIE: u32 = 1 << 16;
+pub const ST_EDI: u32 = 1 << 17;
 pub const ST_BEV: u32 = 1 << 22;
 pub const ST_CU1: u32 = 1 << 29;
 
@@ -163,6 +170,9 @@ pub struct R5900 {
     /// debugging: the last exception taken (code, EPC, BadVAddr)
     #[serde(skip)]
     pub last_exception: Option<(u32, u32, u32)>,
+    /// changes whenever the TLB does (the JIT's blocks are by virtual address)
+    #[serde(skip)]
+    tlb_gen: u32,
 }
 
 impl Default for R5900 {
@@ -191,7 +201,7 @@ impl R5900 {
             tlb: vec![TlbEntry::default(); 48],
             map: vec![0; 1 << 20], mapped: Vec::new(),
             scratch: vec![0; 0x4000], irq: 0, cycles: 0,
-            trace: Vec::new(), trace_pos: 0, trace_dumped: false, last_exception: None,
+            trace: Vec::new(), trace_pos: 0, trace_dumped: false, last_exception: None, tlb_gen: 0,
         };
         c.reset();
         c
@@ -330,6 +340,8 @@ impl R5900 {
 
     /// Flatten the TLB into the page table (after a TLB write, an ASID change, or a load)
     pub fn rebuild_tlb(&mut self) {
+        static GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        self.tlb_gen = GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if self.map.len() != 1 << 20 { self.map = vec![0; 1 << 20]; self.mapped.clear(); }
         for &(a, b) in &self.mapped { self.map[a as usize..b as usize].fill(0); }
         self.mapped.clear();
@@ -439,6 +451,11 @@ impl R5900 {
                 8 => bus.write64(pa, v as u64),
                 _ => bus.write128(pa, v),
             },
+        }
+        // an acknowledged interrupt mustn't be taken again before the system's next look
+        if let Some((i0, i1)) = bus.irq_lines() {
+            if !i0 { self.set_int0(false); }
+            if !i1 { self.set_int1(false); }
         }
         Ok(())
     }
@@ -916,8 +933,10 @@ impl R5900 {
                         self.jump(self.cop0[EPC]);
                     }
                 }
-                0x38 => self.cop0[STATUS] |= ST_EIE,
-                0x39 => self.cop0[STATUS] &= !ST_EIE,
+                // EI / DI do nothing in user mode unless Status.EDI is set
+                0x38 if self.kernel() || self.cop0[STATUS] & ST_EDI != 0 => self.cop0[STATUS] |= ST_EIE,
+                0x39 if self.kernel() || self.cop0[STATUS] & ST_EDI != 0 => self.cop0[STATUS] &= !ST_EIE,
+                0x38 | 0x39 => {}
                 _ => return Err(self.fault(EXC_RI)),
             },
             _ => return Err(self.fault(EXC_RI)),

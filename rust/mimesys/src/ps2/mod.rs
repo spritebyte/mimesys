@@ -13,12 +13,14 @@
 
 pub mod cdvd;
 pub mod dmac;
+pub mod ipu;
 pub mod gs;
 pub mod hw;
 pub mod iso;
 pub mod memcard;
 pub mod iop_dma;
 pub mod sio2;
+pub mod spu2;
 pub mod timers;
 pub mod vif;
 pub mod vu;
@@ -40,13 +42,13 @@ pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
 /// Printed at the top of the debug log so a log says which build made it
-const PATCH: &str = "0236";
+const PATCH: &str = "0265";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;
 const VBLANK_LINE: u32 = 240;
 const EE_PER_LINE: u32 = 18_740;
-const SLICE: u32 = 64;
+const SLICE: u32 = 256;
 const SCREEN_W: usize = 640;
 const SCREEN_H: usize = 448;
 
@@ -82,6 +84,17 @@ pub struct Ps2System {
     /// speed report: cycles skipped in idle loops, and where the last report was
     skipped_ee: u64,
     skipped_iop: u64,
+    /// debugging: the waiting threads' code went to the log (once, 20 s in)
+    code_dumped: bool,
+    /// debugging: EE / IOP RAM written to files (once, 30 s in)
+    next_ram_dump: u64,
+    /// debugging: record the next frame's GS commands
+    gs_rec_due: bool,
+    /// frames (vsyncs) the recording still covers
+    gs_rec_left: u32,
+    /// the EE's JIT (off: PS2_NOJIT=1)
+    jit: crate::common::cpu::r5900::jit::Jit,
+    jit_on: bool,
     last_report: Option<(std::time::Instant, u64, u64, u64, u64, u64, u64, u64, u64)>,
 }
 
@@ -137,7 +150,13 @@ impl Ps2System {
             iop_idle: None,
             skipped_ee: 0,
             skipped_iop: 0,
+            code_dumped: false,
+            next_ram_dump: 1200,
+            gs_rec_due: false,
+            gs_rec_left: 0,
             last_report: None,
+            jit: Default::default(),
+            jit_on: std::env::var_os("PS2_NOJIT").is_none(),
         };
         s.reset_cpus();
         // a disc image: the frontend sends its path
@@ -205,7 +224,12 @@ impl Ps2System {
                 c = target;
             } else {
                 let mut bus = EeView(&mut self.hw);
-                while c < target { c += self.ee.step(&mut bus); }
+                if self.jit_on {
+                    c = self.ee.run_jit(&mut bus, &mut self.jit, target);
+                    self.skipped_ee += std::mem::take(&mut self.jit.idle);
+                } else {
+                    while c < target { c += self.ee.step(&mut bus); }
+                }
             }
             done += c;
             // the IOP at an eighth of the EE's clock
@@ -253,6 +277,14 @@ impl Ps2System {
             if h.iop_timers[n].tick(n, iop, hblank) { h.i_stat |= timers::IOP_TIMER_IRQ[n]; }
         }
         h.dmac.step(&mut h.ram, &mut self.ee.scratch, &mut h.sif);
+        if h.dmac.ch[dmac::VIF1].chcr & 0x101 == 0x100 {
+            h.gs.flush();
+            h.dmac.vif1_from_gs(&mut h.ram, &mut self.ee.scratch, &mut h.gs.readback);
+        }
+        // the IPU: input from IPU_TO, a command's work, output to IPU_FROM
+        if h.ipu.busy || !h.ipu.fifo_out.is_empty() || h.dmac.ch[dmac::IPU_TO].chcr & 0x100 != 0 {
+            if h.ipu.step(&mut h.dmac, &mut h.ram, &mut self.ee.scratch) { h.intc_stat |= hw::INT_IPU; }
+        }
         // VIF1: its DIRECT quadwords join the GIF's (PATH2 before PATH3)
         if !h.dmac.vif0_out.is_empty() {
             let words = std::mem::take(&mut h.dmac.vif0_out);
@@ -268,14 +300,20 @@ impl Ps2System {
             for v in q { h.gs.feed(v); }
             h.update_gs_irq();
         }
-        if h.iop_dma.step(&mut h.iop_ram, &mut h.sif, &mut h.sio2) { h.i_stat |= hw::IOP_DMA; }
+        // VIF1 at a FLUSHA goes on now PATH3's data is in
+        h.vif1_flusha_check();
+        // the SPU2: voices and auto-DMA input play; auto-DMA transfers end at the audio's pace
+        h.spu2.tick(iop);
+        if std::mem::take(&mut h.spu2.irq) { h.i_stat |= hw::IOP_SPU2; }
+        h.iop_dma.tick_spu(iop);
+        if h.iop_dma.step(&mut h.iop_ram, &mut h.sif, &mut h.sio2, &mut h.spu2) { h.i_stat |= hw::IOP_DMA; }
         // the CDVD drive: seeks, and sectors into DMA channel 3
         h.cdvd.tick(iop, &mut h.iop_dma, &mut h.iop_ram, &mut h.i_stat);
         if h.iop_dma.irq_rise() { h.i_stat |= hw::IOP_DMA; }
         // SIO2 runs after its input DMA; its reply DMA then goes on the next pass
         if h.sio2.run() {
             h.i_stat |= hw::IOP_SIO2;
-            if h.iop_dma.step(&mut h.iop_ram, &mut h.sif, &mut h.sio2) { h.i_stat |= hw::IOP_DMA; }
+            if h.iop_dma.step(&mut h.iop_ram, &mut h.sif, &mut h.sio2, &mut h.spu2) { h.i_stat |= hw::IOP_DMA; }
         }
         // a SIF0 transfer may have new data for the EE
         if h.dmac.ch[dmac::SIF0].chcr & 0x100 != 0 { h.dmac.step(&mut h.ram, &mut self.ee.scratch, &mut h.sif); }
@@ -327,6 +365,121 @@ impl Ps2System {
             crate::dlog!("PS2:   CDVD disc {:02X} {} serial {} | ready {:02X} status {:02X} pos {} op {:?} | N {:02X?} | sectors {}",
                 c.disc_type, if c.dvd { "DVD" } else { "CD" }, c.serial, c.ready, c.status, c.pos, c.op,
                 &c.n_log[c.n_log.len().saturating_sub(24)..], c.sectors);
+            if h.cdvd.layer1 > 0 { crate::dlog!("PS2:   CDVD dual-layer DVD: layer 1 from sector {}", h.cdvd.layer1); }
+            if h.cdvd.past_end > 0 { crate::dlog!("PS2:   CDVD reads past the image's end (zeros): {} | image {} sectors, volume {}", h.cdvd.past_end, h.cdvd.disc.as_ref().map_or(0, |d| d.leadout), h.cdvd.volume_end); }
+            let r: Vec<String> = c.reads.iter().enumerate().filter(|(_, n)| **n > 0).map(|(k, n)| format!("{k:02X}x{n}")).collect();
+            crate::dlog!("PS2:   CDVD last N: {} | disc {} sectors", c.n_hist.iter().cloned().collect::<Vec<_>>().join(" | "), c.disc.as_ref().map_or(0, |d| d.leadout));
+            crate::dlog!("PS2:   CDVD register reads: {} | S so far: {:02X?} | S 03 subs {:02X?}", r.join(" "), &c.log[c.log.len().saturating_sub(40)..], c.sub03);
+        }
+        // EE and IOP RAM to <data>/GD_EMU/PS2/ (once, 30 s in) for working out what the
+        // BIOS is waiting for
+        // (every 1200 frames, overwriting: the latest state is the useful one)
+        let mut gs_rec = false;
+        if self.current_frame >= self.next_ram_dump {
+            self.next_ram_dump = self.current_frame + 1200;
+            if let Some(d) = crate::common::debug_log::data_dir() {
+                let dir = d.join("GD_EMU").join("PS2");
+                let _ = std::fs::create_dir_all(&dir);
+                let a = std::fs::write(dir.join("ee_ram.bin"), &self.hw.ram);
+                let b = std::fs::write(dir.join("iop_ram.bin"), &self.hw.iop_ram);
+                // the VUs' micro and data memory (VU1: code 16 KB then data 16 KB)
+                let mut vu = self.hw.vu0_code.clone();
+                vu.extend_from_slice(&self.hw.vu0_data);
+                let _ = std::fs::write(dir.join("vu0_mem.bin"), vu);
+                let mut vu = self.hw.vu1_code.clone();
+                vu.extend_from_slice(&self.hw.vu1_data);
+                let _ = std::fs::write(dir.join("vu1_mem.bin"), vu);
+                // and the next frame's GS commands (gs_frame.bin, written when it ends)
+                gs_rec = true;
+                crate::dlog!("PS2:   RAM dumped to {} (ee_ram.bin {:?}, iop_ram.bin {:?})", dir.display(), a.is_ok(), b.is_ok());
+            }
+        }
+        // the EE kernel's threads (PCSX2's debugger finds the table the same way: after
+        // "sw v0,0(v0); nop; nop" in the kernel, the 6th word's immediate + 8001_0000 - 8)
+        {
+            let ram = &self.hw.ram;
+            let w = |a: usize| ram.get(a..a + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
+            let table = (0..0x5000).step_by(4).find(|&o| w(o) == 0xAC42_0000 && w(o + 4) == 0 && w(o + 8) == 0)
+                .map(|o| 0x1_0000 + (w(o + 24) & 0xFFFF) as usize - 8);
+            if let Some(t) = table {
+                let mut out = Vec::new();
+                for tid in 0..256 {
+                    let b = t + tid * 76;
+                    let status = w(b + 8);
+                    if status == 0 || status > 0x1F { continue; }
+                    let st = match status { 1 => "run", 2 => "ready", 4 => "wait", 8 => "susp", 0xC => "wait+susp", 0x10 => "dormant", _ => "?" };
+                    let prio = w(b + 24) >> 16 & 0xFFFF;
+                    let wait = match w(b + 28) { 0 => String::new(), 1 => " sleep".into(), 2 => format!(" sema {}", w(b + 32)), n => format!(" wait{n}") };
+                    let ctx = (w(b + 16) & 0x1FF_FFFF) as usize;
+                    out.push(format!("#{tid} {st}{wait} prio {prio} entry {:X} pc {:X} ra {:X} wakeups {}", w(b + 48), w(b + 12), w(ctx + 16 + 30 * 16), w(b + 36)));
+                }
+                crate::dlog!("PS2:   EE threads (table {:X}): {}", t, out.join(" | "));
+                // the code each waiting thread sits in: 48 words before its saved ra and 16
+                // after, and its first 24 words (for working out what it waits for)
+                if !self.code_dumped && self.current_frame >= 1800 {
+                    self.code_dumped = true;
+                    let dump = |a: usize| -> String { (0..8).map(|k| format!("{:08X}", w(a + 4 * k))).collect::<Vec<_>>().join(" ") };
+                    for tid in 1..256 {
+                        let b = t + tid * 76;
+                        if w(b + 8) & 4 == 0 { continue; }
+                        let ctx = (w(b + 16) & 0x1FF_FFFF) as usize;
+                        let ra = (w(ctx + 16 + 30 * 16) & 0x1FF_FFFC) as usize;
+                        let entry = (w(b + 48) & 0x1FF_FFFC) as usize;
+                        for (what, from, n) in [("ra", ra.saturating_sub(192), 64usize), ("entry", entry, 24)] {
+                            for k in (0..n).step_by(8) {
+                                crate::dlog!("PS2:   code #{tid} {what} {:08X}: {}", from + 4 * k, dump(from + 4 * k));
+                            }
+                        }
+                    }
+                }
+            } else {
+                crate::dlog!("PS2:   EE threads: table not found");
+            }
+            // the IOP's threads: thbase's export table (41E00000, name at +12) gives
+            // function 3, whose lui / ori load the thread manager; its list is at +42C
+            // (+430 after version 1.01); entries tagged 7F01 (PCSX2's layout)
+            let iram = &self.hw.iop_ram;
+            let r = |a: u32| { let a = (a & 0x1F_FFFC) as usize; iram.get(a..a + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap())) };
+            let lib = (0..iram.len() as u32 - 32).step_by(4).find(|&a| r(a) == 0x41E0_0000 && iram.get(a as usize + 12..a as usize + 18) == Some(b"thbase") && r(a + 0x20) != 0);
+            if let Some(a) = lib {
+                let f = r(a + 0x20);
+                let th = (r(f) & 0xFFFF) << 16 | (r(f + 4) & 0xFFFF);
+                let list = th + if r(a + 8) & 0xFFFF > 0x101 { 0x430 } else { 0x42C };
+                let mut item = r(list);
+                let mut out = Vec::new();
+                for _ in 0..64 {
+                    if item == 0 || (r(item + 8) & 0xFFFF) != 0x7F01 { break; }
+                    let status = r(item + 0xC) & 0xFF;
+                    let st = match status { 1 => "run", 2 => "ready", 4 => "wait", 8 => "susp", 0xC => "wait+susp", 0x10 => "dormant", _ => "?" };
+                    let ws = r(item + 0x1C) & 0xFFFF;
+                    let wait = match ws { 0 => String::new(), 1 => " sleep".into(), 2 => " delay".into(), 3 => format!(" sema {:X}", r(item + 0x20)),
+                        4 => format!(" evflag {:X}", r(item + 0x20)), 5 => format!(" mbox {:X}", r(item + 0x20)), n => format!(" wait{n}") };
+                    let ctx = r(item + 0x10);
+                    out.push(format!("#{} {st}{wait} prio {} entry {:X} pc {:X}", r(item + 0xA) & 0xFFFF, r(item + 0xC) >> 16 & 0xFFFF, r(item + 0x38), r(ctx + 0x8C)));
+                    item = r(item + 0x24);
+                }
+                crate::dlog!("PS2:   IOP threads (thbase {a:X} v{:X} fn3 {f:X} [{:08X} {:08X}] manager {th:X} list {list:X} first {:X} tag {:X}; words at +420: {:X?}): {}",
+                    r(a + 8) & 0xFFFF, r(f), r(f + 4), r(list), r(r(list) + 8) & 0xFFFF, (0..12).map(|k| r(th + 0x420 + 4 * k)).collect::<Vec<_>>(), out.join(" | "));
+            } else {
+                crate::dlog!("PS2:   IOP threads: thbase not found");
+            }
+            let tm: Vec<String> = self.hw.timers.iter().map(|t| format!("mode {:X} count {:X} comp {:X}", t.mode, t.count, t.comp)).collect();
+            crate::dlog!("PS2:   EE timers: {}", tm.join(" | "));
+        }
+        crate::dlog!("PS2:   EE JIT: {} | {} blocks, {} translated, {} retranslated (code changed), {} runs",
+            if self.jit_on { "on" } else { "off" }, self.jit.len(), self.jit.translated, self.jit.stale, self.jit.runs);
+        {
+            let r = &self.hw.sif.rpc;
+            let counts: Vec<String> = r.counts.iter().map(|(k, v)| format!("{k} x{v}")).collect();
+            crate::dlog!("PS2:   SIF RPC: {}", counts.join(", "));
+            let ip = &self.hw.ipu;
+            crate::dlog!("PS2:   IPU commands [BCLR IDEC BDEC VDEC FDEC SETIQ SETVQ CSC PACK SETTH] {:?} | VLC errors {} | busy {} cmd {:08X} ctrl {:08X} | in {} qw bp {} | out {} qw | IPU_FROM chcr {:X} qwc {} | IPU_TO chcr {:X} qwc {}",
+                ip.counts, ip.errors, ip.busy, ip.cmd, ip.ctrl, ip.fifo_in_len(), ip.bp, ip.fifo_out.len(),
+                self.hw.dmac.ch[dmac::IPU_FROM].chcr, self.hw.dmac.ch[dmac::IPU_FROM].qwc, self.hw.dmac.ch[dmac::IPU_TO].chcr, self.hw.dmac.ch[dmac::IPU_TO].qwc);
+            crate::dlog!("PS2:   SPU2 {}", self.hw.spu2.summary());
+            crate::dlog!("PS2:   SIF RPC recent: {}", r.recent.iter().cloned().collect::<Vec<_>>().join(" | "));
+            let w: Vec<String> = r.waiting.values().map(|(t, n)| format!("{t} (call #{n} of {})", r.calls)).collect();
+            crate::dlog!("PS2:   SIF RPC still waiting for an answer: {}", if w.is_empty() { "none".to_string() } else { w.join(", ") });
         }
         crate::dlog!("PS2:   SIF MSFLG {:08X} SMFLG {:08X} MSCOM {:08X} SMCOM {:08X} fifo0 {} fifo1 {} | EE DMA done {:?} | IOP DMA done {:?} | CDVD S {:02X?}",
             h.sif.msflg, h.sif.smflg, h.sif.mscom, h.sif.smcom, h.sif.fifo0.len(), h.sif.fifo1.len(), h.dmac.done, h.iop_dma.done, &h.cdvd.log[..h.cdvd.log.len().min(24)]);
@@ -346,6 +499,11 @@ impl Ps2System {
         crate::dlog!("PS2:   VIF0 MSCAL {} UNPACK {} | VIF1 DIRECT qw {} MSCAL {} UNPACK {} | VU0 programs {} | VU1 programs {} XGKICK {} illegal {}/{}",
             h.vif0.mscal, h.vif0.unpacks, h.vif1.direct_qw, h.vif1.mscal, h.vif1.unpacks, h.vu0.programs, h.vu1.programs, h.vu1.kicks,
             h.vu0.illegal, h.vu1.illegal);
+        crate::dlog!("PS2:   VIF I-bit interrupts: VIF0 {} VIF1 {} | stalled {} / {} | waiting words {} / {} | ERR {:X} / {:X}",
+            h.vif0.irqs, h.vif1.irqs, h.vif0.stalled, h.vif1.stalled, h.vif0.pending.len(), h.vif1.pending.len(), h.vif0.err, h.vif1.err);
+        crate::dlog!("PS2:   VIF1 waiting for PATH3: at FLUSHA {} | for one packet after MSKPATH3 0 {}", h.vif1.flusha_wait, h.vif1.p3_packet_wait);
+        crate::dlog!("PS2:   GIF_STAT {:08X} | PATH3 held {} (GIF_MODE {:X}, MSKPATH3 {}, pause {})",
+            h.gif_stat(), h.dmac.gif_hold, h.gif_mode, h.vif1.mskpath3, h.gif_pause);
         crate::dlog!("PS2:   GS FRAME_1 {:X} ZBUF_1 {:X} SCISSOR_1 {:X} XYOFFSET_1 {:X} TEST_1 {:X}",
             h.gs.regs[0x4C], h.gs.regs[0x4E], h.gs.regs[0x40], h.gs.regs[0x18], h.gs.regs[0x47]);
         if let Some((code, epc, bad)) = e.last_exception {
@@ -384,13 +542,37 @@ impl Ps2System {
         }
         let io: Vec<String> = h.io_ring.iter().map(|&(a, v, w)| format!("{}{a:08X}={v:08X}", if w { "W " } else { "R " })).collect();
         if !io.is_empty() { crate::dlog!("PS2:   recent EE I/O: {}", io.join(" ")); }
+        // the GS frame recording: at every report (gs_frame.bin, overwritten)
+        let _ = gs_rec;
+        self.gs_rec_due = true;
     }
 }
 
 impl System for Ps2System {
     fn run_frame(&mut self, input: u32) {
         self.set_input(input);
+        if std::mem::take(&mut self.gs_rec_due) {
+            self.hw.gs.flush();
+            let cfg = bincode::config::standard().with_fixed_int_encoding();
+            if let Ok(state) = bincode::serde::encode_to_vec(&self.hw.gs, cfg) {
+                self.hw.gs.rec = Some((state, Vec::new()));
+                self.gs_rec_left = 2;
+            }
+        }
         for line in 0..LINES { self.run_line(line); }
+        // a frame being recorded ends here
+        // (two vsyncs: a 30 fps game draws some passes on one and some on the other)
+        if self.hw.gs.rec.is_some() {
+            self.gs_rec_left = self.gs_rec_left.saturating_sub(1);
+            if self.gs_rec_left == 0 {
+                if let Some((state, qs)) = self.hw.gs.rec.take() {
+                    if let Some(d) = crate::common::debug_log::data_dir() {
+                        let file = gs::frame_file(&state, &qs, &self.hw.gs.pregs);
+                        let _ = std::fs::write(d.join("GD_EMU").join("PS2").join("gs_frame.bin"), file);
+                    }
+                }
+            }
+        }
         self.size = self.hw.gs.display(&mut self.frame);
         self.hw.sio2.card_out = self.hw.sio2.card_out.saturating_sub(1);
         if debug() && self.current_frame % 300 == 299 { self.report(); }
@@ -413,7 +595,7 @@ impl System for Ps2System {
         }
     }
 
-    fn drain_audio(&mut self) -> Vec<f32> { Vec::new() }
+    fn drain_audio(&mut self) -> Vec<f32> { std::mem::take(&mut self.hw.spu2.out) }
     fn sample_rate(&self) -> u32 { 48_000 }
     /// The DualShock 2s, mapped like the PS1's pads (B = Cross, A = Circle, X = Square,
     /// Y = Triangle, L / R = L1 / R1, Z = L2, extras R2 / L3 / R3 / Analog); a pressed
@@ -527,6 +709,7 @@ impl System for Ps2System {
     fn has_battery(&self) -> bool { false }
 
     fn set_option(&mut self, key: &str, value: i64) {
+        if key == "ee_jit" { self.jit_on = value != 0; }
         if key == "debug_report" {
             if value != 0 { crate::dlog!("PS2 core: patch {PATCH}"); }
             DEBUG.store(value != 0, std::sync::atomic::Ordering::Relaxed);

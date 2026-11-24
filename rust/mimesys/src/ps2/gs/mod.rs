@@ -123,6 +123,16 @@ pub struct Gs {
     /// for fans: the first vertex stays
     fan_first: Option<Vertex>,
     xfer: Transfer,
+    /// local -> host transfer (TRXDIR 1): the rectangle packed into quadwords, read
+    /// through VIF1 (DMA to memory, or the CPU at 1000_5000)
+    #[serde(skip)]
+    pub readback: std::collections::VecDeque<u128>,
+    /// debugging: recording one frame (the GS at its start, then every quadword fed)
+    #[serde(skip)]
+    pub rec: Option<(Vec<u8>, Vec<u128>)>,
+    /// debugging: print register writes (vertices left out)
+    #[serde(skip)]
+    pub trace: bool,
     gif: GifTag,
     /// the CLUT buffer (raw entries, 16-bit formats in the low half), and the CBP0 / CBP1
     /// copies TEX0's CLD compares against
@@ -146,13 +156,51 @@ impl Default for Gs {
     fn default() -> Self { Self::new() }
 }
 
+/// A recorded frame: "GSF1", the GS's state (bincode) at the frame's start, the
+/// quadwords fed during it, and the privileged registers at its end
+pub fn frame_file(state: &[u8], qs: &[u128], pregs: &[u64; 15]) -> Vec<u8> {
+    let mut out = b"GSF1".to_vec();
+    out.extend_from_slice(&(state.len() as u64).to_le_bytes());
+    out.extend_from_slice(state);
+    out.extend_from_slice(&(qs.len() as u64).to_le_bytes());
+    for q in qs { out.extend_from_slice(&q.to_le_bytes()); }
+    for p in pregs { out.extend_from_slice(&p.to_le_bytes()); }
+    out
+}
+
+/// Play a recorded frame back: the GS after it
+pub fn replay(file: &[u8]) -> Option<Gs> {
+    if file.get(..4)? != b"GSF1" { return None; }
+    let n = u64::from_le_bytes(file.get(4..12)?.try_into().ok()?) as usize;
+    let cfg = bincode::config::standard().with_fixed_int_encoding();
+    let (mut gs, _): (Gs, usize) = bincode::serde::decode_from_slice(file.get(12..12 + n)?, cfg).ok()?;
+    gs.trace = std::env::var("GS_TRACE").is_ok();
+    let mut at = 12 + n;
+    let count = u64::from_le_bytes(file.get(at..at + 8)?.try_into().ok()?) as usize;
+    at += 8;
+    let feed = std::env::var("GS_NOFEED").is_err();
+    let limit = std::env::var("GS_LIMIT").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(usize::MAX);
+    // GS_ZERO=blocks: clear VRAM up to that block first (to see one frame's own drawing)
+    if let Ok(b) = std::env::var("GS_ZERO") {
+        let n = (usize::from_str_radix(&b, 16).unwrap_or(0) * 256).min(gs.vram.len());
+        gs.vram[..n].fill(0);
+    }
+    for k in 0..count {
+        let q = u128::from_le_bytes(file.get(at + 16 * k..at + 16 * k + 16)?.try_into().ok()?);
+        if feed && k < limit { gs.feed(q); }
+    }
+    at += 16 * count;
+    for k in 0..15 { gs.pregs[k] = u64::from_le_bytes(file.get(at + 8 * k..at + 8 * k + 8)?.try_into().ok()?); }
+    Some(gs)
+}
+
 impl Gs {
     pub fn new() -> Self {
         Self {
             pregs: [0; 15], csr: 0, imr: 0x7F00, busdir: 0, siglblid: 0, field: false,
             regs: vec![0; 0x63], vram: vec![0; mem::VRAM_SIZE],
             queue: [Vertex::default(); 3], count: 0, fan_first: None,
-            xfer: Transfer::default(), gif: GifTag::default(),
+            xfer: Transfer::default(), readback: Default::default(), rec: None, trace: false, gif: GifTag::default(),
             clut: vec![0; 512], cbp: [0; 2], prims: 0, pixels: 0, batch: Default::default(), draw_ns: 0,
         }.with_reset_regs()
     }
@@ -182,6 +230,7 @@ impl Gs {
 
     /// One quadword from PATH3
     pub fn feed(&mut self, q: u128) {
+        if let Some((_, qs)) = &mut self.rec { qs.push(q); }
         let g = &mut self.gif;
         if !g.active {
             let lo = q as u64;
@@ -269,6 +318,9 @@ impl Gs {
     // ------------------------------------------------------------------ registers
 
     pub fn write_reg(&mut self, r: usize, v: u64) {
+        if self.trace {
+            println!("GS {:02X} = {v:016X}", r);
+        }
         if r >= self.regs.len() { return; }
         match r {
             PRIM => {
@@ -368,6 +420,7 @@ impl Gs {
         self.xfer = Transfer { active: false, x: 0, y: 0, pending: Vec::new() };
         match dir {
             0 => self.xfer.active = true,
+            1 => self.local_to_host(),
             2 => self.local_to_local(),
             _ => {}
         }
@@ -384,7 +437,7 @@ impl Gs {
         let (dx, dy) = (bits(pos, 32, 11), bits(pos, 48, 11));
         let reg = self.regs[TRXREG];
         let (w, h) = (bits(reg, 0, 12).max(1), bits(reg, 32, 12));
-        let bpp = mem::bpp(dpsm);
+        let bpp = mem::xfer_bpp(dpsm);
         let mut data = std::mem::take(&mut self.xfer.pending);
         data.extend_from_slice(&v.to_le_bytes());
         let mut i = 0usize;
@@ -417,6 +470,41 @@ impl Gs {
     fn advance(&mut self, w: u32) {
         self.xfer.x += 1;
         if self.xfer.x >= w { self.xfer.x = 0; self.xfer.y += 1; }
+    }
+
+    /// Local -> host: the source rectangle's pixels packed as a host -> local transfer
+    /// would take them (32 / 24 / 16 / 8 / 4 bits), padded to whole quadwords
+    fn local_to_host(&mut self) {
+        // what's queued must be drawn before it's read
+        self.flush();
+        let bb = self.regs[BITBLTBUF];
+        let (sbp, sbw, spsm) = (bits(bb, 0, 14), bits(bb, 16, 6), bits(bb, 24, 6));
+        let pos = self.regs[TRXPOS];
+        let (sx, sy) = (bits(pos, 0, 11), bits(pos, 16, 11));
+        let reg = self.regs[TRXREG];
+        let (w, h) = (bits(reg, 0, 12), bits(reg, 32, 12));
+        let bpp = mem::xfer_bpp(spsm);
+        let mut bytes: Vec<u8> = Vec::with_capacity((w * h * bpp / 8 + 16) as usize);
+        let mut nibble: Option<u8> = None;
+        for y in 0..h {
+            for x in 0..w {
+                let p = mem::read(&self.vram, spsm, sx + x, sy + y, sbp, sbw);
+                match bpp {
+                    32 => bytes.extend_from_slice(&p.to_le_bytes()),
+                    24 => bytes.extend_from_slice(&p.to_le_bytes()[..3]),
+                    16 => bytes.extend_from_slice(&(p as u16).to_le_bytes()),
+                    8 => bytes.push(p as u8),
+                    _ => match nibble.take() {
+                        None => nibble = Some(p as u8 & 15),
+                        Some(lo) => bytes.push(lo | (p as u8 & 15) << 4),
+                    },
+                }
+            }
+        }
+        if let Some(lo) = nibble { bytes.push(lo); }
+        while bytes.len() % 16 != 0 { bytes.push(0); }
+        self.readback.clear();
+        for q in bytes.chunks(16) { self.readback.push_back(u128::from_le_bytes(q.try_into().unwrap())); }
     }
 
     fn local_to_local(&mut self) {

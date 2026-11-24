@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::hw::Sif;
 use super::sio2::Sio2;
+use super::spu2::Spu2;
 
 pub const CDVD: usize = 3;
 pub const SIF0: usize = 9;
@@ -43,12 +44,19 @@ pub struct IopDma {
     irq_was: bool,
     #[serde(skip)]
     pub done: [u64; 13],
+    /// SPU2 cores 0 / 1 (channels 4 / 7) in auto-DMA: a transfer lasts as long as its
+    /// samples play (48 kHz stereo 16-bit: 768 IOP cycles a word); cycles still to go
+    #[serde(default)]
+    pub spu_timer: [i64; 2],
 }
+
+/// IOP cycles per word of auto-DMA audio (36 864 000 / 48 000)
+const ADMA_CYCLES_PER_WORD: i64 = 768;
 
 impl Default for IopDma {
     fn default() -> Self {
         Self { ch: Default::default(), dpcr: 0x0777_7777, dpcr2: 0, dicr: 0, dicr2: 0, dmacen: 0, dmacinten: 0,
-            irq_was: false, done: [0; 13] }
+            irq_was: false, done: [0; 13], spu_timer: [0; 2] }
     }
 }
 
@@ -137,7 +145,7 @@ impl IopDma {
     }
 
     /// Move data on every running channel; true when the master flag rises (I_STAT 3)
-    pub fn step(&mut self, ram: &mut [u8], sif: &mut Sif, sio2: &mut Sio2) -> bool {
+    pub fn step(&mut self, ram: &mut [u8], sif: &mut Sif, sio2: &mut Sio2, spu2: &mut Spu2) -> bool {
         for n in 0..13 {
             if self.ch[n].chcr >> 24 & 1 == 0 || !self.enabled(n) || self.dmacen & 1 == 0 { continue; }
             match n {
@@ -146,6 +154,42 @@ impl IopDma {
                 SIO2_IN => self.sio2_in(ram, sio2),
                 SIO2_OUT => self.sio2_out(ram, sio2),
                 CDVD => {}                                       // the drive feeds it (cdvd.rs)
+                4 | 7 => {
+                    let k = (n == 7) as usize;
+                    let adma = spu2.admas(k);
+                    if !adma {
+                        let words = self.block_words(n);
+                        let c = &mut self.ch[n];
+                        if c.chcr & 1 != 0 {
+                            let data: Vec<u16> = (0..words * 2).map(|i| {
+                                let a = ((c.madr as usize + 2 * i) & 0x1F_FFFE) as usize;
+                                u16::from_le_bytes([ram[a], ram[a + 1]])
+                            }).collect();
+                            spu2.dma_write(k, &data);
+                        } else {
+                            let data = spu2.dma_read(k, words * 2);
+                            for (i, w) in data.iter().enumerate() {
+                                let a = ((c.madr as usize + 2 * i) & 0x1F_FFFE) as usize;
+                                ram[a..a + 2].copy_from_slice(&w.to_le_bytes());
+                            }
+                        }
+                        c.madr = (c.madr + 4 * words as u32) & 0xFF_FFFF;
+                        self.finish(n);
+                    } else if self.spu_timer[k] == 0 {
+                        // auto-DMA: the data goes in now, the channel ends when it has
+                        // played (block size 0 moves 16 words: Suikoden 3's 00C00000 is 12 KB)
+                        let bcr = self.ch[n].bcr;
+                        let bs = match bcr & 0xFFFF { 0 => 16, b => b } as usize;
+                        let words = bs * (bcr >> 16).max(1) as usize;
+                        let c = &mut self.ch[n];
+                        let data: Vec<u16> = (0..words * 2).map(|i| {
+                            let a = ((c.madr as usize + 2 * i) & 0x1F_FFFE) as usize;
+                            u16::from_le_bytes([ram[a], ram[a + 1]])
+                        }).collect();
+                        spu2.adma_write(k, &data);
+                        self.spu_timer[k] = words as i64 * ADMA_CYCLES_PER_WORD;
+                    }
+                }
                 _ => self.finish(n),
             }
         }
@@ -153,6 +197,19 @@ impl IopDma {
         let rise = m && !self.irq_was;
         self.irq_was = m;
         rise
+    }
+
+    /// Auto-DMA audio transfers play out: a channel ends when its samples have
+    pub fn tick_spu(&mut self, cycles: u32) {
+        for (k, n) in [(0usize, 4usize), (1, 7)] {
+            if self.spu_timer[k] > 0 {
+                self.spu_timer[k] -= cycles as i64;
+                if self.spu_timer[k] <= 0 {
+                    self.spu_timer[k] = 0;
+                    if self.ch[n].chcr >> 24 & 1 != 0 { self.finish(n); }
+                }
+            }
+        }
     }
 
     /// The master flag rose since the last check (I_STAT 3), outside `step`
@@ -232,6 +289,11 @@ impl IopDma {
             c.madr = t0 & 0xFF_FFFF;
             c.words = ((t1 & 0xFF_FFFF) + 3) & !3;
             c.tag_end = t0 >> 30 & 3 != 0;
+            {
+                let (m, n) = ((c.madr & 0x1F_FFFC) as usize, (c.words as usize).min(16));
+                let pk: Vec<u32> = (0..n).map(|k| { let a = (m + 4 * k) & 0x1F_FFFC; u32::from_le_bytes(ram[a..a + 4].try_into().unwrap()) }).collect();
+                sif.rpc.note(&pk, false);
+            }
             if c.chcr >> 8 & 1 != 0 {
                 // a quadword for the EE: the DMAtag and the two words after it
                 let t = (c.tadr & 0x1F_FFFC) as usize;
@@ -255,6 +317,13 @@ impl IopDma {
                 ram[o..o + 4].copy_from_slice(&v.to_le_bytes());
                 c.madr = (c.madr + 4) & 0xFF_FFFF;
                 c.words -= 1;
+                if c.words == 0 {
+                    if let Some((start, n)) = sif.rpc.blk.take() {
+                        let m = (start & 0x1F_FFFC) as usize;
+                        let pk: Vec<u32> = (0..(n as usize).min(16)).map(|k| { let a = (m + 4 * k) & 0x1F_FFFC; u32::from_le_bytes(ram[a..a + 4].try_into().unwrap()) }).collect();
+                        sif.rpc.note(&pk, true);
+                    }
+                }
             }
             if c.tag_end { self.finish(SIF1); return; }
             // the tag is a quadword from the EE: the first two words count
@@ -266,6 +335,7 @@ impl IopDma {
             c.madr = t0 & 0xFF_FFFF;
             c.words = ((t1 & 0xFF_FFFF) + 3) & !3;
             c.tag_end = t0 >> 30 & 3 != 0;
+            if c.words > 0 { sif.rpc.blk = Some((c.madr, c.words)); }
         }
     }
 }

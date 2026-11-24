@@ -406,3 +406,28 @@ fn a_scratchpad_entry_maps_16_kb_whatever_the_page_mask() {
     assert_eq!(c.cop0[CAUSE] >> 2 & 31, 0, "no TLB fault");
     assert_eq!(c.scratch[0x3FE0], 0x77);
 }
+
+#[test]
+fn ei_and_di_do_nothing_in_user_mode_without_edi() {
+    let ei = 0x4200_0038;
+    let mut ram = Ram(vec![0; 0x40_0000]);
+    ram.write32(0x1000, ei);
+    // user mode (KSU 2), EIE clear: EI is ignored
+    let mut c = R5900::new();
+    c.cop0[STATUS] = 0x10 | 1 << 28;
+    c.jump(BASE);
+    c.step(&mut ram);
+    assert_eq!(c.cop0[STATUS] & ST_EIE, 0);
+    // with EDI set it works
+    let mut c = R5900::new();
+    c.cop0[STATUS] = 0x10 | 1 << 28 | ST_EDI;
+    c.jump(BASE);
+    c.step(&mut ram);
+    assert_ne!(c.cop0[STATUS] & ST_EIE, 0);
+    // and in kernel mode
+    let mut c = R5900::new();
+    c.cop0[STATUS] = 1 << 28;
+    c.jump(BASE);
+    c.step(&mut ram);
+    assert_ne!(c.cop0[STATUS] & ST_EIE, 0);
+}

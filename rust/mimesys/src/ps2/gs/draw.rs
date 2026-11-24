@@ -37,10 +37,11 @@ pub fn to_rgba(p: u32, psm: u32) -> ([u8; 3], u8) {
     match psm {
         PSMCT32 | PSMZ32 => ([p as u8, (p >> 8) as u8, (p >> 16) as u8], (p >> 24) as u8),
         PSMCT24 | PSMZ24 => ([p as u8, (p >> 8) as u8, (p >> 16) as u8], 0x80),
-        _ => {
+        PSMCT16 | PSMCT16S | PSMZ16 | PSMZ16S => {
             let e = |v: u32| ((v << 3) | (v >> 2)) as u8;
             ([e(p & 31), e(p >> 5 & 31), e(p >> 10 & 31)], if p & 0x8000 != 0 { 0x80 } else { 0 })
         }
+        _ => ([p as u8, (p >> 8) as u8, (p >> 16) as u8], (p >> 24) as u8),
     }
 }
 
@@ -387,7 +388,9 @@ impl Raster<'_> {
             while x <= maxx {
                 if !(inside(w[0], 0) && inside(w[1], 1) && inside(w[2], 2)) { break; }
                 let l = w.map(|e| e as f64 * inv_area);
-                let mix = |f: &[f64; 3]| l[0] * f[0] + l[1] * f[1] + l[2] * f[2];
+                // relative to vertex 0, so an attribute equal at all three vertices comes out
+                // exactly (Persona 3's text: the second pass needs Z >= the first pass's FFFF)
+                let mix = |f: &[f64; 3]| f[0] + l[1] * (f[1] - f[0]) + l[2] * (f[2] - f[0]);
                 let rgba = if c.iip { std::array::from_fn(|k| (mix(&fr[k]) + 0.5) as i32) } else { flat };
                 let z = mix(&fz).max(0.0) as u32;
                 let (u, t) = if c.tme {
@@ -411,7 +414,8 @@ impl Raster<'_> {
             match mode {
                 0 => (p as u32) & (size - 1),
                 1 => p.clamp(0, size as i32 - 1) as u32,
-                2 => p.clamp(min as i32, max as i32) as u32,
+                // (a game can set MINU above MAXU: no panic, MAX wins)
+                2 => p.max(min as i32).min(max as i32).max(0) as u32,
                 _ => ((p as u32) & min) | max,
             }
         }
@@ -433,7 +437,9 @@ impl Raster<'_> {
                 let e = self.clut[((c.clut_base + raw) % 512) as usize];
                 if c.cpsm == 0 { [e as i32 & 255, (e >> 8) as i32 & 255, (e >> 16) as i32 & 255, (e >> 24) as i32 & 255] } else { conv16(e) }
             }
-            _ => conv16(raw),
+            PSMCT16 | PSMCT16S | PSMZ16 | PSMZ16S => conv16(raw),
+            // undefined formats (FFX's pause screen uses 9) read as PSMCT32, as PCSX2 has it
+            _ => [raw as i32 & 255, (raw >> 8) as i32 & 255, (raw >> 16) as i32 & 255, (raw >> 24) as i32 & 255],
         }
     }
 

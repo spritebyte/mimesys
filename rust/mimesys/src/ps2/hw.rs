@@ -32,12 +32,16 @@ pub const INT_GS: u32 = 1 << 0;
 pub const INT_SBUS: u32 = 1 << 1;
 pub const INT_VBON: u32 = 1 << 2;
 pub const INT_VBOF: u32 = 1 << 3;
+pub const INT_VIF0: u32 = 1 << 4;
+pub const INT_VIF1: u32 = 1 << 5;
+pub const INT_IPU: u32 = 1 << 8;
 pub const INT_TIMER0: u32 = 1 << 9;
 
 // IOP I_STAT sources
 pub const IOP_VBLANK: u32 = 1 << 0;
 pub const IOP_CDVD: u32 = 1 << 2;
 pub const IOP_DMA: u32 = 1 << 3;
+pub const IOP_SPU2: u32 = 1 << 9;
 pub const IOP_VBLANK_END: u32 = 1 << 11;
 pub const IOP_SIO2: u32 = 1 << 17;
 
@@ -54,6 +58,69 @@ pub struct Sif {
     /// SIF0: IOP -> EE; SIF1: EE -> IOP
     pub fifo0: VecDeque<u32>,
     pub fifo1: VecDeque<u32>,
+    /// debugging: SIF commands / RPCs seen (bind sid, call sid + function, replies)
+    #[serde(skip)]
+    pub rpc: RpcLog,
+}
+
+/// What went over the SIF as commands, from the packets' headers (ps2sdk's sifcmd.h /
+/// sifrpc.h layouts): word 2 is the command id; binds name a server id (sid), calls a
+/// server address (named by the sid its bind reply gave) and a function number
+#[derive(Default)]
+pub struct RpcLog {
+    pub counts: std::collections::BTreeMap<String, u64>,
+    pub recent: VecDeque<String>,
+    servers: std::collections::HashMap<u32, u32>,
+    /// calls not answered yet, by client address: (name, call number)
+    pub waiting: std::collections::BTreeMap<u32, (String, u64)>,
+    pub calls: u64,
+    /// the first words of the last EE -> IOP block that wasn't a command (a call's
+    /// arguments arrive just before the call)
+    last_data: Vec<u32>,
+    /// SIF1 block being received by the IOP: start, words
+    pub blk: Option<(u32, u32)>,
+}
+
+impl RpcLog {
+    /// One packet (`w` = its words); `to_iop` = EE -> IOP
+    pub fn note(&mut self, w: &[u32], to_iop: bool) {
+        if w.len() < 4 || w[2] & 0xFFFF_0000 != 0x8000_0000 {
+            if to_iop { self.last_data = w.iter().take(4).copied().collect(); }
+            return;
+        }
+        let g = |k: usize| w.get(k).copied().unwrap_or(0);
+        let cid = w[2];
+        let name = |s: &Self, srv: u32| s.servers.get(&srv).map_or(format!("@{srv:X}"), |sid| format!("{sid:X}"));
+        let text = match (cid, to_iop) {
+            (0x8000_0009, true) => format!("bind {:X}", g(8)),
+            (0x8000_000A, true) => {
+                let t = format!("call {} f{}", name(self, g(13)), g(8));
+                self.calls += 1;
+                let args = std::mem::take(&mut self.last_data);
+                self.waiting.insert(g(7), (format!("{t} args {args:X?}"), self.calls));
+                t
+            }
+            (0x8000_0008, false) => {
+                if g(8) == 0x8000_0009 && g(9) != 0 {
+                    // bind reply: which sid lives at that server address (the EE asked
+                    // for the sid; the IOP answers with the server)
+                    let sid = self.recent.iter().rev().find_map(|r| r.strip_prefix("bind ").and_then(|x| u32::from_str_radix(x, 16).ok()));
+                    if let Some(sid) = sid { self.servers.insert(g(9), sid); }
+                    format!("bound {}", name(self, g(9)))
+                } else if g(8) == 0x8000_0009 {
+                    "bind failed (no server)".to_string()
+                } else if let Some((t, _)) = self.waiting.remove(&g(7)) {
+                    format!("answered {}", t.trim_start_matches("call ").split(" args").next().unwrap_or(""))
+                } else {
+                    format!("end {:X}", g(8))
+                }
+            }
+            _ => format!("{} cmd {:X}", if to_iop { "EE" } else { "IOP" }, cid & 0xFFFF),
+        };
+        *self.counts.entry(text.clone()).or_insert(0) += 1;
+        if self.recent.len() >= 24 { self.recent.pop_front(); }
+        self.recent.push_back(text);
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -76,17 +143,24 @@ pub struct Hw {
     pub io: Vec<u32>,
     pub intc_stat: u32,
     pub intc_mask: u32,
+    /// INTC_STAT / INTC_MASK / D_STAT written since the EE last looked (`irq_lines`)
+    #[serde(skip)]
+    pub irq_written: bool,
     pub dmac: Dmac,
     pub timers: [EeTimer; 4],
     pub sif: Sif,
     pub gs: Gs,
+    /// the MPEG decoder
+    #[serde(default)]
+    pub ipu: super::ipu::Ipu,
     pub mch_ricm: u32,
     pub mch_drd: u32,
     pub rdram_sdevid: u32,
     // ---- the IOP side
     /// IOP 1F80_0000-1F80_FFFF and 1F90_0000-1F90_FFFF, words not modelled elsewhere
     pub iop_io: Vec<u32>,
-    pub spu2_regs: Vec<u16>,
+    #[serde(default)]
+    pub spu2: super::spu2::Spu2,
     pub i_stat: u32,
     pub i_mask: u32,
     pub i_ctrl: u32,
@@ -114,6 +188,11 @@ pub struct Hw {
     /// counts 0, 1, 2 on each read, as PCSX2 found works
     #[serde(default)]
     pub ba6: u16,
+    /// GIF_MODE (bit 0 M3R mask PATH3, bit 2 IMT) and GIF_CTRL's PSE (pause)
+    #[serde(default)]
+    pub gif_mode: u32,
+    #[serde(default)]
+    pub gif_pause: bool,
 }
 
 impl Hw {
@@ -135,15 +214,19 @@ impl Hw {
             io: vec![0; 0x4000],
             intc_stat: 0,
             intc_mask: 0,
+            irq_written: false,
+            gif_mode: 0,
+            gif_pause: false,
             dmac: Dmac::default(),
             timers: Default::default(),
             sif: Sif::default(),
             gs: Gs::new(),
+            ipu: Default::default(),
             mch_ricm: 0,
             mch_drd: 0,
             rdram_sdevid: 0,
             iop_io: vec![0; 0x8000],
-            spu2_regs: vec![0; 0x400],
+            spu2: Default::default(),
             i_stat: 0,
             i_mask: 0,
             i_ctrl: 0,
@@ -220,9 +303,14 @@ impl Hw {
             0xF430 => 0,
             0xF440 => self.mch_drd_read(),
             0xF520 => self.dmac.enable,
-            0x2010 => 0,   // IPU_CTRL: idle
-            0x3020 => 0,   // GIF_STAT: idle
-            0x3800 | 0x3C00 => 0, // VIF0 / VIF1 STAT
+            0x2000..=0x203F => self.ipu.read(off),
+            0x3020 => self.gif_stat(),
+            0x3800 => self.vif0.stat(),
+            0x3C00 => self.vif1.stat(),
+            0x3820 => self.vif0.err,
+            0x3C20 => self.vif1.err,
+            0x3830 => self.vif0.mark,
+            0x3C30 => self.vif1.mark,
             _ => {
                 self.note("EE I/O", a, None);
                 self.io[(off >> 2) as usize]
@@ -234,11 +322,26 @@ impl Hw {
     pub fn ee_io_write(&mut self, a: u32, v: u32, mask: u32) {
         if self.debug { self.ring(a, v & mask, true); }
         let off = a & 0xFFFF;
+        if matches!(off, 0xE010 | 0xF000 | 0xF010) { self.irq_written = true; }
         match off {
             0x0000..=0x1FFF => self.timers[(off >> 11) as usize].write(off & 0x7FF, v),
+            0x2000..=0x203F => if self.ipu.write(off, v & mask) { self.intc_stat |= INT_IPU; },
             0x8000..=0xEFFF => self.dmac.write(off, v, mask),
             0xF000 => self.intc_stat &= !(v & mask),
             0xF010 => self.intc_mask ^= v & mask & 0x7FFF,
+            0x3000 => {
+                // GIF_CTRL: RST clears the mask / pause state, PSE pauses PATH3
+                if v & 1 != 0 { self.gif_mode = 0; self.gif_pause = false; }
+                self.gif_pause = v & 8 != 0;
+                self.update_gif_hold();
+            }
+            0x3010 => { self.gif_mode = v & 5; self.update_gif_hold(); }
+            0x3810 => { self.vif0.fbrst(v); self.vif_feed(false, &[]); }
+            0x3C10 => { self.vif1.fbrst(v); self.vif_feed(true, &[]); }
+            0x3820 => self.vif0.err = v & 7,
+            0x3C20 => self.vif1.err = v & 7,
+            0x3830 => self.vif0.mark = v & 0xFFFF,
+            0x3C30 => self.vif1.mark = v & 0xFFFF,
             0xF180 => self.putc(v as u8),
             0xF200 => self.sif.mscom = v,
             0xF220 => self.sif.msflg |= v,
@@ -308,17 +411,6 @@ impl Hw {
         v
     }
 
-    /// One 16-bit SPU2 register (index = byte offset / 2). Mostly the value
-    /// last written, except the per-core status register STATX (0x344 / 0x744):
-    /// our SPU2 DMA finishes instantly, so bit 7 ("DMA ready") is always set and
-    /// bit 10 ("busy") always clear. The sound driver polls bit 7 after each DMA.
-    fn spu2_reg(&self, i: usize) -> u16 {
-        match i {
-            0x1A2 | 0x3A2 => 0x0080,
-            _ => self.spu2_regs[i],
-        }
-    }
-
     fn iop_io_read_inner(&mut self, a: u32) -> u32 {
         match a {
             0x1F80_1070 => self.i_stat,
@@ -329,8 +421,8 @@ impl Hw {
             0x1F80_1480..=0x1F80_14AF => self.iop_timers[3 + ((a >> 4) & 3) as usize].read(a & 0xF),
             0x1F80_8200..=0x1F80_82FF => self.sio2.read(a),
             0x1F90_0000..=0x1F90_07FF => {
-                let i = ((a & 0x7FF) >> 1) as usize;
-                self.spu2_reg(i) as u32 | (self.spu2_reg((i + 1) & 0x3FF) as u32) << 16
+                let o = a & 0x7FC;
+                self.spu2.read16(o) as u32 | (self.spu2.read16(o + 2) as u32) << 16
             }
             _ => {
                 self.note("IOP I/O", a, None);
@@ -351,9 +443,9 @@ impl Hw {
             0x1F80_1100..=0x1F80_112F => self.iop_timers[((a >> 4) & 3) as usize].write(a & 0xF, v),
             0x1F80_1480..=0x1F80_14AF => self.iop_timers[3 + ((a >> 4) & 3) as usize].write(a & 0xF, v),
             0x1F90_0000..=0x1F90_07FF => {
-                let i = ((a & 0x7FF) >> 1) as usize;
-                if mask & 0xFFFF != 0 { self.spu2_regs[i] = v as u16; }
-                if mask >> 16 != 0 { self.spu2_regs[(i + 1) & 0x3FF] = (v >> 16) as u16; }
+                let o = a & 0x7FC;
+                if mask & 0xFFFF != 0 { self.spu2.write16(o, v as u16); }
+                if mask >> 16 != 0 { self.spu2.write16(o + 2, (v >> 16) as u16); }
             }
             _ => {
                 self.note("IOP I/O", a, Some(v));
@@ -473,8 +565,23 @@ fn wr32m(m: &mut [u8], o: usize, v: u32, mask: u32) {
 }
 
 impl EeBus for EeView<'_> {
+    fn irq_lines(&mut self) -> Option<(bool, bool)> {
+        let h = &mut *self.0;
+        if !std::mem::take(&mut h.irq_written) { return None; }
+        Some((h.int0(), h.dmac.int1()))
+    }
+    fn jit_mem(&mut self) -> Option<crate::common::cpu::r5900::jit::JitMem> {
+        let h = &mut *self.0;
+        Some(crate::common::cpu::r5900::jit::JitMem {
+            ram: h.ram.as_mut_ptr(), ram_len: h.ram.len(),
+            rom: h.bios.as_ptr(), rom_base: 0x1FC0_0000, rom_len: h.bios.len().min(BIOS_SIZE),
+        })
+    }
     fn read8(&mut self, pa: u32) -> u8 {
         if pa < RAM_SIZE as u32 { return self.0.ram[pa as usize]; }
+        // the CDVD registers are on the EE's bus too: OSDSYS's disc thread reads the
+        // disc type (1F40_200F) directly
+        if (0x1F40_2000..0x1F40_2100).contains(&pa) { return self.0.cdvd.read(pa); }
         (self.rd32(pa & !3) >> (8 * (pa & 3))) as u8
     }
     fn read16(&mut self, pa: u32) -> u16 {
@@ -489,6 +596,10 @@ impl EeBus for EeView<'_> {
     }
     fn read128(&mut self, pa: u32) -> u128 {
         if pa < RAM_SIZE as u32 { let o = pa as usize; return u128::from_le_bytes(self.0.ram[o..o + 16].try_into().unwrap()); }
+        // the IPU's output FIFO
+        if (0x1000_7000..0x1000_7010).contains(&pa) { return self.0.ipu.fifo_read(); }
+        // VIF1's FIFO read by the CPU: the GS's local -> host data
+        if (0x1000_5000..0x1000_6000).contains(&pa) { return self.0.gs.readback.pop_front().unwrap_or(0); }
         self.read64(pa) as u128 | (self.read64(pa + 8) as u128) << 64
     }
     fn write8(&mut self, pa: u32, v: u8) {
@@ -518,6 +629,7 @@ impl EeBus for EeView<'_> {
             self.0.vif_feed(pa >= 0x1000_5000, &words);
             return;
         }
+        if (0x1000_7010..0x1000_7020).contains(&pa) { self.0.ipu.fifo_write(v); return; }
         if (0x1000_4000..0x1000_8000).contains(&pa) { return; }
         self.write64(pa, v as u64);
         self.write64(pa + 8, (v >> 64) as u64);
@@ -568,14 +680,50 @@ impl EeBus for EeView<'_> {
 
 impl Hw {
     /// Words for VIF0 (`vif1` false) or VIF1; what they send to the GS goes there
+    /// GIF_STAT: M3R, M3P, IMT, PSE; while PATH3 is held with the GIF channel running, its
+    /// data waits in the FIFO (FQC, P3Q). The GIF is otherwise always idle here.
+    pub fn gif_stat(&self) -> u32 {
+        let mut s = (self.gif_mode & 5) | (self.vif1.mskpath3 as u32) << 1 | (self.gif_pause as u32) << 3;
+        let g = &self.dmac.ch[super::dmac::GIF];
+        if self.dmac.gif_hold && g.chcr & 0x100 != 0 {
+            s |= 1 << 6 | g.qwc.clamp(1, 16) << 24;
+        }
+        s
+    }
+
+    /// VIF1 waiting at FLUSHA: carry on once PATH3 has finished (or been masked)
+    pub fn vif1_flusha_check(&mut self) {
+        let running = self.dmac.ch[super::dmac::GIF].chcr & 0x100 != 0;
+        if self.vif1.p3_packet_wait && (!self.dmac.gif_one_packet || !running) {
+            self.dmac.gif_one_packet = false;
+            self.vif1.p3_packet_wait = false;
+            self.vif_feed(true, &[]);
+        }
+        if self.vif1.flusha_wait && !(running && !self.dmac.gif_hold) {
+            self.vif1.flusha_wait = false;
+            self.vif_feed(true, &[]);
+        }
+    }
+
+    pub fn update_gif_hold(&mut self) {
+        self.dmac.gif_hold = self.gif_mode & 1 != 0 || self.vif1.mskpath3 || self.gif_pause;
+    }
+
     pub fn vif_feed(&mut self, vif1: bool, words: &[u32]) {
         let mut gs = Vec::new();
-        if vif1 {
-            let mut cx = VifCtx { code: &mut self.vu1_code, data: &mut self.vu1_data, vu: &mut self.vu1, gs: &mut gs };
-            for &w in words { self.vif1.word(w, &mut cx); }
+        let gif_running = self.dmac.ch[super::dmac::GIF].chcr & 0x100 != 0;
+        let gif_held = self.gif_mode & 1 != 0 || self.gif_pause;
+        let irq = if vif1 {
+            let mut cx = VifCtx { code: &mut self.vu1_code, data: &mut self.vu1_data, vu: &mut self.vu1, gs: &mut gs, gif_running, gif_held };
+            self.vif1.feed(words, &mut cx)
         } else {
-            let mut cx = VifCtx { code: &mut self.vu0_code, data: &mut self.vu0_data, vu: &mut self.vu0, gs: &mut gs };
-            for &w in words { self.vif0.word(w, &mut cx); }
+            let mut cx = VifCtx { code: &mut self.vu0_code, data: &mut self.vu0_data, vu: &mut self.vu0, gs: &mut gs, gif_running, gif_held };
+            self.vif0.feed(words, &mut cx)
+        };
+        if irq { self.intc_stat |= if vif1 { INT_VIF1 } else { INT_VIF0 }; }
+        if vif1 {
+            self.update_gif_hold();
+            if self.vif1.p3_packet_wait { self.dmac.gif_one_packet = true; }
         }
         self.to_gs(gs);
     }
@@ -646,6 +794,12 @@ impl R3000Bus for IopView<'_> {
     }
     fn read16(&mut self, pa: u32) -> u16 {
         if pa < 0x80_0000 { let o = pa as usize & (IOP_RAM_SIZE - 1); return u16::from_le_bytes([self.0.iop_ram[o], self.0.iop_ram[o + 1]]); }
+        // the SPU2's registers are 16 bits (reading one must not touch its neighbour)
+        if (0x1F90_0000..0x1F90_0800).contains(&pa) {
+            let v = self.0.spu2.read16(pa & 0x7FE);
+            if self.0.debug { iop_ring(&mut self.0.iop_ring, pa, v as u32, false); }
+            return v;
+        }
         (self.rd32(pa & !3) >> (8 * (pa & 2))) as u16
     }
     fn read32(&mut self, pa: u32) -> u32 { self.rd32(pa) }

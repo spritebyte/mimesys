@@ -27,6 +27,12 @@ static DATA_DIR: Mutex<String> = Mutex::new(String::new());
 /// no log is open.
 pub fn set_data_dir(dir: &str) { if let Ok(mut g) = DATA_DIR.lock() { *g = dir.to_string(); } }
 
+/// The frontend's data folder, if it said (for files a core keeps, like the PS2's NVRAM)
+pub fn data_dir() -> Option<std::path::PathBuf> {
+    let d = DATA_DIR.lock().ok()?.clone();
+    (!d.is_empty()).then(|| std::path::PathBuf::from(d))
+}
+
 /// Where debug files go: next to the log, else in the data folder.
 pub fn dir() -> Option<std::path::PathBuf> {
     if let Some(p) = path() { return std::path::Path::new(&p).parent().map(|d| d.to_path_buf()); }

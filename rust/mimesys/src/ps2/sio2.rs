@@ -113,13 +113,19 @@ impl Sio2 {
         for k in 0..16 {
             let s3 = self.send3[k];
             if s3 == 0 { break; }
-            // the length in bits 8-17 (bits 18-24 hold a 7-bit copy, too short for the
-            // memory card's 132+ byte commands)
-            let len = match (s3 >> 8 & 0x3FF) as usize { 0 => (s3 >> 18 & 0x7F) as usize, n => n };
+            // bytes sent in bits 8-16, bytes received in bits 18-26 (usually the same; the
+            // memory card's auth reset sends 2 and reads 5)
+            let tx = (s3 >> 8 & 0x1FF) as usize;
+            let rx = match (s3 >> 18 & 0x1FF) as usize { 0 => tx, n => n };
+            let tx = if tx == 0 { rx } else { tx };
             let block = self.dma_block;
-            let take = if block > 0 { block.max(len) } else { len };
+            let take = if block > 0 { block.max(tx) } else { tx };
             let mut bytes: Vec<u8> = (0..take).map(|_| self.fifo_in.pop_front().unwrap_or(0)).collect();
-            bytes.truncate(len);
+            bytes.truncate(tx);
+            // the exchange is as long as the longer side; the device sees zeros after the
+            // command, and only `rx` reply bytes come back
+            let len = tx.max(rx);
+            bytes.resize(len, 0);
             let port = (s3 & 1) as usize;
             let out0 = self.fifo_out.len();
             if bytes.first() == Some(&0x01) && port < 2 {
@@ -136,6 +142,7 @@ impl Sio2 {
                 self.fifo_out.extend(std::iter::repeat(0xFF).take(len));
                 self.recv1 = 0x1D100;
             }
+            self.fifo_out.truncate(out0 + rx);
             // a DMA'd reply fills its block
             if block > 0 {
                 while (self.fifo_out.len() - out0) % block != 0 { self.fifo_out.push_back(0); }

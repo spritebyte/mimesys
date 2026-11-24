@@ -12,7 +12,7 @@
 //!   mapped 01h the large motor (00h-FFh). Before any config command, the old one-motor
 //!   method works: 42h's bytes 40h-7Fh then odd turn the small motor on.
 //! - DualShock 2 (`ds2`, the PS2's pad; ps2tek "SIO2 Controller Commands"): 45h says
-//!   model 03h, 41h reads and 4Fh sets the poll mask; a mask that includes the pressure
+//!   model 03h, 40h takes a pressure button's parameters, 41h reads and 4Fh sets the poll mask; a mask that includes the pressure
 //!   bytes switches 42h to ID 79h with 12 pressure bytes after the sticks.
 
 use serde::{Deserialize, Serialize};
@@ -150,6 +150,9 @@ impl Pad {
                     if i == 2 && b == 0x00 { self.config = false; }
                     0
                 }
+                // 40h: a pressure button's parameters (libpad2's pdman sends one per button
+                // and wants the 5Ah)
+                0x40 if self.ds2 => match i { 4 => 0x02, 7 => 0x5A, _ => 0 },
                 0x41 if self.ds2 => match i {
                     2..=4 if self.analog => self.mask[i - 2],
                     7 => 0x5A,

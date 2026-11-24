@@ -201,3 +201,160 @@ fn gs_menu_bench() {
     println!("GS bench: {} pixels in {:.2} s = {:.1} M pixels/s ({:.1} ms a frame); VRAM hash {h:016X}",
         gs.pixels, s, gs.pixels as f64 / s / 1e6, s * 1000.0 / n as f64);
 }
+
+/// TRXDIR 1 (local -> host) packs the source rectangle for VIF1 to read back
+#[test]
+fn a_local_to_host_transfer_reads_back_what_was_uploaded() {
+    let mut gs = Gs::new();
+    gs.feed(gif_tag(4, false, None, 0, &[0xE]));
+    gs.feed(ad(BITBLTBUF, (0u64 << 32) | 1 << 48 | 0 << 56));
+    gs.feed(ad(TRXPOS, 4 << 32 | 2 << 48));
+    gs.feed(ad(TRXREG, 2 | 2 << 32));
+    gs.feed(ad(TRXDIR, 0));
+    gs.feed(gif_tag(1, true, None, 2, &[]));
+    gs.feed(0x0000_0004_0000_0003_0000_0002_0000_0001);
+    // read it back: source (4, 2), 2 x 2, PSMCT32 at SBP 0, SBW 1
+    gs.feed(gif_tag(4, false, None, 0, &[0xE]));
+    gs.feed(ad(BITBLTBUF, 0 | 1 << 16 | 0 << 24));
+    gs.feed(ad(TRXPOS, 4 | 2 << 16));
+    gs.feed(ad(TRXREG, 2 | 2 << 32));
+    gs.feed(ad(TRXDIR, 1));
+    assert_eq!(gs.readback.len(), 1);
+    assert_eq!(gs.readback[0], 0x0000_0004_0000_0003_0000_0002_0000_0001);
+}
+
+/// Dragon Quest 8's font: uploads to PSMT4HH / 4HL / 8H take 4 / 4 / 8 bits a pixel from
+/// the stream and land in the top of 32-bit pixels, leaving the rest alone
+#[test]
+fn uploads_to_the_high_bits_formats_are_4_and_8_bits_a_pixel() {
+    let mut gs = Gs::new();
+    let up = |gs: &mut Gs, psm: u64, q: u128| {
+        gs.feed(gif_tag(4, false, None, 0, &[0xE]));
+        gs.feed(ad(BITBLTBUF, 1 << 48 | psm << 56));
+        gs.feed(ad(TRXPOS, 0));
+        gs.feed(ad(TRXREG, 8 | 1 << 32));
+        gs.feed(ad(TRXDIR, 0));
+        gs.feed(gif_tag(1, true, None, 2, &[]));
+        gs.feed(q);
+    };
+    // 8 pixels of 4 bits = 4 bytes (the quadword's rest is padding)
+    up(&mut gs, 0x2C, 0x8765_4321);
+    up(&mut gs, 0x24, 0xFEDC_BA98);
+    for x in 0..8u32 {
+        let p = mem::read(&gs.vram, mem::PSMCT32, x, 0, 0, 1);
+        assert_eq!((p >> 28, p >> 24 & 15, p & 0xFF_FFFF), (x + 1, x + 8, 0), "pixel {x}");
+    }
+    // 8 pixels of 8 bits
+    up(&mut gs, 0x1B, 0x0807_0605_0403_0201);
+    for x in 0..8u32 { assert_eq!(mem::read(&gs.vram, mem::PSMT8H, x, 0, 0, 1), x + 1); }
+    // and back out the same size
+    gs.feed(gif_tag(4, false, None, 0, &[0xE]));
+    gs.feed(ad(BITBLTBUF, 1 << 16 | 0x2C << 24));
+    gs.feed(ad(TRXPOS, 0));
+    gs.feed(ad(TRXREG, 8 | 1 << 32));
+    gs.feed(ad(TRXDIR, 1));
+    assert_eq!(gs.readback.len(), 1);
+    assert_eq!(gs.readback[0] as u32, 0x0000_0000);
+}
+
+/// A recorded frame plays back to the same VRAM
+#[test]
+fn a_recorded_frame_replays() {
+    let mut gs = Gs::new();
+    setup(&mut gs);
+    let cfg = bincode::config::standard().with_fixed_int_encoding();
+    gs.flush();
+    gs.rec = Some((bincode::serde::encode_to_vec(&gs, cfg).unwrap(), Vec::new()));
+    gs.feed(gif_tag(4, false, None, 0, &[0xE]));
+    gs.feed(ad(PRIM, 6));
+    gs.feed(ad(RGBAQ, 0x8012_3456));
+    gs.feed(ad(XYZ2, 0));
+    gs.feed(ad(XYZ2, (16 * 16) | (16 * 16) << 16));
+    gs.flush();
+    let (state, qs) = gs.rec.take().unwrap();
+    let file = super::frame_file(&state, &qs, &gs.pregs);
+    let mut back = super::replay(&file).expect("replays");
+    back.flush();
+    assert!(back.vram == gs.vram, "same VRAM");
+    assert_eq!(px(&mut back, 3, 3) & 0xFF_FFFF, 0x12_3456);
+}
+
+/// PS2_GS_FRAME=gs_frame.bin [PS2_PPM=out.ppm]: replay a recorded frame, show it
+#[test]
+#[ignore]
+fn gs_frame_replay() {
+    let path = std::env::var("PS2_GS_FRAME").expect("PS2_GS_FRAME");
+    let file = std::fs::read(path).unwrap();
+    let t = std::time::Instant::now();
+    let mut gs = super::replay(&file).expect("a GSF1 file");
+    gs.flush();
+    println!("replayed in {:?}", t.elapsed());
+    let mut out = Vec::new();
+    let (w, h) = gs.display(&mut out);
+    println!("display {w}x{h} PMODE {:X} DISPFB2 {:X} DISPLAY2 {:X}", gs.pregs[0], gs.pregs[9], gs.pregs[10]);
+    if let Ok(p) = std::env::var("PS2_PPM") {
+        let mut ppm = format!("P6 {w} {h} 255\n").into_bytes();
+        for px in out.chunks(4) { ppm.extend_from_slice(&px[..3]); }
+        std::fs::write(p, ppm).unwrap();
+    }
+}
+
+/// PS2_GS_FRAME + GS_DUMP=bp,bw,psm,w,h,out.ppm: a VRAM region after the replay
+#[test]
+#[ignore]
+fn gs_frame_vram_dump() {
+    let file = std::fs::read(std::env::var("PS2_GS_FRAME").unwrap()).unwrap();
+    let mut gs = super::replay(&file).unwrap();
+    gs.flush();
+    let a: Vec<String> = std::env::var("GS_DUMP").unwrap().split(',').map(|s| s.to_string()).collect();
+    let n = |s: &str| u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap();
+    let (bp, bw, psm, w, h) = (n(&a[0]), n(&a[1]), n(&a[2]), n(&a[3]), n(&a[4]));
+    let mut ppm = format!("P6 {w} {h} 255\n").into_bytes();
+    for y in 0..h {
+        for x in 0..w {
+            let p = super::mem::read(&gs.vram, psm, x, y, bp, bw);
+            ppm.extend_from_slice(&[p as u8, (p >> 8) as u8, (p >> 16) as u8]);
+        }
+    }
+    std::fs::write(&a[5], ppm).unwrap();
+}
+
+/// Persona 3 FES draws its text twice at Z FFFF with ZTST GEQUAL: a Z equal at all three
+/// vertices must interpolate to exactly that value, or the second pass loses pixels
+#[test]
+fn a_constant_z_interpolates_exactly() {
+    let mut gs = Gs::new();
+    gs.write_reg(FRAME_1, 4 << 16);                             // 256 wide
+    gs.write_reg(SCISSOR_1, 255 << 16 | 255 << 48);
+    gs.write_reg(ZBUF_1, 0x100 | 0xA << 24);                   // PSMZ16S
+    // Persona's glyph quads: 28 px squares at quarter-pixel positions, two triangles each
+    let quads: Vec<(u64, u64)> = (0..14).flat_map(|k| (0..6).map(move |r| (0x84 + k * 0xC4 + r * 0x14, 0x40 + r * 0x1C4))).collect();
+    let tri = |gs: &mut Gs, t: [(u64, u64); 3], colour: u64| {
+        gs.write_reg(PRIM, 3);
+        gs.write_reg(RGBAQ, colour);
+        for (vx, vy) in t { gs.write_reg(XYZ2, vx | vy << 16 | 0xFFFF << 32); }
+    };
+    // the panel behind (ALWAYS), then the glyphs (GEQUAL)
+    gs.write_reg(TEST_1, 1 << 16 | 1 << 17);
+    tri(&mut gs, [(0x13, 0x27), (0x3F35, 0x41), (0x2B, 0x3F59)], 0x11);
+    tri(&mut gs, [(0x3F35, 0x41), (0x3F43, 0x3F61), (0x2B, 0x3F59)], 0x11);
+    gs.write_reg(TEST_1, 1 << 16 | 2 << 17);
+    for &(x, y) in &quads {
+        let d = 0x1C0;
+        tri(&mut gs, [(x, y), (x + d, y), (x, y + d)], 0x22);
+        tri(&mut gs, [(x + d, y), (x + d, y + d), (x, y + d)], 0x22);
+    }
+    gs.flush();
+    for &(x, y) in &quads {
+        // a pixel well inside each quad
+        let (px, py) = ((x as u32 + 0xE0) >> 4, (y as u32 + 0xE0) >> 4);
+        let p = mem::read(&gs.vram, PSMCT32, px, py, 0, 4) & 0xFF;
+        assert_eq!(p, 0x22, "glyph pixel {px},{py} lost the Z test");
+    }
+    let mut lost = 0;
+    for y in 0..256 { for x in 0..256 {
+        let z = mem::read(&gs.vram, PSMZ16S, x, y, 0x2000, 4);
+        if z != 0 && z != 0xFFFF { lost += 1; }
+    } }
+    assert_eq!(lost, 0, "Z values other than FFFF written");
+}

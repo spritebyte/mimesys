@@ -49,8 +49,22 @@ pub struct Cdvd {
     /// CDVD I_STAT (the reason for the IRQ)
     pub istat: u8,
     pub sticky: u8,
-    /// the config area being read (OpenConfig)
+    /// the config area open (S 40): 0 read / 1 write, which area, blocks, next block
     config_left: u8,
+    #[serde(default)]
+    cfg: [u8; 4],
+    /// the mechacon's NVRAM (1 KB: settings, IDs); kept in <data>/GD_EMU/PS2/nvram.bin,
+    /// not in save states
+    #[serde(skip)]
+    pub nvm: Vec<u8>,
+    #[serde(skip)]
+    nvm_loaded: bool,
+    /// debugging: register reads by offset
+    #[serde(skip)]
+    pub reads: Vec<u32>,
+    /// debugging: S 03 sub-commands seen
+    #[serde(skip)]
+    pub sub03: Vec<u8>,
     /// debugging: S commands seen
     #[serde(skip)]
     pub log: Vec<u8>,
@@ -97,8 +111,27 @@ pub struct Cdvd {
     /// debugging: N commands seen, sectors delivered
     #[serde(skip)]
     pub n_log: Vec<u8>,
+    /// debugging: the last N commands with their parameters and outcome
+    #[serde(skip)]
+    pub n_hist: VecDeque<String>,
+    /// debugging: IOP cycles since the current N command, and whether it was waiting
+    /// for DMA room
+    #[serde(skip)]
+    pub n_age: u64,
+    #[serde(skip)]
+    pub n_dma_waits: u32,
     #[serde(skip)]
     pub sectors: u64,
+    /// the disc's end: the image's, or the volume size its ISO 9660 descriptor gives if
+    /// that's bigger (images get trimmed; a disc doesn't end early)
+    #[serde(default)]
+    pub volume_end: u32,
+    /// reads that started past the image's end (zeros)
+    #[serde(skip)]
+    pub past_end: u64,
+    /// a dual-layer (PTP) DVD image: where layer 1's volume starts (0: single layer)
+    #[serde(default)]
+    pub layer1: u32,
 }
 
 fn ready_default() -> u8 { 0x40 }
@@ -136,10 +169,10 @@ impl Default for Cdvd {
     fn default() -> Self {
         Self {
             n_cmd: 0, n_params: Vec::new(), s_cmd: 0, s_params: Vec::new(), s_result: VecDeque::new(),
-            istat: 0, sticky: 0, config_left: 0, log: Vec::new(), region: Vec::new(),
+            istat: 0, sticky: 0, config_left: 0, cfg: [0; 4], nvm: Vec::new(), nvm_loaded: false, reads: vec![0; 64], sub03: Vec::new(), log: Vec::new(), region: Vec::new(),
             disc: None, disc_type: 0, dvd: false, serial: String::new(), ready: 0x40, status: 0, error: 0,
             pos: 0, spinning: false, op: Op::Idle, timer: 0, speed: 0, key: [0; 16], key_xor: 0, dec_set: 0, toc_due: false,
-            n_log: Vec::new(), sectors: 0,
+            n_log: Vec::new(), n_hist: VecDeque::new(), n_age: 0, n_dma_waits: 0, sectors: 0, volume_end: 0, past_end: 0, layer1: 0,
         }
     }
 }
@@ -160,8 +193,26 @@ impl Cdvd {
                 self.disc_type = if self.dvd { 0xFE } else { 0xFD };
             }
         }
+        // the ISO 9660 volume size (sector 16, bytes 80-83)
+        let pvd = d.read_data(16).filter(|s| &s[1..6] == b"CD001").map_or(0, |s| u32::from_le_bytes([s[80], s[81], s[82], s[83]]));
+        self.volume_end = d.leadout.max(pvd);
+        if pvd > d.leadout { println!("PS2: the image ends at sector {}, its volume at {pvd}: reads past the image get zeros", d.leadout); }
+        // a dual-layer DVD image (PCSX2's test): the first volume ends before the image
+        // does and a second volume descriptor sits there (layer 1, numbered from 0 again)
+        self.layer1 = 0;
+        if self.dvd && pvd > 0 && pvd < d.leadout {
+            let is_pvd = |s: Option<[u8; 2048]>| s.is_some_and(|s| &s[..6] == b"\x01CD001");
+            if is_pvd(d.read_data(pvd)) || is_pvd(d.read_data(pvd + 16)) {
+                self.layer1 = pvd;
+                println!("PS2: dual-layer DVD, layer 1 from sector {pvd}");
+            }
+        }
         self.disc = Some(d);
-        self.status = 0;
+        // a disc in the drive at power-on is spun up and identified by the time the BIOS
+        // asks: paused, spinning (PCSX2's tray sequence ends the same way)
+        self.status = 0x0A;
+        self.sticky |= 0x0A;
+        self.spinning = true;
     }
 
     /// The region answer from a BIOS image: ROMVER (e.g. "0170EC20040614") gives the
@@ -204,9 +255,12 @@ fn now() -> [u32; 6] {
 
 impl Cdvd {
     pub fn read(&mut self, a: u32) -> u8 {
+        if let Some(n) = self.reads.get_mut((a & 0x3F) as usize) { *n += 1; }
         match a & 0xFF {
             0x04 => self.n_cmd,
-            0x05 => self.ready,
+            // 08h mechacon initialised, 04h DEV9 connected: always set (CDVDMAN waits
+            // 60000h reads for 08h, then gives up on the drive)
+            0x05 => self.ready | 0x0C,
             0x06 => std::mem::take(&mut self.error),
             0x08 => self.istat,
             0x0A => self.status,
@@ -242,6 +296,11 @@ impl Cdvd {
             0x07 => {
                 // BREAK: abandon a read in progress
                 if self.ready & 0x80 != 0 {
+                    let stage = match self.op { Op::Read { lba, .. } => if lba == self.pos { "reading" } else { "seeking" }, _ => "busy" };
+                    let (age, waits, pos) = (self.n_age, self.n_dma_waits, self.pos);
+                    if let Some(h) = self.n_hist.back_mut() {
+                        h.push_str(&format!(" -> BREAK after {:.1} ms ({stage}, pos {pos}, {waits} DMA waits)", age as f64 * 1000.0 / IOP_HZ as f64));
+                    }
                     self.op = Op::Idle;
                     self.error = 0x01;
                     self.ready = 0x41;
@@ -266,8 +325,13 @@ impl Cdvd {
         self.s_result.clear();
         let p = |k: usize, s: &Self| s.s_params.get(k).copied().unwrap_or(0);
         let r: Vec<u8> = match c {
-            0x03 => match p(0, self) {
+            0x03 => match { let sub = p(0, self); if self.sub03.len() < 64 { self.sub03.push(sub); } sub } {
                 0x00 => vec![0x03, 0x06, 0x02, 0x00],     // mechacon version (as PCSX2: 00020603)
+                // tray check: the status, and 8 when the tray is open
+                0x30 => vec![self.status, if self.status & 1 != 0 { 8 } else { 0 }],
+                // console temperature 30.5 C; renewal date (as PCSX2)
+                0xEF => vec![0, 0x0F, 0x05],
+                0xFD => vec![0, 0x04, 0x12, 0x10, 0x01, 0x30],
                 _ => vec![0],
             },
             0x02 => {
@@ -286,13 +350,55 @@ impl Cdvd {
             0x12 => vec![0; 9],                            // i.LINK ID
             0x15 => vec![5],                               // forbid DVD
             0x1A => vec![1],                               // boot certify
-            0x40 => { self.config_left = p(2, self).max(1); vec![0] }
-            0x41 => {
-                // config blocks: 16 bytes each
-                if self.config_left > 0 { self.config_left -= 1; }
-                vec![0; 16]
+            0x0A => {
+                // ReadNVM: one 16-bit word (address in words, big-endian), high byte first
+                let w = (p(0, self) as usize) << 8 | p(1, self) as usize;
+                self.nvm_ready();
+                if w < 512 { vec![0, self.nvm[w * 2 + 1], self.nvm[w * 2]] } else { vec![0xFF] }
             }
-            0x43 => { self.config_left = 0; vec![0] }
+            0x0B => {
+                let w = (p(0, self) as usize) << 8 | p(1, self) as usize;
+                self.nvm_ready();
+                if w < 512 {
+                    self.nvm[w * 2] = p(3, self);
+                    self.nvm[w * 2 + 1] = p(2, self);
+                    self.nvm_save();
+                    vec![0]
+                } else { vec![0xFF] }
+            }
+            0x40 => {
+                // OpenConfig: read (0) / write (1), area 0-2, block count
+                self.cfg = [p(0, self), p(1, self), p(2, self), 0];
+                vec![0]
+            }
+            0x41 => {
+                let [rw, area, count, idx] = self.cfg;
+                if rw != 0 { let mut v = vec![0x80]; v.resize(16, 0); v }
+                else if idx >= count { vec![0; 16] }
+                else {
+                    self.cfg[3] += 1;
+                    match self.config_offset(area, idx) {
+                        Some(o) => { self.nvm_ready(); self.nvm[o..o + 16].to_vec() }
+                        None => vec![0; 16],
+                    }
+                }
+            }
+            0x42 => {
+                let [rw, area, count, idx] = self.cfg;
+                if rw == 1 && idx < count {
+                    self.cfg[3] += 1;
+                    if let Some(o) = self.config_offset(area, idx) {
+                        self.nvm_ready();
+                        for k in 0..16 { self.nvm[o + k] = p(k, self); }
+                    }
+                }
+                vec![0]
+            }
+            0x43 => {
+                if self.cfg[0] == 1 { self.nvm_save(); }
+                self.cfg = [0; 4];
+                vec![0]
+            }
             0x36 => {
                 // status, 1 << zone, 0, then ROMVER's region letter and OSDVER's
                 let mut r = vec![0];
@@ -304,6 +410,35 @@ impl Cdvd {
         let mut r = r;
         r.resize(result_len(c).max(r.len()), 0);
         self.s_result.extend(r);
+    }
+}
+
+// ====================================================================== NVRAM
+
+impl Cdvd {
+    /// Where a config block lives in the NVRAM (BIOS 1.70+ layout: areas at 270h, 2B0h,
+    /// 200h with 4 / 2 / 7 blocks)
+    fn config_offset(&self, area: u8, idx: u8) -> Option<usize> {
+        let (base, max) = match area { 0 => (0x270, 4), 1 => (0x2B0, 2), _ => (0x200, 7) };
+        (idx < max).then(|| base + idx as usize * 16)
+    }
+
+    fn nvm_path() -> Option<std::path::PathBuf> {
+        crate::common::debug_log::data_dir().map(|d| d.join("GD_EMU").join("PS2").join("nvram.bin"))
+    }
+
+    /// Load the NVRAM the first time it's needed (a new one is zeros: the BIOS runs its
+    /// first-time setup and writes its settings)
+    fn nvm_ready(&mut self) {
+        if self.nvm_loaded { return; }
+        self.nvm_loaded = true;
+        self.nvm = Self::nvm_path().and_then(|p| std::fs::read(p).ok()).filter(|v| v.len() == 1024).unwrap_or_else(|| vec![0; 1024]);
+    }
+
+    fn nvm_save(&mut self) {
+        let Some(p) = Self::nvm_path() else { return };
+        if let Some(dir) = p.parent() { let _ = std::fs::create_dir_all(dir); }
+        if let Err(e) = std::fs::write(&p, &self.nvm) { println!("PS2: can't save the NVRAM to {}: {e}", p.display()); }
     }
 }
 
@@ -351,7 +486,13 @@ impl Cdvd {
         } else if delta < fast {
             (IOP_HZ * 30 / 1000) as i64
         } else {
-            (IOP_HZ * 100 / 1000) as i64
+            // a long seek: the sled's travel, 30 ms up to 70 ms across the whole disc.
+            // (PCSX2 uses a flat 100 ms; Ico polls the status once a frame during a read
+            // and BREAKs after five SEEKs in a row, so a real drive manages its 106 000-
+            // sector jump in under ~67 ms)
+            let full = if self.dvd { 2_295_104u64 } else { 360_000 };
+            let ms = 30 + 40 * (delta as u64).min(full) / full;
+            (IOP_HZ * ms / 1000) as i64
         };
         t
     }
@@ -364,6 +505,7 @@ impl Cdvd {
     }
 
     fn fail(&mut self, error: u8, i_stat: &mut u32) {
+        if let Some(h) = self.n_hist.back_mut() { h.push_str(&format!(" -> error {error:02X} at {}", self.pos)); }
         self.error = error;
         self.ready = 0x41;
         self.op = Op::Idle;
@@ -372,6 +514,13 @@ impl Cdvd {
 
     fn n_command(&mut self, c: u8, i_stat: &mut u32) {
         if self.n_log.len() < 64 { self.n_log.push(c); }
+        if self.n_hist.len() >= 16 { self.n_hist.pop_front(); }
+        self.n_age = 0;
+        self.n_dma_waits = 0;
+        self.n_hist.push_back(match c {
+            0x05..=0x08 | 0x0E => format!("{c:02X} lba {} n {} mode {:02X} spd {:02X}", self.param(0), self.param(4), self.n_params.get(10).copied().unwrap_or(0), self.n_params.get(9).copied().unwrap_or(0)),
+            _ => format!("{c:02X} {:02X?}", self.n_params),
+        });
         if c > 0x01 && self.disc.is_none() { return self.fail(0x12, i_stat); }
         match c {
             0x00 | 0x01 => { self.ready = 0x40; self.irq(i_stat); }
@@ -399,6 +548,16 @@ impl Cdvd {
                     0x06 => match mode { 1 => 2328, 2 => 2340, _ => 2048 },
                     _ => { if self.dvd { return self.fail(0x14, i_stat); } if mode == 1 { 2368 } else { 2352 } }
                 };
+                // a read starting past the end fails; one that runs past it gets zeros
+                // there (images stop at the last data sector, a disc doesn't). The end is
+                // the volume's if the image was trimmed short of it (Metal Gear Solid 2
+                // Substance reads DEMO2.DAT, a padding file past its image's end).
+                // DVDs also get 10000h sectors of slack: dual-layer images don't always say
+                // where their volume ends
+                let leadout = self.disc.as_ref().map_or(0, |d| d.leadout);
+                let end = leadout.max(self.volume_end).max(if self.dvd { leadout + 0x1_0000 } else { 0 });
+                if lba >= end { return self.fail(0x32, i_stat); }
+                if lba >= leadout { self.past_end += 1; }
                 let t = self.seek_time(lba, block) + self.block_time(block);
                 self.start(Op::Read { lba, left: count, block }, t, 0x12);
             }
@@ -424,6 +583,7 @@ impl Cdvd {
 
     /// `cycles` IOP cycles: the op's next steps, blocks into DMA channel 3
     pub fn tick(&mut self, cycles: u32, dma: &mut IopDma, ram: &mut [u8], i_stat: &mut u32) {
+        if self.ready & 0x80 != 0 { self.n_age += cycles as u64; }
         // GetToc: written straight to channel 3's buffer (the channel ends if it runs)
         if self.toc_due {
             self.toc_due = false;
@@ -456,10 +616,9 @@ impl Cdvd {
                         self.irq(i_stat);
                         return;
                     }
-                    let end = self.disc.as_ref().map_or(0, |d| d.leadout);
-                    if lba >= end { return self.fail(0x32, i_stat); }
                     if !dma.cdvd_room(block as usize) {
                         // the IOP hasn't set up the next DMA yet: wait
+                        self.n_dma_waits += 1;
                         self.set_status(0x0A);
                         self.timer += 2000;
                         continue;
@@ -489,8 +648,9 @@ impl Cdvd {
         let mut out = match block {
             2048 => d.read_data(lba).map_or(vec![0; 2048], |s| s.to_vec()),
             2064 => {
-                let lsn = lba + 0x30000;
-                let mut v = vec![0x20, (lsn >> 16) as u8, (lsn >> 8) as u8, lsn as u8];
+                // the ID: layer number in bit 0, the sector on that layer + 30000h
+                let (layer, lsn) = if self.layer1 > 0 && lba >= self.layer1 { (1, lba - self.layer1 + 0x30000) } else { (0, lba + 0x30000) };
+                let mut v = vec![0x20 | layer, (lsn >> 16) as u8, (lsn >> 8) as u8, lsn as u8];
                 v.extend_from_slice(&[0; 8]);
                 v.extend_from_slice(&d.read_data(lba).unwrap_or([0; 2048]));
                 v.extend_from_slice(&[0; 4]);
@@ -523,10 +683,16 @@ impl Cdvd {
         let Some(d) = self.disc.as_ref() else { return vec![0; 1024] };
         if self.dvd {
             let mut t = vec![0u8; 2064];
-            t[..6].copy_from_slice(&[0x04, 0x02, 0xF2, 0x00, 0x86, 0x72]);
-            t[12..20].copy_from_slice(&[0x01, 0x02, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00]);
-            let max = d.leadout + 0x30000 - 1;
-            t[20..24].copy_from_slice(&max.to_be_bytes());
+            if self.layer1 > 0 {
+                // dual layer, PTP: layer 1's start (as PCSX2 builds it)
+                t[..6].copy_from_slice(&[0x24, 0x02, 0xF2, 0x00, 0x41, 0x95]);
+                t[12..20].copy_from_slice(&[0x01, 0x02, 0x21, 0x10, 0x00, 0x03, 0x00, 0x00]);
+                t[20..24].copy_from_slice(&(self.layer1 + 0x30000 - 1).to_be_bytes());
+            } else {
+                t[..6].copy_from_slice(&[0x04, 0x02, 0xF2, 0x00, 0x86, 0x72]);
+                t[12..20].copy_from_slice(&[0x01, 0x02, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00]);
+                t[20..24].copy_from_slice(&(d.leadout + 0x30000 - 1).to_be_bytes());
+            }
             return t;
         }
         let mut t = vec![0u8; 1024];

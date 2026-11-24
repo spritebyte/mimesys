@@ -6,10 +6,15 @@
 //! - MPG into micro memory; MSCAL / MSCALF / MSCNT run the VU's program (to its end)
 //! - VIF1's DIRECT / DIRECTHL go to the GS (PATH2), as do the VU1's XGKICKs (PATH1)
 //!
+//! - A command with the I bit (31) set raises the VIF's interrupt once it's done (unless
+//!   ERR.MII) and stalls the VIF: later words wait in `pending` until FBRST.STC. The DMA
+//!   channel has already finished by then; STAT's FQC shows the waiting words.
+//!
 //! Undefined fields (V2's Z / W, V3's W, write-filled rows with the mask off) are left
 //! as they were.
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 use super::vu::Vu;
 
@@ -20,6 +25,10 @@ pub struct VifCtx<'a> {
     pub vu: &'a mut Vu,
     /// quadwords for the GS (DIRECT, and the VU program's XGKICKs)
     pub gs: &'a mut Vec<u128>,
+    /// the GIF channel (PATH3) is running, and held by something other than MSKPATH3
+    /// (GIF_MODE M3R / GIF_CTRL PSE): FLUSHA waits for an unmasked PATH3 to finish
+    pub gif_running: bool,
+    pub gif_held: bool,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -39,6 +48,21 @@ pub struct Vif {
     pub top: u32,
     pub dbf: bool,
     pub mark: u32,
+    /// ERR (bit 0 MII: no interrupts from the I bit)
+    pub err: u32,
+    /// VIF1's MSKPATH3: the GIF holds PATH3 (GIF_STAT M3P)
+    #[serde(default)]
+    pub mskpath3: bool,
+    /// at a FLUSHA with PATH3 still sending: later words wait in `pending`
+    #[serde(default)]
+    pub flusha_wait: bool,
+    /// just unmasked PATH3: waiting while it sends a packet
+    #[serde(default)]
+    pub p3_packet_wait: bool,
+    /// stalled after an I-bit command (STAT VIS + INT) until FBRST.STC
+    pub stalled: bool,
+    /// words that arrived while stalled
+    pub pending: VecDeque<u32>,
     /// the command being fed data (whole command word), and words still to come
     code: u32,
     left: u32,
@@ -53,16 +77,69 @@ pub struct Vif {
     pub mscal: u64,
     #[serde(skip)]
     pub unpacks: u64,
+    #[serde(skip)]
+    pub irqs: u64,
 }
 
 impl Vif {
     pub fn new(vif1: bool) -> Self { Self { vif1, ..Default::default() } }
 
-    /// Feed one word of the stream
-    pub fn word(&mut self, w: u32, cx: &mut VifCtx) {
+    /// STAT as the CPU reads it
+    pub fn stat(&self) -> u32 {
+        let mut s = if self.left > 0 { 1 } else { 0 };   // VPS: waiting for data
+        if self.stalled { s |= 1 << 10 | 1 << 11; }     // VIS, INT
+        s | (self.pending.len().div_ceil(4).min(16) as u32) << 24
+    }
+
+    /// FBRST: RST (bit 0) drops everything; STC (bit 3) ends a stall
+    pub fn fbrst(&mut self, v: u32) {
+        if v & 1 != 0 {
+            self.pending.clear();
+            self.stalled = false;
+            self.flusha_wait = false;
+            self.p3_packet_wait = false;
+            self.left = 0;
+            self.buf.clear();
+        }
+        if v & 8 != 0 { self.stalled = false; }
+    }
+
+    /// Feed words; returns true if the VIF raised its interrupt (and stalled)
+    pub fn feed(&mut self, words: &[u32], cx: &mut VifCtx) -> bool {
+        if self.stalled || self.flusha_wait || self.p3_packet_wait || !self.pending.is_empty() {
+            self.pending.extend(words);
+            if self.stalled || self.flusha_wait || self.p3_packet_wait { return false; }
+            while let Some(w) = self.pending.pop_front() {
+                if self.word(w, cx) { return true; }
+                if self.flusha_wait || self.p3_packet_wait { return false; }
+            }
+            return false;
+        }
+        for (k, &w) in words.iter().enumerate() {
+            let irq = self.word(w, cx);
+            if irq || self.flusha_wait || self.p3_packet_wait {
+                self.pending.extend(&words[k + 1..]);
+                return irq;
+            }
+        }
+        false
+    }
+
+    /// A command finished: its I bit stalls the VIF and interrupts
+    fn done(&mut self) -> bool {
+        if self.code & 0x8000_0000 != 0 && self.err & 1 == 0 {
+            self.stalled = true;
+            self.irqs += 1;
+            return true;
+        }
+        false
+    }
+
+    /// Feed one word of the stream; true if a finished command interrupts
+    pub fn word(&mut self, w: u32, cx: &mut VifCtx) -> bool {
         if self.left > 0 {
             self.data(w, cx);
-            return;
+            return self.left == 0 && self.done();
         }
         let cmd = (w >> 24) & 0x7F;
         let imm = w & 0xFFFF;
@@ -76,9 +153,18 @@ impl Vif {
             0x03 if self.vif1 => self.base = imm & 0x3FF,
             0x04 => self.itop = imm & 0x3FF,
             0x05 => self.mode = imm & 3,
-            0x06 => {}                                              // MSKPATH3
+            0x06 => {                                                // MSKPATH3
+                let mask = imm >> 15 & 1 != 0;
+                // unmasked with PATH3 waiting: it gets the GS for (at least) one packet
+                // before the VIF goes on
+                if self.vif1 && self.mskpath3 && !mask && cx.gif_running && !cx.gif_held { self.p3_packet_wait = true; }
+                self.mskpath3 = mask;
+            }
             0x07 => self.mark = imm,
-            0x10 | 0x11 | 0x13 => {}                                // FLUSHE / FLUSH / FLUSHA
+            0x10 | 0x11 => {}                                       // FLUSHE / FLUSH
+            // FLUSHA: wait for PATH3 too (the textures a game unmasked PATH3 to send
+            // must reach the GS before the draws after this)
+            0x13 => if self.vif1 && cx.gif_running && !self.mskpath3 && !cx.gif_held { self.flusha_wait = true; },
             0x14 | 0x15 => self.call(Some(imm * 8), cx),            // MSCAL / MSCALF
             0x17 => self.call(None, cx),                            // MSCNT
             0x20 => self.left = 1,                                  // STMASK
@@ -104,6 +190,7 @@ impl Vif {
             }
             _ => {}
         }
+        self.left == 0 && self.done()
     }
 
     /// Rows an UNPACK of `num` (0 = 256) writes that come from the stream

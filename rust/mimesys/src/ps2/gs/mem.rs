@@ -133,6 +133,16 @@ pub fn bpp(psm: u32) -> u32 {
     }
 }
 
+/// Bits per pixel in a host <-> local transfer: as `bpp`, except that 8H / 4HL / 4HH
+/// move 8 / 4 bits a pixel (into the top of a 32-bit pixel)
+pub fn xfer_bpp(psm: u32) -> u32 {
+    match psm {
+        PSMT8H => 8,
+        PSMT4HL | PSMT4HH => 4,
+        _ => bpp(psm),
+    }
+}
+
 /// A pixel's raw value (32-bit formats: the whole word; 24: low 24 bits; 16: the halfword;
 /// 8 / 4: the index, also from the high bits of a 32-bit pixel for 8H / 4HL / 4HH)
 pub fn read(m: &[u8], psm: u32, x: u32, y: u32, bp: u32, bw: u32) -> u32 {

@@ -15,6 +15,13 @@ pub struct EeTimer {
     frac: u32,
 }
 
+/// Whether counting from `old` to `new` (not yet wrapped at `period`) passes `target`:
+/// a target below `old` is reached after the wrap
+fn passes(old: u64, new: u64, target: u64, period: u64) -> bool {
+    let t = if target > old { target } else { target + period };
+    t <= new
+}
+
 const EE_CMPE: u32 = 1 << 8;
 const EE_OVFE: u32 = 1 << 9;
 const EE_EQUF: u32 = 1 << 10;
@@ -58,10 +65,14 @@ impl EeTimer {
         let old = self.count;
         let mut new = old + n;
         // compare: COUNT passes COMP
-        if self.comp > old && self.comp <= new {
+        if passes(old as u64, new as u64, self.comp as u64, 0x1_0000) {
             if self.mode & EE_CMPE != 0 { self.mode |= EE_EQUF; }
             // ZRET: back to 0 on reaching COMP
-            if self.mode & 0x40 != 0 { new -= self.comp; }
+            // (counting on from 0 by however far it went past COMP)
+            if self.mode & 0x40 != 0 {
+                let at = if self.comp > old { self.comp } else { self.comp + 0x1_0000 };
+                new = (new - at) % self.comp.max(1);
+            }
         }
         if new > 0xFFFF {
             if self.mode & EE_OVFE != 0 { self.mode |= EE_OVFF; }
@@ -132,10 +143,13 @@ impl IopTimer {
         let old = self.count;
         let mut new = old + inc as u64;
         let mut irq = false;
-        if self.target > old && self.target <= new {
+        if passes(old, new, self.target, max + 1) {
             self.mode |= 1 << 11;
             if self.mode & 0x10 != 0 { irq = true; }
-            if self.mode & 0x08 != 0 { new -= self.target; }
+            if self.mode & 0x08 != 0 {
+                let at = if self.target > old { self.target } else { self.target + max + 1 };
+                new = (new - at) % self.target.max(1);
+            }
         }
         if new > max {
             self.mode |= 1 << 12;
