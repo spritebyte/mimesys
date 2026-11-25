@@ -118,6 +118,7 @@ const OPTION_DEFAULTS := {
 	"saturn_debug": false,   # Saturn: debug log (SMPC / CD commands, the CPUs every 5 s)
 	"ps2_debug": false,      # PlayStation 2: debug log (chip state every 5 s, unmodelled registers, trace before a crash)
 	"ps1_card": "Card 1",    # PlayStation: the memory card in slot 1 (user://GD_EMU/PS1/MemoryCards/<name>.mcd)
+	"ps2_card": "Card 1",    # PlayStation 2: the memory card in slot 1 (user://GD_EMU/PS2/MemoryCards/<name>.ps2)
 }
 ## Game Boy boot ROMs: "bios" (above) is the Game Boy Color one, this is the original's.
 const GB_DMG_BIOS_DEFAULT := "user://BIOS/dmg_boot.bin"

@@ -1237,3 +1237,181 @@ fn spu2_dma_writes_sound_ram_at_tsa() {
     spu2.write16(0x1AC, 0xBEEF);
     assert_eq!(spu2.ram[0x3040], 0xBEEF);
 }
+
+/// SPR interleave (CHCR MOD 2, D_SQWC): TQWC quadwords, then SQWC skipped on the memory
+/// side; MGS2 lays its movie's 16x16 macroblocks out as lines this way
+#[test]
+fn spr_interleave_skips_in_memory() {
+    use super::dmac::Dmac;
+    let mut d = Dmac::default();
+    let mut ram = vec![0u8; 0x20_0000];
+    let mut spr = vec![0u8; 0x4000];
+    let mut sif = super::hw::Sif::default();
+    let w = |d: &mut Dmac, a: u32, v: u32| d.write(a & 0xFFFF, v, u32::MAX);
+    for i in 0..8u32 { spr[16 * i as usize..][..4].copy_from_slice(&(i + 1).to_le_bytes()); }
+    w(&mut d, 0x1000_E000, 1);
+    w(&mut d, 0x1000_E030, 2 << 16 | 6);                 // TQWC 2, SQWC 6
+    w(&mut d, 0x1000_D010, 0x1000);
+    w(&mut d, 0x1000_D080, 0);
+    w(&mut d, 0x1000_D020, 8);
+    w(&mut d, 0x1000_D000, 0x108);
+    d.step(&mut ram, &mut spr, &mut sif);
+    let at = |q: usize| u32::from_le_bytes(ram[0x1000 + 16 * q..][..4].try_into().unwrap());
+    assert_eq!([at(0), at(1), at(8), at(9), at(16), at(17), at(24), at(25)], [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(at(2), 0);
+    // and back: SPR_TO gathers the same quadwords
+    spr.fill(0);
+    w(&mut d, 0x1000_D410, 0x1000);
+    w(&mut d, 0x1000_D480, 0x100);
+    w(&mut d, 0x1000_D420, 8);
+    w(&mut d, 0x1000_D400, 0x109);
+    d.step(&mut ram, &mut spr, &mut sif);
+    let s = |q: usize| u32::from_le_bytes(spr[0x100 + 16 * q..][..4].try_into().unwrap());
+    assert_eq!((0..8).map(s).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+/// XGKICK runs alongside the program: a store right after the kick, to the end of the
+/// packet, still goes out (God of War writes each batch's last vertex that way)
+#[test]
+fn xgkick_sees_stores_made_just_after_it() {
+    use super::vu::Vu;
+    let mut vu = Vu::new(true);
+    let mut code = vec![0u8; 0x4000];
+    let mut data = vec![0u8; 0x4000];
+    // GIFtag at qw 0: NLOOP 2, EOP, PACKED, 1 reg (A+D)
+    let tag: u128 = 2 | 1 << 15 | 1u128 << 60 | 0xEu128 << 64;
+    data[..16].copy_from_slice(&tag.to_le_bytes());
+    let put = |code: &mut Vec<u8>, i: usize, lo: u32, hi: u32| {
+        code[i * 8..i * 8 + 4].copy_from_slice(&lo.to_le_bytes());
+        code[i * 8 + 4..i * 8 + 8].copy_from_slice(&hi.to_le_bytes());
+    };
+    let nop_hi = 0x2FF; // NOP upper
+    // XGKICK vi0 (packet at 0); then SQ.xyzw vf1, 2(vi0) (the packet's last quadword)
+    put(&mut code, 0, 0x8000_06FC, nop_hi);
+    put(&mut code, 1, 0x03E0_0802, nop_hi);
+    put(&mut code, 2, 0x8000_033C, nop_hi | 1 << 30);   // E bit
+    put(&mut code, 3, 0x8000_033C, nop_hi);
+    vu.vf[1] = [0x11, 0x22, 0x33, 0x44];
+    let mut out = Vec::new();
+    vu.start(0);
+    vu.run(&code, &mut data, &mut out);
+    assert_eq!(out.len(), 3);
+    assert_eq!(out[2], 0x11 | 0x22 << 32 | 0x33u128 << 64 | 0x44u128 << 96);
+}
+
+/// V2 unpacks write x y x y; V3 unpacks take w from the next element
+#[test]
+fn unpack_v2_and_v3_fill_the_rest_like_hardware() {
+    let mut vif = super::vif::Vif::new(true);
+    let mut vu = super::vu::Vu::new(true);
+    let mut code = vec![0u8; 0x4000];
+    let mut data = vec![0u8; 0x4000];
+    let mut gs = Vec::new();
+    {
+        let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs, gif_running: false, gif_held: false };
+        // STCYCL 1,1; V2-32 ×2 at 0; V3-32 ×2 at 10h
+        for &w in &[0x0100_0101u32, 0x6402_0000, 1, 2, 3, 4, 0x6802_0010, 5, 6, 7, 8, 9, 10] { vif.word(w, &mut cx); }
+    }
+    let w = |q: usize, k: usize| u32::from_le_bytes(data[q * 16 + 4 * k..][..4].try_into().unwrap());
+    assert_eq!([w(0, 0), w(0, 1), w(0, 2), w(0, 3)], [1, 2, 1, 2]);
+    assert_eq!([w(1, 0), w(1, 1), w(1, 2), w(1, 3)], [3, 4, 3, 4]);
+    assert_eq!([w(0x10, 0), w(0x10, 1), w(0x10, 2), w(0x10, 3)], [5, 6, 7, 8]);
+    assert_eq!([w(0x11, 0), w(0x11, 1), w(0x11, 2)], [8, 9, 10]);
+}
+
+/// Debugging: play back a vif1_frame.bin (PS2_VIF_FRAME): VIF1 + VU1 from the frame's
+/// start. Reports packets with vertices at the screen's limits (XYZ2 x and y FFFF);
+/// VIF_DUMP=n writes VU1 data memory (vif_dump_data.bin) and registers just before
+/// program n starts... (programs counted from 1)
+#[test]
+#[ignore]
+fn vif1_frame_replay() {
+    use super::hw::VifEvent;
+    let path = std::env::var("PS2_VIF_FRAME").expect("PS2_VIF_FRAME");
+    let file = std::fs::read(path).unwrap();
+    assert_eq!(&file[..4], b"VIF1");
+    let n = u64::from_le_bytes(file[4..12].try_into().unwrap()) as usize;
+    let cfg = bincode::config::standard().with_fixed_int_encoding();
+    let ((mut vif, mut vu, mut code, mut data), _): ((super::vif::Vif, super::vu::Vu, Vec<u8>, Vec<u8>), usize) =
+        bincode::serde::decode_from_slice(&file[12..12 + n], cfg).unwrap();
+    let (ev, _): (Vec<VifEvent>, usize) = bincode::serde::decode_from_slice(&file[12 + n..], cfg).unwrap();
+    let dump_at: u64 = std::env::var("VIF_DUMP").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let p0 = vu.programs;
+    if dump_at > 0 { vu.snap_at = p0 + dump_at; }
+    let mut all = 0usize;
+    let mut bad = 0;
+    let mut gs = Vec::new();
+    let t0 = std::time::Instant::now();
+    let c0 = vu.total_cycles;
+    let mut out: Vec<u8> = Vec::new();
+    let mut scan = |gs: &mut Vec<u128>, vu: &super::vu::Vu, vif: &super::vif::Vif, all: &mut usize| {
+        for (k, q) in gs.iter().enumerate() {
+            let (x, y) = ((*q as u32) & 0xFFFF, ((*q >> 32) as u32) & 0xFFFF);
+            let z = (*q >> 64) as u32;
+            if x == 0xFFFF && y == 0xFFFF && (z == 0x8000_0000 || z == 0x7FFF_FFFF) {
+                bad += 1;
+                if bad > 40 { continue; }
+                println!("bad vertex: qw {} of the frame (+{k} in its packet), program {} (started at {:X}), TOP {:X}",
+                    *all + k, vu.programs - p0, vu.start_pc, vif.top);
+            }
+        }
+        *all += gs.len();
+        out.extend(gs.iter().flat_map(|q| q.to_le_bytes()));
+        gs.clear();
+    };
+    for e in ev {
+        match e {
+            VifEvent::Feed(words, r, h) => {
+                for w in words {
+                    let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs, gif_running: r, gif_held: h };
+                    // just before program n: its data memory and code
+                    vif.feed(&[w], &mut cx);
+                    if !gs.is_empty() { scan(&mut gs, &vu, &vif, &mut all); }
+                }
+            }
+            VifEvent::Run(a) => { vu.start(a); vu.run(&code, &mut data, &mut gs); scan(&mut gs, &vu, &vif, &mut all); }
+        }
+    }
+    if let Ok(p) = std::env::var("VIF_OUT") { std::fs::write(p, &out).unwrap(); }
+    println!("{} GS quadwords, {} programs, {} bad vertices", all, vu.programs - p0, bad);
+    let ns = t0.elapsed().as_nanos() as f64;
+    println!("time {:.1} ms, VU1 {} cycles ({:.2} ns a cycle, VIF included)", ns / 1e6, vu.total_cycles - c0, ns / (vu.total_cycles - c0).max(1) as f64);
+    // VIF_DUMP=n: program n again, step by step (pc, vi registers, stores' targets)
+    if let Some((mut v, mut d, code)) = vu.snap.take() {
+        std::fs::write("vif_dump_data.bin", &d).unwrap();
+        std::fs::write("vif_dump_code.bin", &code).unwrap();
+        let mut out = Vec::new();
+        let mut steps = 0;
+        while v.running && steps < 200_000 {
+            let pc = v.pc;
+            let before = out.len();
+            if let Ok(pcs) = std::env::var("VIF_VF") {
+                if pcs.split(',').any(|p| u32::from_str_radix(p, 16).ok() == Some(pc)) {
+                    let f = |r: usize| v.vf[r].map(f32::from_bits);
+                    println!("@{pc:04X} step {steps} vi {:X?}", &v.vi[..16]);
+                    for r in 1..32 { println!("   vf{r:02} {:?}", f(r)); }
+                }
+            }
+            let old = if std::env::var("VIF_STORES").is_ok() { Some(d.clone()) } else { None };
+            v.step(&code, &mut d, &mut out);
+            if let Some(old) = old {
+                for q in 0..d.len() / 16 {
+                    if old[q * 16..q * 16 + 16] != d[q * 16..q * 16 + 16] {
+                        let w: Vec<String> = (0..4).map(|k| format!("{:08X}", u32::from_le_bytes(d[q * 16 + 4 * k..][..4].try_into().unwrap()))).collect();
+                        println!("store {pc:04X} step {steps} -> qw {q:03X} = {}", w.join(" "));
+                    }
+                }
+            }
+            if std::env::var("VIF_TRACE").is_ok() {
+                println!("{pc:04X} vi {:X?} cyc {} q {:08X}", &v.vi[..16], v.cycle, v.q);
+            }
+            if out.len() > before { println!("kick output +{} qw at step {steps} (pc {pc:04X})", out.len() - before); }
+            steps += 1;
+        }
+        v.running = false;
+        println!("program {dump_at}: {steps} steps, {} qw out", out.len());
+        let mut f = Vec::new();
+        for q in &out { f.extend_from_slice(&q.to_le_bytes()); }
+        std::fs::write("vif_dump_out.bin", f).unwrap();
+    }
+}

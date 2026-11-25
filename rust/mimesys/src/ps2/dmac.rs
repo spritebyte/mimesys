@@ -114,6 +114,9 @@ fn mem_write(ram: &mut [u8], spr: &mut [u8], a: u32, v: u128) {
         spr[o..o + 16].copy_from_slice(&v.to_le_bytes());
     } else {
         let o = (a & 0x01FF_FFF0) as usize;
+        if crate::common::cpu::r5900::watch_hit(o as u32, 16) && crate::common::cpu::r5900::watch_note() {
+            crate::common::cpu::r5900::watch_log(format!("DMA write [{:08X}] = {:032X}", o, v));
+        }
         ram[o..o + 16].copy_from_slice(&v.to_le_bytes());
     }
 }
@@ -238,6 +241,10 @@ impl Dmac {
     /// A channel reading memory (normal or source chain) into its device
     fn source(&mut self, n: usize, ram: &mut [u8], spr: &mut [u8], sif: &mut Sif) {
         let chain = self.ch[n].chcr >> 2 & 3 == 1;
+        // interleave (SPR_TO, MOD 2): TQWC quadwords, then skip SQWC in memory
+        let inter = n == SPR_TO && self.ch[n].chcr >> 2 & 3 == 2;
+        let (tqwc, sqwc) = (self.sqwc >> 16 & 0xFF, self.sqwc & 0xFF);
+        let mut run = 0;
         let mut guard = 0;
         loop {
             // the data
@@ -248,6 +255,10 @@ impl Dmac {
                 let c = &mut self.ch[n];
                 c.madr = c.madr.wrapping_add(16);
                 c.qwc -= 1;
+                if inter {
+                    run += 1;
+                    if run == tqwc { run = 0; c.madr = c.madr.wrapping_add(sqwc * 16); }
+                }
                 guard += 1;
                 if guard > 0x10_0000 { return; }
                 // one PATH3 packet sent while masked: stop here (unless that was the end)
@@ -376,10 +387,15 @@ impl Dmac {
         }
     }
 
-    /// SPR_FROM (normal mode): scratchpad -> memory
+    /// SPR_FROM (normal or interleave mode): scratchpad -> memory
     fn spr_from(&mut self, ram: &mut [u8], spr: &mut [u8]) {
         let mfifo = self.mfifo_drain().is_some();
         let (rbor, rbsr) = (self.rbor, self.rbsr);
+        // interleave (MOD 2): TQWC quadwords, then skip SQWC in memory (D_SQWC); the
+        // scratchpad side is contiguous. MGS2's movies turn 16x16 macroblocks into lines so
+        let inter = self.ch[SPR_FROM].chcr >> 2 & 3 == 2;
+        let (tqwc, sqwc) = (self.sqwc >> 16 & 0xFF, self.sqwc & 0xFF);
+        let mut run = 0;
         let c = &mut self.ch[SPR_FROM];
         while c.qwc > 0 {
             let q = mem_read(ram, spr, 0x8000_0000 | c.sadr);
@@ -390,6 +406,10 @@ impl Dmac {
             c.madr = c.madr.wrapping_add(16);
             if mfifo { c.madr = rbor | (c.madr & rbsr); }
             c.qwc -= 1;
+            if inter {
+                run += 1;
+                if run == tqwc { run = 0; c.madr = c.madr.wrapping_add(sqwc * 16); }
+            }
         }
         if mfifo { self.mfifo_empty = false; }
         self.finish(SPR_FROM);

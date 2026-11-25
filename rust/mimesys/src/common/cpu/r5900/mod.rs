@@ -28,6 +28,51 @@ use serde::{Deserialize, Serialize};
 
 pub mod fpu;
 pub mod jit;
+
+/// Debugging: PS2_WATCH=address[,length[,value]] (hex, physical) logs every EE store and
+/// DMA write there (only those writing `value` in the low 32 bits, if given); the JIT is
+/// off while watching
+pub fn watch() -> Option<(u32, u32)> { watch_cfg().map(|(a, l, _)| (a, l)) }
+
+fn watch_cfg() -> Option<(u32, u32, Option<u32>)> {
+    static W: std::sync::OnceLock<Option<(u32, u32, Option<u32>)>> = std::sync::OnceLock::new();
+    *W.get_or_init(|| {
+        let v = std::env::var("PS2_WATCH").ok()?;
+        let hex = |x: &str| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok();
+        let mut it = v.split(',');
+        let a = hex(it.next()?)?;
+        let l = it.next().and_then(hex).unwrap_or(4);
+        let val = it.next().and_then(hex);
+        Some((a & 0x1FFF_FFFF, l.max(1), val))
+    })
+}
+
+pub fn watch_hit(pa: u32, n: u32) -> bool {
+    match watch_cfg() { Some((a, l, _)) => pa < a + l && a < pa + n, None => false }
+}
+
+/// The value filter passes `v`
+pub fn watch_value(v: u128) -> bool {
+    match watch_cfg() { Some((_, _, Some(x))) => v as u32 == x, _ => true }
+}
+
+static WATCH_LOG: std::sync::Mutex<std::collections::VecDeque<String>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// Keep a watch hit (the last 64 are kept, see `watch_take`)
+pub fn watch_log(s: String) {
+    if let Ok(mut l) = WATCH_LOG.lock() {
+        if l.len() >= 64 { l.pop_front(); }
+        l.push_back(s);
+    }
+}
+
+/// The watch hits kept so far
+pub fn watch_take() -> Vec<String> {
+    WATCH_LOG.lock().map(|l| l.iter().cloned().collect()).unwrap_or_default()
+}
+
+/// A hit counts (always: the log keeps the last ones)
+pub fn watch_note() -> bool { true }
 mod mmi;
 #[cfg(test)]
 mod tests;
@@ -53,6 +98,9 @@ pub trait EeBus {
     /// After a store to I/O: if it changed the interrupt controllers, the INT0 / INT1
     /// lines now (they drop at once when software acknowledges)
     fn irq_lines(&mut self) -> Option<(bool, bool)> { None }
+    /// A load from `pa` saw an interrupt that hasn't reached the CPU yet: take it now
+    /// (after this instruction)
+    fn int0_on_read(&mut self, _pa: u32) -> bool { false }
     /// BC0F / BC0T test CPCOND0 (the DMAC: all channels named in D_PCR finished)
     fn cpcond0(&mut self) -> bool { true }
     /// A COP2 (VU0 macro mode) instruction other than LQC2 / SQC2: QMFC2 / QMTC2 / CFC2 /
@@ -430,13 +478,17 @@ impl R5900 {
         self.check(va, n - 1, EXC_ADEL)?;
         Ok(match self.translate(va, false)? {
             Target::Scratch(o) => self.sp_read(o & (0x4000 - n as usize), n as usize),
-            Target::Phys(pa) => match n {
-                1 => bus.read8(pa) as u128,
-                2 => bus.read16(pa) as u128,
-                4 => bus.read32(pa) as u128,
-                8 => bus.read64(pa) as u128,
-                _ => bus.read128(pa),
-            },
+            Target::Phys(pa) => {
+                let v = match n {
+                    1 => bus.read8(pa) as u128,
+                    2 => bus.read16(pa) as u128,
+                    4 => bus.read32(pa) as u128,
+                    8 => bus.read64(pa) as u128,
+                    _ => bus.read128(pa),
+                };
+                if pa >= 0x1000_0000 && bus.int0_on_read(pa) { self.set_int0(true); }
+                v
+            }
         })
     }
 
@@ -445,6 +497,12 @@ impl R5900 {
         match self.translate(va, true)? {
             Target::Scratch(o) => self.sp_write(o & (0x4000 - n as usize), n as usize, v),
             Target::Phys(pa) => match n {
+                _ if watch_hit(pa, n) && watch_value(v) && watch_note() => {
+                    watch_log(format!("EE store{} [{:08X}] = {:X} at pc {:08X} ra {:08X} sp {:08X} (va {:08X}) cycle {}",
+                        n * 8, pa, v & (u128::MAX >> (128 - 8 * n)), self.cur_pc, self.gpr[31] as u32, self.gpr[29] as u32, va, self.cycles));
+                    match n { 1 => bus.write8(pa, v as u8), 2 => bus.write16(pa, v as u16), 4 => bus.write32(pa, v as u32),
+                              8 => bus.write64(pa, v as u64), _ => bus.write128(pa, v) }
+                }
                 1 => bus.write8(pa, v as u8),
                 2 => bus.write16(pa, v as u16),
                 4 => bus.write32(pa, v as u32),

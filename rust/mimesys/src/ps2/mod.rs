@@ -42,7 +42,7 @@ pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
 /// Printed at the top of the debug log so a log says which build made it
-const PATCH: &str = "0265";
+const PATCH: &str = "0273";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;
@@ -84,6 +84,11 @@ pub struct Ps2System {
     /// speed report: cycles skipped in idle loops, and where the last report was
     skipped_ee: u64,
     skipped_iop: u64,
+    /// host time (ns) spent running the EE, the IOP, and the rest of each slice (DMA,
+    /// VIF, VU1, SPU2...), and the frame total; ns at the last report
+    host_ns: [u64; 4],
+    host_last: [u64; 5],
+    gs_flushes_last: u64,
     /// debugging: the waiting threads' code went to the log (once, 20 s in)
     code_dumped: bool,
     /// debugging: EE / IOP RAM written to files (once, 30 s in)
@@ -98,8 +103,20 @@ pub struct Ps2System {
     last_report: Option<(std::time::Instant, u64, u64, u64, u64, u64, u64, u64, u64)>,
 }
 
-/// EE cycles between INTC_STAT & INTC_MASK going non-zero and the EE seeing INT0
-const INT0_DELAY: u64 = 128;
+/// How INT0 reaches the EE after INTC_STAT & INTC_MASK go up. Default (patch 0273):
+/// 4 EE cycles, as PCSX2 and patch 0269 (Spy Hunter drew right with it; DQ8's vsync wait
+/// needs it short). PS2_INT0=128: 128 cycles (0268, KH right); PS2_INT0=read: 128 cycles,
+/// but a load of INTC_STAT that sees it brings it at once (0270-0272, when Spy Hunter and
+/// KH drew stretched triangles)
+pub(crate) fn int0_mode() -> (u64, bool) {
+    static M: std::sync::OnceLock<(u64, bool)> = std::sync::OnceLock::new();
+    *M.get_or_init(|| match std::env::var("PS2_INT0").as_deref() {
+        Ok("read") => (128, true),
+        Ok(v) => (v.parse().unwrap_or(4), false),
+        Err(_) => (4, false),
+    })
+}
+fn int0_delay() -> u64 { int0_mode().0 }
 
 /// A loop of nothing but NOPs and one branch back (BEQ $0, $0 or J) with a NOP delay
 /// slot, containing `pc`: only an interrupt gets out of it. `read` gives code words.
@@ -150,13 +167,16 @@ impl Ps2System {
             iop_idle: None,
             skipped_ee: 0,
             skipped_iop: 0,
+            host_ns: [0; 4],
+            host_last: [0; 5],
+            gs_flushes_last: 0,
             code_dumped: false,
             next_ram_dump: 1200,
             gs_rec_due: false,
             gs_rec_left: 0,
             last_report: None,
             jit: Default::default(),
-            jit_on: std::env::var_os("PS2_NOJIT").is_none(),
+            jit_on: std::env::var_os("PS2_NOJIT").is_none() && crate::common::cpu::r5900::watch().is_none(),
         };
         s.reset_cpus();
         // a disc image: the frontend sends its path
@@ -215,8 +235,14 @@ impl Ps2System {
         self.iop_idle = None;
         let mut done = 0;
         while done < EE_PER_LINE {
-            let target = SLICE.min(EE_PER_LINE - done);
+            let mut target = SLICE.min(EE_PER_LINE - done);
+            // INT0 due within the slice: stop there so it arrives on time
+            if let Some(since) = self.int0_since {
+                let left = (since + int0_delay()).saturating_sub(self.ee.cycles);
+                if left > 0 { target = target.min(left as u32); }
+            }
             let mut c = 0;
+            let t_ee = std::time::Instant::now();
             if !self.ee.irq_ready() && self.ee_idle_now() {
                 // nothing to run until an interrupt: let the time pass
                 self.ee.idle(target);
@@ -232,6 +258,8 @@ impl Ps2System {
                 }
             }
             done += c;
+            let t_iop = std::time::Instant::now();
+            self.host_ns[0] += (t_iop - t_ee).as_nanos() as u64;
             // the IOP at an eighth of the EE's clock
             self.iop_owed += c as i64;
             let mut iop_cycles = 0u32;
@@ -249,7 +277,10 @@ impl Ps2System {
                     iop_cycles += n;
                 }
             }
+            let t_tick = std::time::Instant::now();
+            self.host_ns[1] += (t_tick - t_iop).as_nanos() as u64;
             self.tick(c, iop_cycles, 0);
+            self.host_ns[2] += t_tick.elapsed().as_nanos() as u64;
         }
         // HBLANK
         self.tick(0, 0, 1);
@@ -330,7 +361,7 @@ impl Ps2System {
             self.ee.set_int0(false);
         } else {
             let since = *self.int0_since.get_or_insert(self.ee.cycles);
-            if self.ee.cycles - since >= INT0_DELAY { self.ee.set_int0(true); }
+            if self.ee.cycles - since >= int0_delay() { self.ee.set_int0(true); }
         }
         self.ee.set_int1(self.hw.dmac.int1());
         self.iop.set_irq(self.hw.iop_irq());
@@ -350,10 +381,19 @@ impl Ps2System {
             crate::dlog!("PS2:   speed {:.1} fps ({:.0}% of full) | per frame: EE {:.2} M cycles ({:.0}% idle-skipped), IOP {:.0}% idle-skipped, VU1 {:.0} k cycles, GS {} prims",
                 fps, 100.0 * fps / 59.94, ee / frames / 1e6, pct(cur.2 - se0, ee), pct(cur.4 - si0, (cur.3 - iop0) as f64),
                 (cur.5 - vu0) as f64 / frames / 1e3, self.hw.gs.prims);
-            crate::dlog!("PS2:   GS drawing {:.1} ms a frame ({:.2} M pixels a frame, {} threads)",
-                (cur.6 - gs0) as f64 / frames / 1e6, (cur.7 - px0) as f64 / frames / 1e6, gs::draw::draw_threads());
+            crate::dlog!("PS2:   GS drawing {:.1} ms a frame ({:.2} M pixels, {:.0} batches a frame, {} threads)",
+                (cur.6 - gs0) as f64 / frames / 1e6, (cur.7 - px0) as f64 / frames / 1e6,
+                (self.hw.gs.flushes - self.gs_flushes_last) as f64 / frames, gs::draw::draw_threads());
+            self.gs_flushes_last = self.hw.gs.flushes;
+            let ms = |k: usize, now: u64| (now - self.host_last[k]) as f64 / frames / 1e6;
+            let vu = self.hw.vu1.host_ns + self.hw.vu0.host_ns;
+            crate::dlog!("PS2:   host time a frame: total {:.1} ms = EE {:.1} + IOP {:.1} + DMA/VIF/VU/GS/SPU2 {:.1} (VU {:.1}, GS drawing {:.1}) + other {:.1} (display)",
+                ms(3, self.host_ns[3]), ms(0, self.host_ns[0]), ms(1, self.host_ns[1]), ms(2, self.host_ns[2]), ms(4, vu),
+                (cur.6 - gs0) as f64 / frames / 1e6,
+                ms(3, self.host_ns[3]) - ms(0, self.host_ns[0]) - ms(1, self.host_ns[1]) - ms(2, self.host_ns[2]));
         }
         self.last_report = Some((now, cur.0, cur.1, cur.2, cur.3, cur.4, cur.5, cur.6, cur.7));
+        self.host_last = [self.host_ns[0], self.host_ns[1], self.host_ns[2], self.host_ns[3], self.hw.vu1.host_ns + self.hw.vu0.host_ns];
         let (e, i, h) = (&self.ee, &self.iop, &self.hw);
         crate::dlog!("PS2: frame {} EE pc {:08X} ra {:08X} status {:08X} cause {:08X} | IOP pc {:08X} ra {:08X} sr {:08X}",
             self.current_frame + 1, e.pc, e.gpr[31] as u32, e.cop0[12], e.cause(), i.pc, i.regs[31], i.cop0[12]);
@@ -477,6 +517,10 @@ impl Ps2System {
                 ip.counts, ip.errors, ip.busy, ip.cmd, ip.ctrl, ip.fifo_in_len(), ip.bp, ip.fifo_out.len(),
                 self.hw.dmac.ch[dmac::IPU_FROM].chcr, self.hw.dmac.ch[dmac::IPU_FROM].qwc, self.hw.dmac.ch[dmac::IPU_TO].chcr, self.hw.dmac.ch[dmac::IPU_TO].qwc);
             crate::dlog!("PS2:   SPU2 {}", self.hw.spu2.summary());
+            if let Some((a, l)) = crate::common::cpu::r5900::watch() {
+                crate::dlog!("PS2:   watch {:08X}+{:X}, last writes:", a, l);
+                for w in crate::common::cpu::r5900::watch_take() { crate::dlog!("PS2:     {}", w); }
+            }
             crate::dlog!("PS2:   SIF RPC recent: {}", r.recent.iter().cloned().collect::<Vec<_>>().join(" | "));
             let w: Vec<String> = r.waiting.values().map(|(t, n)| format!("{t} (call #{n} of {})", r.calls)).collect();
             crate::dlog!("PS2:   SIF RPC still waiting for an answer: {}", if w.is_empty() { "none".to_string() } else { w.join(", ") });
@@ -550,6 +594,7 @@ impl Ps2System {
 
 impl System for Ps2System {
     fn run_frame(&mut self, input: u32) {
+        let t_frame = std::time::Instant::now();
         self.set_input(input);
         if std::mem::take(&mut self.gs_rec_due) {
             self.hw.gs.flush();
@@ -557,6 +602,10 @@ impl System for Ps2System {
             if let Ok(state) = bincode::serde::encode_to_vec(&self.hw.gs, cfg) {
                 self.hw.gs.rec = Some((state, Vec::new()));
                 self.gs_rec_left = 2;
+            }
+            let h = &self.hw;
+            if let Ok(state) = bincode::serde::encode_to_vec((&h.vif1, &h.vu1, &h.vu1_code, &h.vu1_data), cfg) {
+                self.hw.vif_rec = Some((state, Vec::new()));
             }
         }
         for line in 0..LINES { self.run_line(line); }
@@ -571,9 +620,15 @@ impl System for Ps2System {
                         let _ = std::fs::write(d.join("GD_EMU").join("PS2").join("gs_frame.bin"), file);
                     }
                 }
+                if let Some((state, ev)) = self.hw.vif_rec.take() {
+                    if let Some(d) = crate::common::debug_log::data_dir() {
+                        let _ = std::fs::write(d.join("GD_EMU").join("PS2").join("vif1_frame.bin"), hw::vif_frame_file(&state, &ev));
+                    }
+                }
             }
         }
         self.size = self.hw.gs.display(&mut self.frame);
+        self.host_ns[3] += t_frame.elapsed().as_nanos() as u64;
         self.hw.sio2.card_out = self.hw.sio2.card_out.saturating_sub(1);
         if debug() && self.current_frame % 300 == 299 { self.report(); }
         self.current_frame += 1;
@@ -709,9 +764,9 @@ impl System for Ps2System {
     fn has_battery(&self) -> bool { false }
 
     fn set_option(&mut self, key: &str, value: i64) {
-        if key == "ee_jit" { self.jit_on = value != 0; }
+        if key == "ee_jit" { self.jit_on = value != 0 && crate::common::cpu::r5900::watch().is_none(); }
         if key == "debug_report" {
-            if value != 0 { crate::dlog!("PS2 core: patch {PATCH}"); }
+            if value != 0 { crate::dlog!("PS2 core: patch {PATCH} (INT0 {:?}, VU stalls {})", int0_mode(), if std::env::var("PS2_VU_STALLS").is_ok() { "pcsx2" } else { "old" }); }
             DEBUG.store(value != 0, std::sync::atomic::Ordering::Relaxed);
             self.hw.debug = value != 0;
             self.ee.set_trace(value != 0);

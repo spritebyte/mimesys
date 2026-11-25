@@ -176,7 +176,7 @@ func init_menus():
 	emu_menu.add_separator()
 	emu_menu.add_item("Cheats...   (Ctrl+H)", EmuMenuID.CHEATS)
 	emu_menu.add_item("Switch Disk Side (Famicom Disk System)   (F4)", EmuMenuID.DISK_SIDE)
-	emu_menu.add_item("Memory Cards (Dreamcast, PlayStation)...", EmuMenuID.MEMORY_CARDS)
+	emu_menu.add_item("Memory Cards (Dreamcast, PlayStation, PS2)...", EmuMenuID.MEMORY_CARDS)
 
 	emu_menu.id_pressed.connect(_on_emu_menu)
 
@@ -520,7 +520,7 @@ func _apply_display_options() -> void:
 	emu_system.set_debug_log(ProjectSettings.globalize_path("user://debug_%s.log" % sys) if dbg_on or speed_log else "")
 	emu_system.set_data_dir(ProjectSettings.globalize_path("user://"))
 	emu_system.set_option("debug_report", 1 if dbg_on else 0)
-	_analog_on = sys == "ps1" or sys == "dc"
+	_analog_on = sys == "ps1" or sys == "ps2" or sys == "dc"
 	if sys == "ps1":
 		emu_system.set_option("ps1_pad", ["dualshock", "analog", "digital"].find(str(AppSettings.get_option(sys, "ps1_pad"))))
 		emu_system.set_option("ps1_rumble", 1 if AppSettings.get_option(sys, "ps1_rumble") else 0)

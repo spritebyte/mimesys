@@ -30,6 +30,11 @@ pub const ST_O: u32 = 8;
 pub const ST_I: u32 = 16;
 pub const ST_D: u32 = 32;
 
+/// A PATH1 transfer under way: the next quadword, the current GIFtag's quadwords left
+/// (None: a tag is next), whether that tag ends the packet, the cycle of the next read
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct Kick { addr: u32, left: Option<u32>, eop: bool, at: u64, tags: u32 }
+
 #[derive(Clone, Copy, Serialize, Deserialize, Default)]
 struct Flags { at: u64, mac: u32, stat: u32, clip: Option<u32> }
 
@@ -50,8 +55,15 @@ pub struct Vu {
     pub tpc: u32,
     pub running: bool,
     /// cycle count of the current program
-    cycle: u64,
-    vf_ready: [u64; 32],
+    pub cycle: u64,
+    /// (unused: keeps the serialized layout of patch 0270 and earlier)
+    vf_ready_old: [u64; 32],
+    acc_ready_old: u64,
+    /// per register and field (x y z w): the cycle an FMAC's result lands (always 0
+    /// between programs)
+    #[serde(skip)]
+    vf_ready: [[u64; 4]; 32],
+    #[serde(skip)]
     acc_ready: u64,
     flags: VecDeque<Flags>,
     q_pend: Option<(u64, u32, u32)>,
@@ -60,6 +72,21 @@ pub struct Vu {
     branch: Option<u32>,
     /// E bit seen: stop after the next pair
     ending: u8,
+    /// XGKICK in progress (PATH1 reads the packet a quadword a cycle while the program
+    /// goes on, so stores just after the kick still make it into the packet)
+    #[serde(default)]
+    kick: Option<Kick>,
+    /// debugging: where the last program started
+    #[serde(skip)]
+    pub start_pc: u32,
+    /// host time spent running programs (ns)
+    #[serde(skip)]
+    pub host_ns: u64,
+    /// debugging: copy the VU and its data memory as program number `snap_at` starts
+    #[serde(skip)]
+    pub snap_at: u64,
+    #[serde(skip)]
+    pub snap: Option<(Box<Vu>, Vec<u8>, Vec<u8>)>,
     /// VU1: VIF1's TOP / ITOP, read by XTOP / XITOP
     pub top: u16,
     pub itop: u16,
@@ -81,9 +108,9 @@ impl Vu {
         vf[0][3] = 0x3F80_0000;
         Self {
             vu1, vf, vi: [0; 16], acc: [0; 4], q: 0, p: 0, i: 0, r: 0, status: 0, mac: 0, clip: 0,
-            pc: 0, tpc: 0, running: false, cycle: 0, vf_ready: [0; 32], acc_ready: 0,
+            pc: 0, tpc: 0, running: false, cycle: 0, vf_ready: [[0; 4]; 32], acc_ready: 0, vf_ready_old: [0; 32], acc_ready_old: 0,
             flags: VecDeque::new(), q_pend: None, p_pend: None, branch: None, ending: 0,
-            top: 0, itop: 0, programs: 0, kicks: 0, illegal: 0, total_cycles: 0,
+            snap_at: 0, snap: None, host_ns: 0, start_pc: 0, kick: None, top: 0, itop: 0, programs: 0, kicks: 0, illegal: 0, total_cycles: 0,
         }
     }
 
@@ -135,7 +162,7 @@ impl Vu {
         if let Some((at, _)) = self.p_pend { self.cycle = self.cycle.max(at); }
         self.land_q();
         self.land_p();
-        self.vf_ready = [0; 32];
+        self.vf_ready = [[0; 4]; 32];
         self.acc_ready = 0;
         self.cycle = 0;
     }
@@ -169,6 +196,7 @@ impl Vu {
 
     /// Start a micro program at `addr` (bytes)
     pub fn start(&mut self, addr: u32) {
+        self.start_pc = addr;
         self.pc = addr;
         self.running = true;
         self.branch = None;
@@ -179,17 +207,25 @@ impl Vu {
     /// Run until the program ends. `code` / `data` are this VU's memories; XGKICK
     /// packets go to `path1`.
     pub fn run(&mut self, code: &[u8], data: &mut [u8], path1: &mut Vec<u128>) {
+        if self.snap_at != 0 && self.snap_at == self.programs && self.snap.is_none() {
+            let mut me = self.clone();
+            me.snap_at = 0;
+            self.snap = Some((Box::new(me), data.to_vec(), code.to_vec()));
+        }
         let start = self.cycle;
+        let t0 = std::time::Instant::now();
         while self.running {
             self.step(code, data, path1);
             if self.cycle - start > MAX_CYCLES { self.running = false; }
         }
+        self.pump_kick(data, path1, u64::MAX);
         self.tpc = self.pc;
         self.total_cycles += self.cycle - start;
+        self.host_ns += t0.elapsed().as_nanos() as u64;
         self.settle();
     }
 
-    fn step(&mut self, code: &[u8], data: &mut [u8], path1: &mut Vec<u128>) {
+    pub fn step(&mut self, code: &[u8], data: &mut [u8], path1: &mut Vec<u128>) {
         let a = self.pc as usize & (code.len() - 1) & !7;
         let lo = u32::from_le_bytes(code[a..a + 4].try_into().unwrap());
         let hi = u32::from_le_bytes(code[a + 4..a + 8].try_into().unwrap());
@@ -198,14 +234,37 @@ impl Vu {
         self.pc = self.pc.wrapping_add(8);
 
         // stalls: VF sources an FMAC is still writing
+        // (per field, as PCSX2 does; vf0 never stalls; ACC chains don't stall)
         let mut ready = 0;
-        for r in upper_reads(hi) { ready = ready.max(self.vf_ready[r]); }
-        if hi & (1 << 31) == 0 { for r in lower_reads(lo) { ready = ready.max(self.vf_ready[r]); } }
-        if upper_reads_acc(hi) { ready = ready.max(self.acc_ready); }
+        let fine = pcsx2_stalls();
+        let mut need = |(r, m): (usize, u32)| {
+            if m != 0 && (r != 0 || !fine) {
+                let m = if fine { m } else { 0xF };
+                let t = &self.vf_ready[r];
+                for k in 0..4 { if m & (8 >> k) != 0 { ready = ready.max(t[k]); } }
+            }
+        };
+        let lower = hi & (1 << 31) == 0;
+        if fine {
+            let [a, b] = upper_reads(hi);
+            need(a);
+            need(b);
+            if lower {
+                let [a, b] = lower_reads(lo);
+                need(a);
+                need(b);
+            }
+        } else {
+            // patch 0270's lists: whole registers, vf0 included
+            for r in upper_reads_old(hi).into_iter().flatten() { need((r, 0xF)); }
+            if lower { for r in lower_reads_old(lo).into_iter().flatten() { need((r, 0xF)); } }
+        }
+        if !fine && upper_reads_acc(hi) { ready = ready.max(self.acc_ready); }
         self.cycle = self.cycle.max(ready);
         self.land_flags();
         self.land_q();
         self.land_p();
+        if self.kick.is_some() { self.pump_kick(data, path1, self.cycle); }
 
         let up = self.upper(hi);
         if hi & (1 << 31) != 0 {
@@ -231,7 +290,16 @@ impl Vu {
                 if r != 0 {
                     for k in 0..4 { if dest & (8 >> k) != 0 { self.vf[r][k] = v[k]; } }
                 }
-                if flags { self.vf_ready[r] = self.cycle + MAC_LATENCY; }
+                // every upper result takes the FMAC's 4 cycles (MAX / MINI / FTOI / ITOF /
+                // ABS too, though they set no flags)
+                if pcsx2_stalls() {
+                    if r != 0 {
+                        for k in 0..4 { if dest & (8 >> k) != 0 { self.vf_ready[r][k] = self.cycle + MAC_LATENCY; } }
+                    }
+                } else if flags {
+                    // (the model games ran with up to 0270: whole register, flag-setting ops)
+                    self.vf_ready[r] = [self.cycle + MAC_LATENCY; 4];
+                }
             }
             Dst::Acc(dest) => {
                 for k in 0..4 { if dest & (8 >> k) != 0 { self.acc[k] = v[k]; } }
@@ -594,9 +662,16 @@ impl Vu {
 
     fn set_vi(&mut self, r: usize, v: u32) { if r != 0 { self.vi[r & 15] = v as u16; } }
 
+    /// A lower instruction's VF result (LQ, MOVE, MR32, MFIR, MFP, RGET...): readers
+    /// stall 4 cycles for it too (PCSX2's analysis)
     fn write_vf(&mut self, r: usize, dest: u32, v: [u32; 4]) {
         if r == 0 { return; }
-        for k in 0..4 { if dest & (8 >> k) != 0 { self.vf[r][k] = v[k]; } }
+        for k in 0..4 {
+            if dest & (8 >> k) != 0 {
+                self.vf[r][k] = v[k];
+                if pcsx2_stalls() { self.vf_ready[r][k] = self.cycle + MAC_LATENCY; }
+            }
+        }
     }
 
     fn load(&self, data: &[u8], qa: u32) -> [u32; 4] {
@@ -610,27 +685,55 @@ impl Vu {
         }
     }
 
-    /// XGKICK: the GIF packet at `qa` (quadwords) goes to the GS as PATH1
+    /// XGKICK: the GIF packet at `qa` (quadwords) goes to the GS as PATH1. The transfer
+    /// runs alongside the program, a quadword a cycle; a second XGKICK waits for the first
     fn xgkick(&mut self, data: &[u8], qa: u32, path1: &mut Vec<u128>) {
         self.kicks += 1;
-        let qmask = (data.len() / 16 - 1) as u32;
-        let mut a = qa & qmask;
-        let rd = |a: u32| -> u128 { u128::from_le_bytes(data[a as usize * 16..a as usize * 16 + 16].try_into().unwrap()) };
-        for _ in 0..64 {
-            let tag = rd(a);
-            path1.push(tag);
-            a = (a + 1) & qmask;
-            let nloop = (tag & 0x7FFF) as u32;
-            let eop = tag >> 15 & 1 != 0;
-            let flg = (tag >> 58 & 3) as u32;
-            let nreg = match (tag >> 60 & 15) as u32 { 0 => 16, n => n };
-            let n = match flg { 0 => nloop * nreg, 1 => (nloop * nreg).div_ceil(2), _ => nloop };
-            for _ in 0..n.min(qmask + 1) {
-                path1.push(rd(a));
-                a = (a + 1) & qmask;
-            }
-            if eop { break; }
+        if self.kick.is_some() {
+            self.pump_kick(data, path1, u64::MAX);
         }
+        let qmask = (data.len() / 16 - 1) as u32;
+        self.kick = Some(Kick { addr: qa & qmask, left: None, eop: false, at: self.cycle + 1, tags: 0 });
+    }
+
+    /// Move the kicked packet's quadwords due by `until` (cycles); a wait (u64::MAX)
+    /// finishes it and the VU stalls till then
+    fn pump_kick(&mut self, data: &[u8], path1: &mut Vec<u128>, until: u64) {
+        let qmask = (data.len() / 16 - 1) as u32;
+        let rd = |a: u32| -> u128 { u128::from_le_bytes(data[a as usize * 16..a as usize * 16 + 16].try_into().unwrap()) };
+        let Some(mut k) = self.kick else { return };
+        let mut guard = 0u32;
+        loop {
+            if k.at > until { self.kick = Some(k); return; }
+            guard += 1;
+            if guard > (qmask + 1) * 4 { break; }
+            match k.left {
+                None => {
+                    let tag = rd(k.addr);
+                    path1.push(tag);
+                    k.addr = (k.addr + 1) & qmask;
+                    k.tags += 1;
+                    let nloop = (tag & 0x7FFF) as u32;
+                    k.eop = tag >> 15 & 1 != 0;
+                    let flg = (tag >> 58 & 3) as u32;
+                    let nreg = match (tag >> 60 & 15) as u32 { 0 => 16, n => n };
+                    let n = match flg { 0 => nloop * nreg, 1 => (nloop * nreg).div_ceil(2), _ => nloop };
+                    let n = n.min(qmask + 1);
+                    k.left = if n > 0 { Some(n) } else { None };
+                    if n == 0 && (k.eop || k.tags >= 64) { break; }
+                }
+                Some(n) => {
+                    path1.push(rd(k.addr));
+                    k.addr = (k.addr + 1) & qmask;
+                    k.left = if n > 1 { Some(n - 1) } else { None };
+                    if n == 1 && (k.eop || k.tags >= 64) { break; }
+                }
+            }
+            k.at += 1;
+        }
+        // done: a waiting program stalls until the transfer ended
+        if until == u64::MAX { self.cycle = self.cycle.max(k.at); }
+        self.kick = None;
     }
 }
 
@@ -667,20 +770,29 @@ fn vu_sqrt(x: u32) -> (u32, u32) {
     (from_f64(to_f64(x & 0x7FFF_FFFF).sqrt()).0, st)
 }
 
-/// VF registers an upper instruction reads (for stalls)
-fn upper_reads(op: u32) -> Vec<usize> {
+/// VF registers and fields (x 8, y 4, z 2, w 1) an upper instruction reads (for stalls)
+fn upper_reads(op: u32) -> [(usize, u32); 2] {
     let ft = (op >> 16 & 31) as usize;
     let fs = (op >> 11 & 31) as usize;
+    let dest = op >> 21 & 15;
+    let bc = 8 >> (op & 3);
     let f = op & 0x3F;
     if f >= 0x3C {
         let n = (op >> 6 & 31) << 2 | (op & 3);
-        if n == 0x2F { return vec![]; }
-        if (0x10..=0x17).contains(&n) || n == 0x1D { return vec![fs]; }
-        return vec![fs, ft];
+        return match n {
+            0x00..=0x0F | 0x18..=0x1B => [(fs, dest), (ft, bc)],
+            0x10..=0x17 | 0x1C..=0x27 => [(fs, dest), (0, 0)],
+            0x1F => [(fs, 0xE), (ft, 1)],                         // CLIP
+            0x2E => [(fs, 0xE), (ft, 0xE)],                       // OPMULA
+            0x2F => [(0, 0), (0, 0)],
+            _ => [(fs, dest), (ft, dest)],
+        };
     }
     match f {
-        0x1C..=0x27 => vec![fs],
-        _ => vec![fs, ft],
+        0x00..=0x1B => [(fs, dest), (ft, bc)],
+        0x1C..=0x27 => [(fs, dest), (0, 0)],
+        0x2E => [(fs, 0xE), (ft, 0xE)],                           // OPMSUB
+        _ => [(fs, dest), (ft, dest)],
     }
 }
 fn upper_reads_acc(op: u32) -> bool {
@@ -691,22 +803,75 @@ fn upper_reads_acc(op: u32) -> bool {
     }
     matches!(f, 0x08..=0x0F | 0x21 | 0x23 | 0x25 | 0x27 | 0x29 | 0x2D | 0x2E)
 }
-/// VF registers a lower instruction reads
-fn lower_reads(op: u32) -> Vec<usize> {
+
+/// PS2_VU_STALLS=pcsx2: PCSX2's stall rules (per field, no vf0 / ACC stalls, lower VF
+/// writes +4). Off by default: with them (patch 0271) Spy Hunter and Kingdom Hearts drew
+/// stretched triangles, so some other timing still depends on the old model
+fn pcsx2_stalls() -> bool {
+    static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *P.get_or_init(|| std::env::var("PS2_VU_STALLS").map_or(false, |v| v == "pcsx2"))
+}
+
+/// Patch 0270's read lists (registers, no fields)
+fn upper_reads_old(op: u32) -> [Option<usize>; 2] {
+    let ft = (op >> 16 & 31) as usize;
+    let fs = (op >> 11 & 31) as usize;
+    let f = op & 0x3F;
+    if f >= 0x3C {
+        let n = (op >> 6 & 31) << 2 | (op & 3);
+        if n == 0x2F { return [None, None]; }
+        if (0x10..=0x17).contains(&n) || n == 0x1D { return [Some(fs), None]; }
+        return [Some(fs), Some(ft)];
+    }
+    match f {
+        0x1C..=0x27 => [Some(fs), None],
+        _ => [Some(fs), Some(ft)],
+    }
+}
+fn lower_reads_old(op: u32) -> [Option<usize>; 2] {
     let ft = (op >> 16 & 31) as usize;
     let fs = (op >> 11 & 31) as usize;
     match op >> 25 {
-        0x01 => vec![fs],
+        0x01 => [Some(fs), None],
         0x40 if op & 0x3C == 0x3C => {
             let n = (op >> 6 & 31) << 2 | (op & 3);
             match n {
-                0x30 | 0x31 | 0x35 | 0x37 | 0x3C | 0x42 | 0x43 => vec![fs],
-                0x38 | 0x3A => vec![fs, ft],
-                0x39 => vec![ft],
-                0x70..=0x7E => vec![fs],
-                _ => vec![],
+                0x30 | 0x31 | 0x35 | 0x37 | 0x3C | 0x42 | 0x43 => [Some(fs), None],
+                0x38 | 0x3A => [Some(fs), Some(ft)],
+                0x39 => [Some(ft), None],
+                0x70..=0x7E => [Some(fs), None],
+                _ => [None, None],
             }
         }
-        _ => vec![],
+        _ => [None, None],
+    }
+}
+
+/// VF registers and fields a lower instruction reads
+fn lower_reads(op: u32) -> [(usize, u32); 2] {
+    let ft = (op >> 16 & 31) as usize;
+    let fs = (op >> 11 & 31) as usize;
+    let dest = op >> 21 & 15;
+    let fsf = 8 >> (op >> 21 & 3);
+    let ftf = 8 >> (op >> 23 & 3);
+    let none = [(0, 0), (0, 0)];
+    match op >> 25 {
+        0x01 => [(fs, dest), (0, 0)],
+        0x40 if op & 0x3C == 0x3C => {
+            let n = (op >> 6 & 31) << 2 | (op & 3);
+            match n {
+                0x30 | 0x35 | 0x37 => [(fs, dest), (0, 0)],
+                0x31 => [(fs, 0xF), (0, 0)],
+                0x3C | 0x42 | 0x43 | 0x78..=0x7E => [(fs, fsf), (0, 0)],
+                0x38 | 0x3A => [(fs, fsf), (ft, ftf)],
+                0x39 => [(ft, ftf), (0, 0)],
+                0x70..=0x73 => [(fs, 0xE), (0, 0)],
+                0x74 => [(fs, 0xC), (0, 0)],
+                0x75 => [(fs, 0xA), (0, 0)],
+                0x76 => [(fs, 0xF), (0, 0)],
+                _ => none,
+            }
+        }
+        _ => none,
     }
 }

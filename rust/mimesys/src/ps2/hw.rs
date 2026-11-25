@@ -193,6 +193,24 @@ pub struct Hw {
     pub gif_mode: u32,
     #[serde(default)]
     pub gif_pause: bool,
+    /// debugging: recording VIF1 over a frame (vif1_frame.bin): the VIF1 / VU1 state at
+    /// its start, then every feed (words, PATH3 running, PATH3 held) and VU1 start
+    #[serde(skip)]
+    pub vif_rec: Option<(Vec<u8>, Vec<VifEvent>)>,
+}
+
+/// One recorded VIF1 / VU1 event
+#[derive(Clone, Serialize, Deserialize)]
+pub enum VifEvent { Feed(Vec<u32>, bool, bool), Run(u32) }
+
+/// "VIF1", then bincode of (state, events); state = (Vif, Vu, code, data)
+pub fn vif_frame_file(state: &[u8], ev: &[VifEvent]) -> Vec<u8> {
+    let cfg = bincode::config::standard().with_fixed_int_encoding();
+    let mut out = b"VIF1".to_vec();
+    out.extend_from_slice(&(state.len() as u64).to_le_bytes());
+    out.extend_from_slice(state);
+    if let Ok(e) = bincode::serde::encode_to_vec(ev, cfg) { out.extend_from_slice(&e); }
+    out
 }
 
 impl Hw {
@@ -217,6 +235,7 @@ impl Hw {
             irq_written: false,
             gif_mode: 0,
             gif_pause: false,
+            vif_rec: None,
             dmac: Dmac::default(),
             timers: Default::default(),
             sif: Sif::default(),
@@ -565,6 +584,9 @@ fn wr32m(m: &mut [u8], o: usize, v: u32, mask: u32) {
 }
 
 impl EeBus for EeView<'_> {
+    /// Reading INTC_STAT with a pending INT0: the interrupt follows straight after (a
+    /// poll may see the bit, but the kernel's handler still runs before the code moves on)
+    fn int0_on_read(&mut self, pa: u32) -> bool { pa == 0x1000_F000 && super::int0_mode().1 && self.0.int0() }
     fn irq_lines(&mut self) -> Option<(bool, bool)> {
         let h = &mut *self.0;
         if !std::mem::take(&mut h.irq_written) { return None; }
@@ -713,6 +735,9 @@ impl Hw {
         let mut gs = Vec::new();
         let gif_running = self.dmac.ch[super::dmac::GIF].chcr & 0x100 != 0;
         let gif_held = self.gif_mode & 1 != 0 || self.gif_pause;
+        if vif1 {
+            if let Some((_, ev)) = &mut self.vif_rec { ev.push(VifEvent::Feed(words.to_vec(), gif_running, gif_held)); }
+        }
         let irq = if vif1 {
             let mut cx = VifCtx { code: &mut self.vu1_code, data: &mut self.vu1_data, vu: &mut self.vu1, gs: &mut gs, gif_running, gif_held };
             self.vif1.feed(words, &mut cx)
@@ -729,6 +754,7 @@ impl Hw {
     }
 
     pub fn run_vu1(&mut self, addr: u32) {
+        if let Some((_, ev)) = &mut self.vif_rec { ev.push(VifEvent::Run(addr)); }
         let mut gs = Vec::new();
         self.vu1.start(addr);
         self.vu1.run(&self.vu1_code, &mut self.vu1_data, &mut gs);

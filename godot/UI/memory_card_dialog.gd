@@ -1,23 +1,29 @@
 class_name MemoryCardDialog
 extends AcceptDialog
-## Emulation > Memory Cards (Dreamcast and PlayStation). Each card is a 128 KB file:
-## - Dreamcast: user://GD_EMU/DC/VMU/<name>.bin, the raw VMU image (option "dc_card").
+## Emulation > Memory Cards (Dreamcast, PlayStation, PlayStation 2). Each card is a file:
+## - Dreamcast: user://GD_EMU/DC/VMU/<name>.bin, the raw 128 KB VMU image (option "dc_card").
 ## - PlayStation: user://GD_EMU/PS1/MemoryCards/<name>.mcd (also .mcr / .bin / .mem: the
-##   raw card image other emulators use), slot 1 (option "ps1_card").
+##   raw 128 KB card image other emulators use), slot 1 (option "ps1_card").
+## - PlayStation 2: user://GD_EMU/PS2/MemoryCards/<name>.ps2, the raw 8 MB card with its
+##   ECC bytes (8 650 752 bytes, PCSX2's .ps2 layout), slot 1 (option "ps2_card"). A new one
+##   is blank: the PS2's browser (or a game) formats it.
 ## A dump dropped in the folder shows up. Swapping while a game runs pulls the old card out
 ## for a moment, as on the console.
 ##
 ## main.gd: game_loaded(...) after a game starts, save_if_dirty() on the save timer,
 ## game_stopped() before power off, open_dialog() from the menu.
 
-const CARD_SIZE := 131072
-## per system: folder, option, new-card extension, extensions listed, name
+## per system: folder, option, new-card extension, extensions listed, name, card size and
+## how a new card starts (byte value)
 const SYSTEMS := {
 	"dc": {"root": "user://GD_EMU/DC/VMU", "option": "dc_card", "ext": "bin", "exts": ["bin"],
-		"name": "Dreamcast", "slot": "controller 1's slot"},
+		"name": "Dreamcast", "slot": "controller 1's slot", "size": 131072, "blank": 0},
 	"ps1": {"root": "user://GD_EMU/PS1/MemoryCards", "option": "ps1_card", "ext": "mcd",
-		"exts": ["mcd", "mcr", "bin", "mem"], "name": "PlayStation", "slot": "slot 1"},
+		"exts": ["mcd", "mcr", "bin", "mem"], "name": "PlayStation", "slot": "slot 1", "size": 131072, "blank": 0},
+	"ps2": {"root": "user://GD_EMU/PS2/MemoryCards", "option": "ps2_card", "ext": "ps2",
+		"exts": ["ps2"], "name": "PlayStation 2", "slot": "slot 1", "size": 8650752, "blank": 255},
 }
+
 
 var _emu: Variant = null           # the EmuSystem, while a game with cards runs
 var _mutex: Mutex = null
@@ -33,6 +39,14 @@ var _new_name := LineEdit.new()
 var _insert := Button.new()
 var _delete := Button.new()
 var _confirm := ConfirmationDialog.new()
+
+
+func _card_size() -> int:
+	return SYSTEMS[_system]["size"]
+
+
+func _size_text() -> String:
+	return "8 MB" if _card_size() > 1000000 else "128 KB"
 
 
 func _init() -> void:
@@ -140,8 +154,8 @@ func game_loaded(emu: Variant, mutex: Mutex, system_id: String) -> void:
 		_emu.insert_memory_card(data, false)
 		_mutex.unlock()
 	else:
-		if system_id == "ps1":
-			# a freshly formatted card (the Dreamcast keeps the one from its save file)
+		if system_id == "ps1" or system_id == "ps2":
+			# a fresh card (the Dreamcast keeps the one from its save file)
 			_mutex.lock()
 			_emu.insert_memory_card(PackedByteArray(), false)
 			_mutex.unlock()
@@ -181,7 +195,7 @@ func _write_current() -> void:
 	_mutex.lock()
 	var data: PackedByteArray = _emu.get_memory_card()
 	_mutex.unlock()
-	if data.size() != CARD_SIZE:
+	if data.size() != _card_size():
 		return
 	var f := FileAccess.open(_path(_current()), FileAccess.WRITE)
 	if f:
@@ -202,7 +216,9 @@ func _refresh() -> void:
 		var info: PackedStringArray = EmuSystem.card_info(_system, FileAccess.get_file_as_bytes(_path(n)))
 		var text := n
 		if info.is_empty():
-			text += "   (not a 128 KB card image)"
+			text += "   (not a %s card image)" % _size_text()
+		elif _system == "ps2":
+			text += "   " + info[0]
 		else:
 			var saves := info.slice(1)
 			text += "   %s blocks free" % info[0]
@@ -227,8 +243,8 @@ func _put_in_slot() -> void:
 	if n == "" or n == _current():
 		return
 	var data := FileAccess.get_file_as_bytes(_path(n))
-	if data.size() != CARD_SIZE:
-		_status.text = "\"%s\" isn't a 128 KB card image." % n
+	if data.size() != _card_size():
+		_status.text = "\"%s\" isn't a %s card image." % [n, _size_text()]
 		return
 	# the old card's latest contents first
 	_write_current()
@@ -253,7 +269,9 @@ func _create() -> void:
 		return
 	DirAccess.make_dir_recursive_absolute(_root())
 	var data := PackedByteArray()
-	data.resize(CARD_SIZE)   # all zero: formatted the first time it's used
+	data.resize(_card_size())   # formatted the first time it's used
+	if SYSTEMS[_system]["blank"] != 0:
+		data.fill(SYSTEMS[_system]["blank"])   # PS2: erased flash
 	var f := FileAccess.open(_path(n), FileAccess.WRITE)
 	if f == null:
 		_status.text = "Couldn't create \"%s\"." % n

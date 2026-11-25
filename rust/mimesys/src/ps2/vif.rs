@@ -137,6 +137,9 @@ impl Vif {
 
     /// Feed one word of the stream; true if a finished command interrupts
     pub fn word(&mut self, w: u32, cx: &mut VifCtx) -> bool {
+        if self.left > 0 && self.vif1 && vif_log() && std::env::var_os("VIF_LOG_DATA").is_some() {
+            println!("VIF1   data {w:08X}");
+        }
         if self.left > 0 {
             self.data(w, cx);
             return self.left == 0 && self.done();
@@ -146,6 +149,10 @@ impl Vif {
         let num = (w >> 16) & 0xFF;
         self.code = w;
         self.buf.clear();
+        if self.vif1 && vif_log() {
+            println!("VIF1 {w:08X} cl {} wl {} mode {} tops {:X} top {:X} itop {:X} mask {:08X} vu programs {}",
+                self.cl, self.wl, self.mode, self.tops, self.top, self.itop, self.mask, cx.vu.programs);
+        }
         match cmd {
             0x00 => {}                                              // NOP
             0x01 => { self.cl = imm & 0xFF; self.wl = imm >> 8 & 0xFF; }
@@ -255,15 +262,12 @@ impl Vif {
         let qmask = (cx.data.len() / 16 - 1) as u32;
         let mut bitpos = 0usize;
         let buf = std::mem::take(&mut self.buf);
-        let mut take = |bits: usize| -> u32 {
-            let mut v = 0u64;
-            for k in 0..bits {
-                let p = bitpos + k;
-                let word = buf.get(p / 32).copied().unwrap_or(0);
-                v |= ((word >> (p % 32) & 1) as u64) << k;
-            }
-            bitpos += bits;
-            v as u32
+        // `bits` bits at bit `p` (elements never span more than two words)
+        let peek = |p: usize, bits: usize| -> u32 {
+            let lo = buf.get(p / 32).copied().unwrap_or(0) as u64;
+            let hi = buf.get(p / 32 + 1).copied().unwrap_or(0) as u64;
+            let v = (lo | hi << 32) >> (p % 32);
+            (if bits >= 32 { v } else { v & ((1u64 << bits) - 1) }) as u32
         };
         let ext = |v: u32, bits: u32| -> u32 {
             if bits == 32 || unsigned { v } else { ((v << (32 - bits)) as i32 >> (32 - bits)) as u32 }
@@ -276,12 +280,23 @@ impl Vif {
             let mut vals: [Option<u32>; 4] = [None; 4];
             if has_data {
                 if vl == 3 {
-                    let v = take(16);
+                    let v = peek(bitpos, 16); bitpos += 16;
                     vals = [Some((v & 0x1F) << 3), Some((v >> 5 & 0x1F) << 3), Some((v >> 10 & 0x1F) << 3), Some((v >> 15 & 1) << 7)];
                 } else {
                     let bits = 32 >> vl;
-                    let e: Vec<u32> = (0..=vn).map(|_| ext(take(bits as usize), bits)).collect();
-                    if vn == 0 { vals = [Some(e[0]); 4]; } else { for (k, &x) in e.iter().enumerate() { vals[k] = Some(x); } }
+                    let mut e = [0u32; 4];
+                    for x in e.iter_mut().take(vn as usize + 1) { *x = ext(peek(bitpos, bits as usize), bits); bitpos += bits as usize; }
+                    match vn {
+                        0 => vals = [Some(e[0]); 4],
+                        // V2 writes x y x y (games rely on the "undefined" half)
+                        1 => vals = [Some(e[0]), Some(e[1]), Some(e[0]), Some(e[1])],
+                        // V3 runs as V4: w is the next element in the stream (not consumed)
+                        2 => {
+                            let w = (bitpos + bits as usize <= buf.len() * 32).then(|| ext(peek(bitpos, bits as usize), bits));
+                            vals = [Some(e[0]), Some(e[1]), Some(e[2]), w];
+                        }
+                        _ => for (k, &x) in e.iter().enumerate().take(vn as usize + 1) { vals[k] = Some(x); },
+                    }
                 }
             }
             let cyc = in_cycle.min(3);
@@ -290,7 +305,7 @@ impl Vif {
                 let m = if masked { self.mask >> (cyc * 8 + k as u32 * 2) & 3 } else { 0 };
                 let v = match m {
                     0 => match vals[k] {
-                        Some(d) => match self.mode {
+                        Some(d) => match if vl == 3 { 0 } else { self.mode } {
                             1 => Some(d.wrapping_add(self.row[k])),
                             2 => { self.row[k] = self.row[k].wrapping_add(d); Some(self.row[k]) }
                             _ => Some(d),
@@ -305,4 +320,10 @@ impl Vif {
             }
         }
     }
+}
+
+/// Debugging (tests): VIF_LOG prints every VIF1 command
+fn vif_log() -> bool {
+    static L: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *L.get_or_init(|| std::env::var_os("VIF_LOG").is_some())
 }

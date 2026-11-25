@@ -160,6 +160,7 @@ impl Gs {
         let n = if threads != 0 { threads } else if batch.area < 40_000 { 1 } else { draw_threads() };
         let clut = &self.clut[..];
         if n <= 1 {
+            self.flushes += 1;
             let mut r = Raster { vram: &mut self.vram, clut, y0: 0, y1: 2048, pixels: 0 };
             for cmd in &batch.cmds { r.draw(cmd); }
             self.pixels += r.pixels;
@@ -175,31 +176,95 @@ impl Gs {
         let total = std::sync::atomic::AtomicU64::new(0);
         let vram = VramPtr(self.vram.as_mut_ptr());
         let cmds = &batch.cmds;
-        std::thread::scope(|sc| {
-            for _ in 0..n.min(nb) {
-                let (next, total, vram) = (&next, &total, &vram);
-                sc.spawn(move || {
-                    // SAFETY: bands are disjoint rows, so no two threads touch one pixel of a
-                    // frame or Z buffer; textures they read aren't written in this batch
-                    let mem = unsafe { std::slice::from_raw_parts_mut(vram.0, mem::VRAM_SIZE) };
-                    let mut r = Raster { vram: mem, clut, y0: 0, y1: 0, pixels: 0 };
-                    loop {
-                        let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if k >= nb { break; }
-                        r.y0 = lo + k as i32 * BAND;
-                        r.y1 = r.y0 + BAND;
-                        for cmd in cmds { if cmd.y1 >= r.y0 && cmd.y0 < r.y1 { r.draw(cmd); } }
-                    }
-                    total.fetch_add(r.pixels, std::sync::atomic::Ordering::Relaxed);
-                });
+        let work = || {
+            // SAFETY: bands are disjoint rows, so no two threads touch one pixel of a
+            // frame or Z buffer; textures they read aren't written in this batch
+            let mem = unsafe { std::slice::from_raw_parts_mut(vram.ptr(), mem::VRAM_SIZE) };
+            let mut r = Raster { vram: mem, clut, y0: 0, y1: 0, pixels: 0 };
+            loop {
+                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if k >= nb { break; }
+                r.y0 = lo + k as i32 * BAND;
+                r.y1 = r.y0 + BAND;
+                for cmd in cmds { if cmd.y1 >= r.y0 && cmd.y0 < r.y1 { r.draw(cmd); } }
             }
-        });
+            total.fetch_add(r.pixels, std::sync::atomic::Ordering::Relaxed);
+        };
+        // the pool's threads stay up between batches (starting threads for every batch
+        // cost more than drawing small ones)
+        pool().run(n.min(nb), &work);
+        self.flushes += 1;
         self.pixels += total.into_inner();
         self.draw_ns += t0.elapsed().as_nanos() as u64;
     }
 }
 
+/// Worker threads that run one job at a time with the caller
+struct Pool {
+    m: std::sync::Mutex<PoolState>,
+    go: std::sync::Condvar,
+    done: std::sync::Condvar,
+}
+struct PoolState { round: u64, want: usize, left: usize, job: Option<JobPtr> }
+#[derive(Clone, Copy)]
+struct JobPtr(*const (dyn Fn() + Sync + 'static));
+unsafe impl Send for JobPtr {}
+unsafe impl Sync for JobPtr {}
+
+fn pool() -> &'static Pool {
+    static P: std::sync::OnceLock<&'static Pool> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let p: &'static Pool = Box::leak(Box::new(Pool {
+            m: std::sync::Mutex::new(PoolState { round: 0, want: 0, left: 0, job: None }),
+            go: std::sync::Condvar::new(), done: std::sync::Condvar::new(),
+        }));
+        for id in 0..draw_threads().saturating_sub(1) {
+            std::thread::Builder::new().name(format!("gs-draw-{id}")).spawn(move || {
+                let mut seen = 0;
+                loop {
+                    let job = {
+                        let mut g = p.m.lock().unwrap();
+                        loop {
+                            if g.round != seen { seen = g.round; if id + 1 < g.want { break; } }
+                            g = p.go.wait(g).unwrap();
+                        }
+                        g.job.unwrap()
+                    };
+                    // SAFETY: run() waits for every thread it asked before it returns
+                    unsafe { (*job.0)() };
+                    let mut g = p.m.lock().unwrap();
+                    g.left -= 1;
+                    if g.left == 0 { p.done.notify_all(); }
+                }
+            }).expect("GS draw thread");
+        }
+        p
+    })
+}
+
+impl Pool {
+    /// Run `f` on `n` threads (this one included) and wait for all of them
+    fn run(&self, n: usize, f: &(dyn Fn() + Sync)) {
+        let helpers = n.saturating_sub(1).min(draw_threads().saturating_sub(1));
+        if helpers > 0 {
+            // SAFETY: the job is only used until `left` reaches 0, below
+            let job = JobPtr(unsafe { std::mem::transmute::<*const (dyn Fn() + Sync + '_), *const (dyn Fn() + Sync + 'static)>(f) });
+            let mut g = self.m.lock().unwrap();
+            g.round += 1; g.want = helpers + 1; g.left = helpers; g.job = Some(job);
+            drop(g);
+            self.go.notify_all();
+        }
+        f();
+        if helpers > 0 {
+            let mut g = self.m.lock().unwrap();
+            while g.left > 0 { g = self.done.wait(g).unwrap(); }
+            g.job = None;
+        }
+    }
+}
+
 struct VramPtr(*mut u8);
+impl VramPtr { fn ptr(&self) -> *mut u8 { self.0 } }
 unsafe impl Sync for VramPtr {}
 unsafe impl Send for VramPtr {}
 

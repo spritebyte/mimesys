@@ -206,3 +206,6 @@ not ported from an emulator. The RDRAM initialisation handshake (`ps2/hw.rs`) fo
 pseudo-code on its "EE RDRAM initialization" page. Play! (BSD-2-Clause, Jean-Philip
 Desjardins) and PCSX2 (GPL-3.0) were consulted for behaviour only; no code was copied.
 OpenPS2BIOS (MIT, Tamariba Devs) is used as a test BIOS and is not bundled.
+The GS memory layouts (`ps2/gs/mem.rs`) are the GS manual's block / column arrangements
+written as bit formulas; they were checked against the tables in PCSX2's GSTables.cpp in a
+local test, and no table or code from it is included.

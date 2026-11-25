@@ -150,6 +150,8 @@ pub struct Gs {
     /// time spent drawing (speed report)
     #[serde(skip)]
     pub draw_ns: u64,
+    /// batches drawn
+    pub flushes: u64,
 }
 
 impl Default for Gs {
@@ -201,7 +203,7 @@ impl Gs {
             regs: vec![0; 0x63], vram: vec![0; mem::VRAM_SIZE],
             queue: [Vertex::default(); 3], count: 0, fan_first: None,
             xfer: Transfer::default(), readback: Default::default(), rec: None, trace: false, gif: GifTag::default(),
-            clut: vec![0; 512], cbp: [0; 2], prims: 0, pixels: 0, batch: Default::default(), draw_ns: 0,
+            clut: vec![0; 512], cbp: [0; 2], prims: 0, pixels: 0, batch: Default::default(), draw_ns: 0, flushes: 0,
         }.with_reset_regs()
     }
 
