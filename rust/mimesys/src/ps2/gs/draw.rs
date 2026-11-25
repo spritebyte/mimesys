@@ -90,7 +90,8 @@ impl Gs {
             iip: attr >> 3 & 1 != 0,
             tbp: bits(tex0, 0, 14), tbw: bits(tex0, 14, 6), tpsm: bits(tex0, 20, 6),
             tcc: tex0 >> 34 & 1 != 0, tfx: bits(tex0, 35, 2),
-            cpsm, clut_base: if cpsm == 0 { (csa & 15) * 16 } else { csa * 16 },
+            // CPSM 1 (CT24) is a 32-bit CLUT too (PCSX2; KH1's logo screens use it)
+            cpsm: if cpsm == 1 { 0 } else { cpsm }, clut_base: if cpsm <= 1 { (csa & 15) * 16 } else { csa * 16 },
             wms: bits(cl, 0, 2), wmt: bits(cl, 2, 2),
             minu: bits(cl, 4, 10), maxu: bits(cl, 14, 10), minv: bits(cl, 24, 10), maxv: bits(cl, 34, 10),
             ta0: bits(texa, 0, 8) as i32, ta1: bits(texa, 32, 8) as i32, aem: texa >> 15 & 1 != 0,

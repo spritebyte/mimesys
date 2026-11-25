@@ -1337,6 +1337,7 @@ fn vif1_frame_replay() {
     let ((mut vif, mut vu, mut code, mut data), _): ((super::vif::Vif, super::vu::Vu, Vec<u8>, Vec<u8>), usize) =
         bincode::serde::decode_from_slice(&file[12..12 + n], cfg).unwrap();
     let (ev, _): (Vec<VifEvent>, usize) = bincode::serde::decode_from_slice(&file[12 + n..], cfg).unwrap();
+    println!("VIF1 at the start: {}", vif.feeding());
     let dump_at: u64 = std::env::var("VIF_DUMP").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let p0 = vu.programs;
     if dump_at > 0 { vu.snap_at = p0 + dump_at; }
@@ -1416,4 +1417,22 @@ fn vif1_frame_replay() {
         for q in &out { f.extend_from_slice(&q.to_le_bytes()); }
         std::fs::write("vif_dump_out.bin", f).unwrap();
     }
+}
+
+/// STCYCL WL 0 means 256: UNPACK S-8 with CL 1 / WL 0 reads one element and fills the rest
+/// (KH2 waited forever for VPS to drop after starting a game)
+#[test]
+fn unpack_wl_0_means_256() {
+    let mut vif = super::vif::Vif::new(true);
+    let mut vu = super::vu::Vu::new(true);
+    let mut code = vec![0u8; 0x4000];
+    let mut data = vec![0u8; 0x4000];
+    let mut gs = Vec::new();
+    {
+        let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs, gif_running: false, gif_held: false };
+        // STCYCL CL 1 WL 0; UNPACK S-32 x4 at 0: one word of data
+        for &w in &[0x0100_0001u32, 0x6004_0000, 7] { vif.word(w, &mut cx); }
+    }
+    assert_eq!(vif.stat() & 3, 0, "UNPACK done");
+    assert_eq!(u32::from_le_bytes(data[0..4].try_into().unwrap()), 7);
 }

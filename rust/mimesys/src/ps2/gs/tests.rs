@@ -240,12 +240,14 @@ fn uploads_to_the_high_bits_formats_are_4_and_8_bits_a_pixel() {
     // 8 pixels of 4 bits = 4 bytes (the quadword's rest is padding)
     up(&mut gs, 0x2C, 0x8765_4321);
     up(&mut gs, 0x24, 0xFEDC_BA98);
+    gs.flush();
     for x in 0..8u32 {
         let p = mem::read(&gs.vram, mem::PSMCT32, x, 0, 0, 1);
         assert_eq!((p >> 28, p >> 24 & 15, p & 0xFF_FFFF), (x + 1, x + 8, 0), "pixel {x}");
     }
     // 8 pixels of 8 bits
     up(&mut gs, 0x1B, 0x0807_0605_0403_0201);
+    gs.flush();
     for x in 0..8u32 { assert_eq!(mem::read(&gs.vram, mem::PSMT8H, x, 0, 0, 1), x + 1); }
     // and back out the same size
     gs.feed(gif_tag(4, false, None, 0, &[0xE]));
@@ -357,4 +359,22 @@ fn a_constant_z_interpolates_exactly() {
         if z != 0 && z != 0xFFFF { lost += 1; }
     } }
     assert_eq!(lost, 0, "Z values other than FFFF written");
+}
+
+/// TEX2 sets TEX0's PSM / CLUT fields and loads the CLUT like TEX0 (KH2's font CLUT)
+#[test]
+fn tex2_loads_the_clut() {
+    let mut gs = Gs::new();
+    // a 16-entry CT32 CLUT at block 100h (8 x 2, bw 1): entry i = i * 0x01010101
+    gs.write_reg(BITBLTBUF, (0x100u64 << 32) | 1 << 48);
+    gs.write_reg(TRXPOS, 0);
+    gs.write_reg(TRXREG, 8 | 2 << 32);
+    gs.write_reg(TRXDIR, 0);
+    for i in (0..16u64).step_by(2) { gs.write_reg(HWREG, i * 0x0101_0101 | (i + 1) * 0x0101_0101 << 32); }
+    gs.write_reg(TEX0_1, 0);
+    // TEX2: PSMT4, CBP 100h, CSA 2, CLD 1
+    gs.write_reg(TEX2_1, 0x14 << 20 | 0x100u64 << 37 | 2u64 << 56 | 1u64 << 61);
+    gs.flush();
+    assert_eq!(gs.regs[TEX0_1] >> 20 & 0x3F, 0x14);
+    assert_eq!(gs.clut[32 + 5], 5 * 0x0101_0101);
 }

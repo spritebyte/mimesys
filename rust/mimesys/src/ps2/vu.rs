@@ -814,12 +814,14 @@ fn upper_reads_acc(op: u32) -> bool {
     matches!(f, 0x08..=0x0F | 0x21 | 0x23 | 0x25 | 0x27 | 0x29 | 0x2D | 0x2E)
 }
 
-/// PS2_VU_STALLS=pcsx2: PCSX2's stall rules (per field, no vf0 / ACC stalls, lower VF
-/// writes +4). Off by default: with them (patch 0271) Spy Hunter and Kingdom Hearts drew
-/// stretched triangles, so some other timing still depends on the old model
-fn pcsx2_stalls() -> bool {
+/// VU stall rules. Default (patch 0281): PCSX2 microVU's (per field, no vf0 / ACC
+/// stalls, lower VF writes land +4): Legaia 2's first scene builds right with them, wrecked
+/// with the old ones. PS2_VU_STALLS=old: the model up to 0280 (whole registers, ACC stalls,
+/// only flag-setting upper ops wait). (0271's broken Spy Hunter / KH frames were 0270's
+/// INT0 timing, not these.)
+pub(crate) fn pcsx2_stalls() -> bool {
     static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *P.get_or_init(|| std::env::var("PS2_VU_STALLS").map_or(false, |v| v == "pcsx2"))
+    *P.get_or_init(|| std::env::var("PS2_VU_STALLS").map_or(true, |v| v != "old"))
 }
 
 /// A pair's stall inputs (patch 0270's model), cached by address

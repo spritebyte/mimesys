@@ -84,6 +84,11 @@ pub struct Vif {
 impl Vif {
     pub fn new(vif1: bool) -> Self { Self { vif1, ..Default::default() } }
 
+    /// Debugging: the command being fed and what's left of it
+    pub fn feeding(&self) -> String {
+        format!("code {:08X} left {} addr {:X} buf {} | cl {} wl {} mode {} | pending {}", self.code, self.left, self.addr, self.buf.len(), self.cl, self.wl, self.mode, self.pending.len())
+    }
+
     /// STAT as the CPU reads it
     pub fn stat(&self) -> u32 {
         let mut s = if self.left > 0 { 1 } else { 0 };   // VPS: waiting for data
@@ -203,7 +208,8 @@ impl Vif {
     /// Rows an UNPACK of `num` (0 = 256) writes that come from the stream
     fn rows_read(&self, num: u32) -> u32 {
         let n = if num == 0 { 256 } else { num };
-        let (cl, wl) = (self.cl.max(1), self.wl.max(1));
+        // WL 0 means 256 (PCSX2): with CL 1 that's one row read, the rest filled (KH2)
+        let (cl, wl) = (self.cl, if self.wl == 0 { 256 } else { self.wl });
         if wl <= cl { n } else { cl * (n / wl) + (n % wl).min(cl) }
     }
 
@@ -258,7 +264,8 @@ impl Vif {
         let num = match c >> 16 & 0xFF { 0 => 256, n => n };
         let masked = c & (1 << 28) != 0;
         let unsigned = c & (1 << 14) != 0;
-        let (cl, wl) = (self.cl.max(1), self.wl.max(1));
+        // WL 0 means 256 (PCSX2): with CL 1 that's one row read, the rest filled (KH2)
+        let (cl, wl) = (self.cl, if self.wl == 0 { 256 } else { self.wl });
         let qmask = (cx.data.len() / 16 - 1) as u32;
         let mut bitpos = 0usize;
         let buf = std::mem::take(&mut self.buf);

@@ -42,7 +42,7 @@ pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
 /// Printed at the top of the debug log so a log says which build made it
-const PATCH: &str = "0278";
+const PATCH: &str = "0282";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;
@@ -773,7 +773,7 @@ impl System for Ps2System {
     fn set_option(&mut self, key: &str, value: i64) {
         if key == "ee_jit" { self.jit_on = value != 0 && crate::common::cpu::r5900::watch().is_none(); }
         if key == "debug_report" {
-            if value != 0 { crate::dlog!("PS2 core: patch {PATCH} (INT0 {:?}, VU stalls {})", int0_mode(), if std::env::var("PS2_VU_STALLS").is_ok() { "pcsx2" } else { "old" }); }
+            if value != 0 { crate::dlog!("PS2 core: patch {PATCH} (INT0 {:?}, VU stalls {})", int0_mode(), if vu::pcsx2_stalls() { "pcsx2" } else { "old" }); }
             DEBUG.store(value != 0, std::sync::atomic::Ordering::Relaxed);
             self.hw.debug = value != 0;
             self.ee.set_trace(value != 0);

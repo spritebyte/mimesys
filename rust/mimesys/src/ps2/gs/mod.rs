@@ -28,6 +28,7 @@ pub const XYZF3: usize = 0x0C;
 pub const XYZ3: usize = 0x0D;
 pub const TEX1_1: usize = 0x14;
 pub const TEX2_1: usize = 0x16;
+pub const TEX2_2: usize = 0x17;
 pub const XYOFFSET_1: usize = 0x18;
 pub const PRMODECONT: usize = 0x1A;
 pub const PRMODE: usize = 0x1B;
@@ -378,6 +379,16 @@ impl Gs {
                 self.regs[r] = v;
                 self.load_clut(v);
             }
+            TEX2_1 | TEX2_2 => {
+                // TEX2 sets TEX0's PSM and CLUT fields (and loads the CLUT the same way):
+                // KH2 loads its font's CLUT with it
+                self.regs[r] = v;
+                let t = if r == TEX2_1 { TEX0_1 } else { TEX0_2 };
+                const MASK: u64 = 0x3F << 20 | !0u64 << 37;
+                let v0 = (self.regs[t] & !MASK) | (v & MASK);
+                self.regs[t] = v0;
+                self.load_clut(v0);
+            }
             TRXDIR => {
                 self.regs[r] = v;
                 self.start_transfer();
@@ -587,7 +598,7 @@ impl Gs {
         let csa = bits(tex0, 56, 5);
         let eight = psm == mem::PSMT8 || psm == mem::PSMT8H;
         let entries = if eight { 256 } else { 16 };
-        let cformat = if cpsm == 0 { mem::PSMCT32 } else if cpsm == 0xA { mem::PSMCT16S } else { mem::PSMCT16 };
+        let cformat = if cpsm <= 1 { mem::PSMCT32 } else if cpsm == 0xA { mem::PSMCT16S } else { mem::PSMCT16 };
         // queued: what's queued before draws with the old CLUT, what comes after with this
         self.flush_with(0);
         self.queue_task(move |vram, clut| {
@@ -651,7 +662,13 @@ fn display_from(vram: &[u8], pregs: &[u64; 15], out: &mut Vec<u8>) -> (usize, us
         let mut h = ((bits(disp, 44, 11) + 1) / magv).clamp(1, 1024) as usize;
         let smode2 = pregs[SMODE2];
         // interlaced field mode: each field reads half the lines
-        if smode2 & 1 != 0 && smode2 & 2 != 0 { h = (h / 2).max(1); }
+        let field = smode2 & 1 != 0 && smode2 & 2 != 0;
+        if field { h = (h / 2).max(1); }
+        // the screen has only so many lines (NTSC 240 a field, PAL 288; SMODE1 CMOD 3 =
+        // PAL): a taller DH reads no further (Legaia 2 sets DH 896 over 224-line buffers)
+        let pal = pregs[1] >> 13 & 3 == 3;
+        let lines = if pal { 288 } else { 240 } * if field || smode2 & 1 == 0 { 1 } else { 2 };
+        h = h.min(lines / if field { 1 } else { magv as usize }).max(1);
         out.resize(w * h * 4, 0);
         let bg = pregs[BGCOLOR];
         let alp = bits(pmode, 8, 8);
