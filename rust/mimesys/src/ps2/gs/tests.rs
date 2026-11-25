@@ -288,7 +288,7 @@ fn gs_frame_replay() {
     let t = std::time::Instant::now();
     let mut gs = super::replay(&file).expect("a GSF1 file");
     gs.flush();
-    println!("replayed in {:?}", t.elapsed());
+    println!("replayed in {:?} ({} batches, {} waits)", t.elapsed(), gs.flushes, gs.syncs);
     let mut out = Vec::new();
     let (w, h) = gs.display(&mut out);
     println!("display {w}x{h} PMODE {:X} DISPFB2 {:X} DISPLAY2 {:X}", gs.pregs[0], gs.pregs[9], gs.pregs[10]);

@@ -40,6 +40,9 @@ struct Core {
     /// auto-DMA input: the sample being played (0-1FF) and the half to fill next
     in_pos: u32,
     in_half: u32,
+    /// halves of the input buffer free for auto-DMA data (0-2)
+    #[serde(default)]
+    in_free: u32,
     /// the last output, for core 1's external input
     out: (i32, i32),
 }
@@ -225,7 +228,14 @@ impl Spu2 {
                 self.cores[c].tsa = (a + 1) & MASK;
             }
             0x1B0 => {
-                if v & 3 == 0 { self.cores[c].in_pos = 0; self.cores[c].in_half = 0; }
+                let was = old & 3 != 0;
+                if v & 3 == 0 || !was {
+                    // (re)started: play from the start, both halves to fill
+                    let k = &mut self.cores[c];
+                    k.in_pos = 0;
+                    k.in_half = 0;
+                    k.in_free = 2;
+                }
             }
             0x1C0..=0x2DF => {
                 let k = o - 0x1C0;
@@ -301,9 +311,13 @@ impl Spu2 {
         v
     }
 
-    /// Auto-DMA input: blocks of 100h left then 100h right samples
+    /// Room for another auto-DMA block (one half of the input buffer isn't waiting to play)
+    pub fn adma_room(&self, c: usize) -> bool { self.cores[c].in_free > 0 }
+
+    /// Auto-DMA input: blocks of 100h left then 100h right samples, each into the next half
     pub fn adma_write(&mut self, c: usize, data: &[u16]) {
         for blk in data.chunks(0x200) {
+            self.cores[c].in_free = self.cores[c].in_free.saturating_sub(1);
             let half = self.cores[c].in_half;
             let base = 0x2000 + 0x400 * c as u32 + half * 0x100;
             for (k, &w) in blk.iter().enumerate() {
@@ -414,6 +428,8 @@ impl Spu2 {
                 if mmix & 0x40 != 0 { r += (self.ram[ra as usize] as i16 as i32 * br) >> 15; }
             }
             self.cores[c].in_pos = (pos + 1) & 0x1FF;
+            // a half has played: free for the next block
+            if (pos + 1) & 0xFF == 0 { self.cores[c].in_free = (self.cores[c].in_free + 1).min(2); }
             // core 0's output into core 1
             if c == 1 {
                 let al = self.reg(0x768 + 0x28) as i16 as i32;

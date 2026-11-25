@@ -975,7 +975,8 @@ fn mfifo_vif1_drains_the_ring() {
     assert_eq!(d.ch[super::dmac::SPR_FROM].madr, 0x80_0000);
 }
 
-/// SPU2 auto-DMA lasts as long as its samples play: 12 KB on core 1 is 64 ms
+/// SPU2 auto-DMA goes a block (512 samples' worth of a half) at a time as the input
+/// buffer plays: 12 KB on core 1 is 12 blocks, the last one sent 10 halves (53 ms) in
 #[test]
 fn spu2_auto_dma_runs_at_the_audio_rate() {
     let mut d = super::iop_dma::IopDma::default();
@@ -994,10 +995,11 @@ fn spu2_auto_dma_runs_at_the_audio_rate() {
     let mut t = 0i64;
     while d.ch[7].chcr >> 24 & 1 != 0 && t < 36_864_000 {
         d.tick_spu(10_000);
+        spu2.tick(10_000);
         d.step(&mut ram, &mut sif, &mut sio2, &mut spu2);
         t += 10_000;
     }
-    assert!((63..=65).contains(&ms(t)), "{} ms", ms(t));
+    assert!((52..=55).contains(&ms(t)), "{} ms", ms(t));
     // without auto-DMA: at once
     spu2.write16(0x5B0, 0);
     d.write(0x1F80_1508, 0x0100_0201, u32::MAX);

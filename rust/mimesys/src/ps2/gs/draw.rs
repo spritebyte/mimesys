@@ -147,45 +147,82 @@ impl Gs {
         }
         self.batch.area += ((x1 - x0 + 1) as u64) * ((y1 - y0 + 1) as u64);
         self.batch.cmds.push(Cmd { c, k, y0, y1 });
-        // a host -> local transfer still coming in: a primitive using its pages draws now,
-        // before the rest of the data lands
-        let mid_xfer = self.xfer.active && self.xfer_region.is_some_and(|(bp, bw, psm, y0, y1)| {
-            let p = pages_of(bp, bw, ph(psm), y0, y1);
-            self.batch.written.overlaps(&p) || self.batch.read.overlaps(&p)
-        });
-        if mid_xfer { self.flush(); }
-        else if alone || self.batch.cmds.len() >= 4096 { self.flush_with(if alone { 1 } else { 0 }); }
+        if alone || self.batch.cmds.len() >= 4096 { self.flush_with(if alone { 1 } else { 0 }); }
     }
 
     /// Draw everything queued and wait until it's drawn
     pub fn flush(&mut self) { self.flush_with(0); self.sync(); }
 
-    /// Wait for the batch the drawing threads are on
+    /// Wait until everything handed to the drawing side (batches, uploads, copies, CLUT
+    /// loads) is done; the CLUT comes back from there
     pub fn sync(&mut self) {
-        if let Some(f) = self.inflight.take() {
-            let t0 = std::time::Instant::now();
-            pool().wait();
-            self.pixels += f.job.total.load(std::sync::atomic::Ordering::Relaxed);
-            self.draw_busy_ns += f.job.busy.load(std::sync::atomic::Ordering::Relaxed);
-            self.draw_ns += t0.elapsed().as_nanos() as u64;
+        self.submit_upload();
+        if self.pend.submitted == self.pend.waited { return; }
+        self.syncs += 1;
+        let t0 = std::time::Instant::now();
+        {
+            let mut n = self.pend.done.m.lock().unwrap();
+            while *n < self.pend.submitted { n = self.pend.done.cv.wait(n).unwrap(); }
+        }
+        self.draw_ns += t0.elapsed().as_nanos() as u64;
+        self.reap(self.pend.submitted);
+    }
+
+    pub(super) fn pend_submitted(&self) -> u64 { self.pend.submitted }
+
+    /// Wait until the first `n` queued items are done (and let go of finished batches)
+    pub(super) fn wait_until(&mut self, n: u64) {
+        let t0 = std::time::Instant::now();
+        let done = {
+            let mut d = self.pend.done.m.lock().unwrap();
+            if *d < n { self.syncs += 1; }
+            while *d < n { d = self.pend.done.cv.wait(d).unwrap(); }
+            *d
+        };
+        self.draw_ns += t0.elapsed().as_nanos() as u64;
+        self.reap(done);
+    }
+
+    /// Batches done (`done` items finished): count their pixels / time, drop them
+    fn reap(&mut self, done: u64) {
+        let k = self.pend.jobs.iter().take_while(|(seq, _)| *seq < done).count();
+        for (_, job) in self.pend.jobs.drain(..k) {
+            self.pixels += job.total.load(std::sync::atomic::Ordering::Relaxed);
+            self.draw_busy_ns += job.busy.load(std::sync::atomic::Ordering::Relaxed);
+        }
+        if done == self.pend.submitted && self.pend.waited != done {
+            self.pend.waited = done;
+            self.clut.copy_from_slice(&self.pend.clut.lock().unwrap());
         }
     }
 
-    /// Whether a region (rows y0..=y1 of a buffer) is used by the queued batch / by the
-    /// batch being drawn
-    pub(super) fn region_busy(&self, bp: u32, bw: u32, psm: u32, y0: i32, y1: i32) -> (bool, bool) {
-        let p = pages_of(bp, bw, ph(psm), y0, y1);
-        let queued = !self.batch.cmds.is_empty() && (self.batch.written | self.batch.read).overlaps(&p);
-        let drawing = self.inflight.as_ref().is_some_and(|f| f.touched.overlaps(&p));
-        (queued, drawing)
+    /// Queue work that touches VRAM (or the drawing side's CLUT), after what's queued
+    pub(super) fn queue_task(&mut self, f: impl FnOnce(&mut [u8], &mut [u32]) + Send + 'static) {
+        self.pend_start();
+        let (vram, clut) = (VramPtr(self.vram.as_mut_ptr()), self.pend.clut.clone());
+        let task: Box<dyn FnOnce() + Send> = Box::new(move || {
+            // SAFETY: the GS doesn't touch VRAM itself until it has waited (`sync`)
+            let mem = unsafe { std::slice::from_raw_parts_mut(vram.ptr(), mem::VRAM_SIZE) };
+            f(mem, &mut clut.lock().unwrap());
+        });
+        dispatcher().send(Op::Task(task, self.pend.done.clone())).expect("GS dispatcher");
+        self.pend.submitted += 1;
     }
 
-    /// Hand the queued batch to the drawing threads (after the one they're on); this
+    /// Before the first queued item since the last wait: the drawing side's CLUT starts
+    /// as ours
+    fn pend_start(&mut self) {
+        if self.pend.submitted == self.pend.waited {
+            self.pend.clut.lock().unwrap().copy_from_slice(&self.clut);
+        }
+    }
+
+    /// Hand the queued batch to the drawing threads (they take everything in order); this
     /// thread carries on. `threads`: 0 picks (one thread for small batches)
     pub(super) fn flush_with(&mut self, threads: usize) {
         if self.batch.cmds.is_empty() { return; }
-        // a transfer in progress writes memory as its data comes: keep to the order
-        self.sync();
+        self.submit_upload();
+        self.pend_start();
         let t0 = std::time::Instant::now();
         let batch = std::mem::take(&mut self.batch);
         let n = if threads != 0 { threads } else if batch.area < 40_000 { 1 } else { draw_threads() };
@@ -194,12 +231,15 @@ impl Gs {
         let (lo, hi) = batch.cmds.iter().fold((i32::MAX, i32::MIN), |(l, h), c| (l.min(c.y0), h.max(c.y1)));
         let nb = ((hi - lo) / BAND + 1) as usize;
         let single = n <= 1;
-        let job = Box::new(Job {
-            cmds: batch.cmds, clut: self.clut.clone(), vram: VramPtr(self.vram.as_mut_ptr()), lo, nb, single,
+        let job = std::sync::Arc::new(Job {
+            cmds: batch.cmds, clut: Default::default(), pclut: self.pend.clut.clone(),
+            vram: VramPtr(self.vram.as_mut_ptr()), lo, nb, single,
+            threads: if single { 1 } else { n.min(nb) },
             next: Default::default(), total: Default::default(), busy: Default::default(),
         });
-        pool().submit(if single { 1 } else { n.min(nb) }, &job);
-        self.inflight = Some(Inflight { job, touched: batch.written | batch.read });
+        dispatcher().send(Op::Draw(job.clone(), self.pend.done.clone())).expect("GS dispatcher");
+        self.pend.jobs.push((self.pend.submitted, job));
+        self.pend.submitted += 1;
         self.flushes += 1;
         self.draw_ns += t0.elapsed().as_nanos() as u64;
     }
@@ -207,17 +247,67 @@ impl Gs {
 
 const BAND: i32 = 16;
 
-/// A batch being drawn
-pub struct Inflight { job: Box<Job>, touched: Pages }
+/// Work handed to the drawing side and not yet waited for
+pub struct Pending {
+    /// batches with their queue position
+    jobs: Vec<(u64, std::sync::Arc<Job>)>,
+    submitted: u64,
+    waited: u64,
+    done: std::sync::Arc<Done>,
+    /// the CLUT as the drawing side has it (CLUT loads are queued too)
+    clut: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+}
+
+impl Default for Pending {
+    fn default() -> Self {
+        Pending { jobs: Vec::new(), submitted: 0, waited: 0, done: Default::default(),
+            clut: std::sync::Arc::new(std::sync::Mutex::new(vec![0; 512])) }
+    }
+}
+
+/// Items done so far (of one GS)
+#[derive(Default)]
+struct Done { m: std::sync::Mutex<u64>, cv: std::sync::Condvar }
+
+enum Op {
+    Draw(std::sync::Arc<Job>, std::sync::Arc<Done>),
+    Task(Box<dyn FnOnce() + Send>, std::sync::Arc<Done>),
+}
+
+/// One thread that takes the queued work in order: batches run on the pool, the rest here
+fn dispatcher() -> &'static std::sync::mpsc::Sender<Op> {
+    static D: std::sync::OnceLock<std::sync::mpsc::Sender<Op>> = std::sync::OnceLock::new();
+    D.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Op>();
+        std::thread::Builder::new().name("gs-dispatch".into()).spawn(move || {
+            while let Ok(op) = rx.recv() {
+                let done = match op {
+                    Op::Draw(job, done) => {
+                        let _ = job.clut.set(job.pclut.lock().unwrap().clone());
+                        pool().submit(job.threads, &job);
+                        pool().wait();
+                        done
+                    }
+                    Op::Task(f, done) => { f(); done }
+                };
+                *done.m.lock().unwrap() += 1;
+                done.cv.notify_all();
+            }
+        }).expect("GS dispatcher");
+        tx
+    })
+}
 
 struct Job {
     cmds: Vec<Cmd>,
-    /// the CLUT as it was when the batch was handed over
-    clut: Vec<u32>,
+    /// the CLUT as it is when the batch's turn comes
+    clut: std::sync::OnceLock<Vec<u32>>,
+    pclut: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
     vram: VramPtr,
     lo: i32,
     nb: usize,
     single: bool,
+    threads: usize,
     next: std::sync::atomic::AtomicUsize,
     total: std::sync::atomic::AtomicU64,
     busy: std::sync::atomic::AtomicU64,
@@ -231,7 +321,7 @@ impl Job {
         // for (`sync`); bands are disjoint rows, so no two threads touch one pixel of a
         // frame or Z buffer; textures a batch reads aren't written in it
         let mem = unsafe { std::slice::from_raw_parts_mut(self.vram.ptr(), mem::VRAM_SIZE) };
-        let mut r = Raster { vram: mem, clut: &self.clut, y0: 0, y1: 2048, pixels: 0 };
+        let mut r = Raster { vram: mem, clut: self.clut.get().expect("CLUT"), y0: 0, y1: 2048, pixels: 0 };
         if self.single {
             for cmd in &self.cmds { r.draw(cmd); }
         } else {
@@ -312,9 +402,10 @@ impl Pool {
     }
 }
 
-struct VramPtr(*mut u8);
+pub(super) struct VramPtr(*mut u8);
 impl VramPtr { fn ptr(&self) -> *mut u8 { self.0 } }
 unsafe impl Sync for VramPtr {}
+// (Job holds a VramPtr; the GS waits for its jobs before it drops / moves VRAM)
 unsafe impl Send for VramPtr {}
 
 /// Drawing threads: all cores but one (the emulated CPUs wait while the GS draws)
@@ -490,17 +581,28 @@ impl Raster<'_> {
         let (fu, fv) = (vs.map(|v| v.u as f64), vs.map(|v| v.v as f64));
         let ff = vs.map(|v| v.f as f64);
         let inside = |w: i64, k: usize| w > 0 || (w == 0 && tl[k]);
+        let _ = inside;
         for y in miny..=maxy {
-            let mut w = [at(0, minx, y), at(1, minx, y), at(2, minx, y)];
-            let mut x = minx;
-            // skip to the first pixel inside
-            while x <= maxx && !(inside(w[0], 0) && inside(w[1], 1) && inside(w[2], 2)) {
-                // jump straight past an edge we're outside of and moving towards
-                x += 1;
-                for k in 0..3 { w[k] += stepx[k]; }
+            let w0 = [at(0, minx, y), at(1, minx, y), at(2, minx, y)];
+            // the row's span from the edge equations: pixel n (from minx) is inside edge k
+            // when w0 + n * step > 0 (>= 0 on a top / left edge)
+            let (mut lo, mut hi) = (0i64, (maxx - minx) as i64);
+            for k in 0..3 {
+                let (w, st) = (w0[k], stepx[k]);
+                let need = if tl[k] { 0 } else { 1 };            // w + n st >= need
+                if st > 0 {
+                    lo = lo.max((need - w + st - 1).div_euclid(st));
+                } else if st < 0 {
+                    hi = hi.min((w - need).div_euclid(-st));
+                } else if w < need {
+                    hi = -1;
+                }
             }
-            while x <= maxx {
-                if !(inside(w[0], 0) && inside(w[1], 1) && inside(w[2], 2)) { break; }
+            if lo > hi { continue; }
+            let mut x = minx + lo as i32;
+            let mut w = [w0[0] + lo * stepx[0], w0[1] + lo * stepx[1], w0[2] + lo * stepx[2]];
+            let xend = minx + hi as i32;
+            while x <= xend {
                 let l = w.map(|e| e as f64 * inv_area);
                 // relative to vertex 0, so an attribute equal at all three vertices comes out
                 // exactly (Persona 3's text: the second pass needs Z >= the first pass's FFFF)

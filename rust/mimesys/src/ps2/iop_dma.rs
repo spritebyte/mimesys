@@ -48,6 +48,9 @@ pub struct IopDma {
     /// samples play (48 kHz stereo 16-bit: 768 IOP cycles a word); cycles still to go
     #[serde(default)]
     pub spu_timer: [i64; 2],
+    /// auto-DMA words still to send (channels 4 / 7)
+    #[serde(default)]
+    pub adma_left: [u32; 2],
 }
 
 /// IOP cycles per word of auto-DMA audio (36 864 000 / 48 000)
@@ -56,7 +59,7 @@ const ADMA_CYCLES_PER_WORD: i64 = 768;
 impl Default for IopDma {
     fn default() -> Self {
         Self { ch: Default::default(), dpcr: 0x0777_7777, dpcr2: 0, dicr: 0, dicr2: 0, dmacen: 0, dmacinten: 0,
-            irq_was: false, done: [0; 13], spu_timer: [0; 2] }
+            irq_was: false, done: [0; 13], spu_timer: [0; 2], adma_left: [0; 2] }
     }
 }
 
@@ -175,19 +178,28 @@ impl IopDma {
                         }
                         c.madr = (c.madr + 4 * words as u32) & 0xFF_FFFF;
                         self.finish(n);
-                    } else if self.spu_timer[k] == 0 {
-                        // auto-DMA: the data goes in now, the channel ends when it has
-                        // played (block size 0 moves 16 words: Suikoden 3's 00C00000 is 12 KB)
-                        let bcr = self.ch[n].bcr;
-                        let bs = match bcr & 0xFFFF { 0 => 16, b => b } as usize;
-                        let words = bs * (bcr >> 16).max(1) as usize;
-                        let c = &mut self.ch[n];
-                        let data: Vec<u16> = (0..words * 2).map(|i| {
-                            let a = ((c.madr as usize + 2 * i) & 0x1F_FFFE) as usize;
-                            u16::from_le_bytes([ram[a], ram[a + 1]])
-                        }).collect();
-                        spu2.adma_write(k, &data);
-                        self.spu_timer[k] = words as i64 * ADMA_CYCLES_PER_WORD;
+                    } else {
+                        // auto-DMA: one block (100h words: 100h left + 100h right samples)
+                        // whenever the SPU2 has a free half, so the data plays in order;
+                        // the channel ends with the last block (block size 0 moves 16
+                        // words: Suikoden 3's 00C00000 is 12 KB)
+                        if self.adma_left[k] == 0 {
+                            let bcr = self.ch[n].bcr;
+                            let bs = match bcr & 0xFFFF { 0 => 16, b => b } as u32;
+                            self.adma_left[k] = (bs * (bcr >> 16).max(1)).max(1);
+                        }
+                        while self.adma_left[k] > 0 && spu2.adma_room(k) {
+                            let words = self.adma_left[k].min(0x100) as usize;
+                            let c = &mut self.ch[n];
+                            let data: Vec<u16> = (0..words * 2).map(|i| {
+                                let a = ((c.madr as usize + 2 * i) & 0x1F_FFFE) as usize;
+                                u16::from_le_bytes([ram[a], ram[a + 1]])
+                            }).collect();
+                            c.madr = (c.madr + 4 * words as u32) & 0xFF_FFFF;
+                            spu2.adma_write(k, &data);
+                            self.adma_left[k] -= words as u32;
+                        }
+                        if self.adma_left[k] == 0 { self.finish(n); }
                     }
                 }
                 _ => self.finish(n),

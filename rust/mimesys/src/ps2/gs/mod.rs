@@ -90,6 +90,20 @@ struct Transfer {
     pending: Vec<u8>,
 }
 
+/// Local -> local transfer (BITBLTBUF, TRXPOS, TRXREG as they were)
+fn local_to_local(vram: &mut [u8], bb: u64, pos: u64, reg: u64) {
+    let (sbp, sbw, spsm) = (bits(bb, 0, 14), bits(bb, 16, 6), bits(bb, 24, 6));
+    let (dbp, dbw, dpsm) = (bits(bb, 32, 14), bits(bb, 48, 6), bits(bb, 56, 6));
+    let (sx, sy, dx, dy) = (bits(pos, 0, 11), bits(pos, 16, 11), bits(pos, 32, 11), bits(pos, 48, 11));
+    let (w, h) = (bits(reg, 0, 12), bits(reg, 32, 12));
+    for y in 0..h {
+        for x in 0..w {
+            let p = mem::read(vram, spsm, sx + x, sy + y, sbp, sbw);
+            mem::write(vram, dpsm, dx + x, dy + y, dbp, dbw, p);
+        }
+    }
+}
+
 /// The GIF's PATH3 tag state
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct GifTag {
@@ -155,12 +169,23 @@ pub struct Gs {
     /// time the drawing threads spent (speed report)
     #[serde(skip)]
     pub draw_busy_ns: u64,
-    /// the batch the drawing threads are on
+    /// times the emulation waited for drawing
     #[serde(skip)]
-    pub(crate) inflight: Option<draw::Inflight>,
-    /// a host -> local transfer's buffer and rows (bp, bw, psm, y0, y1)
+    pub syncs: u64,
+    /// batches handed to the drawing threads
     #[serde(skip)]
-    pub(crate) xfer_region: Option<(u32, u32, u32, i32, i32)>,
+    pub(crate) pend: draw::Pending,
+    /// host -> local bytes not yet queued, and the pixel they start at
+    #[serde(skip)]
+    up: Vec<u8>,
+    #[serde(skip)]
+    up_start: u64,
+    /// the newest picture the drawing side has read out (RGBA8, width, height)
+    #[serde(skip)]
+    shown: std::sync::Arc<std::sync::Mutex<(Vec<u8>, usize, usize)>>,
+    /// the queue position of the last frame's readout
+    #[serde(skip)]
+    frame_mark: Option<u64>,
 }
 
 impl Drop for Gs {
@@ -216,7 +241,7 @@ impl Gs {
             regs: vec![0; 0x63], vram: vec![0; mem::VRAM_SIZE],
             queue: [Vertex::default(); 3], count: 0, fan_first: None,
             xfer: Transfer::default(), readback: Default::default(), rec: None, trace: false, gif: GifTag::default(),
-            clut: vec![0; 512], cbp: [0; 2], prims: 0, pixels: 0, batch: Default::default(), draw_ns: 0, flushes: 0, draw_busy_ns: 0, inflight: None, xfer_region: None,
+            clut: vec![0; 512], cbp: [0; 2], prims: 0, pixels: 0, batch: Default::default(), draw_ns: 0, flushes: 0, draw_busy_ns: 0, syncs: 0, pend: Default::default(), up: Vec::new(), up_start: 0, shown: Default::default(), frame_mark: None,
         }.with_reset_regs()
     }
 
@@ -429,72 +454,82 @@ impl Gs {
     // ------------------------------------------------------------------ transfers
 
     fn start_transfer(&mut self) {
+        // what came of a transfer cut short still lands first
+        self.submit_upload();
         let dir = bits(self.regs[TRXDIR], 0, 2);
-        if dir == 0 {
-            // host -> local: only what uses the pages it writes has to be drawn first
-            let bb = self.regs[BITBLTBUF];
-            let (dbp, dbw, dpsm) = (bits(bb, 32, 14), bits(bb, 48, 6), bits(bb, 56, 6));
-            let y0 = bits(self.regs[TRXPOS], 48, 11) as i32;
-            let h = bits(self.regs[TRXREG], 32, 12) as i32;
-            let (queued, drawing) = self.region_busy(dbp, dbw, dpsm, y0, y0 + h.max(1) - 1);
-            if queued { self.flush(); } else if drawing { self.sync(); }
-            self.xfer_region = Some((dbp, dbw, dpsm, y0, y0 + h.max(1) - 1));
-        } else {
-            self.flush();
-        }
-        let pos = self.regs[TRXPOS];
         self.xfer = Transfer { active: false, x: 0, y: 0, pending: Vec::new() };
+        self.up.clear();
+        self.up_start = 0;
         match dir {
-            0 => self.xfer.active = true,
+            // host -> local: the data is queued after what's queued now (no waiting)
+            0 => { self.flush_with(0); self.xfer.active = true; }
             1 => self.local_to_host(),
-            2 => self.local_to_local(),
+            2 => {
+                self.flush_with(0);
+                let (bb, pos, reg) = (self.regs[BITBLTBUF], self.regs[TRXPOS], self.regs[TRXREG]);
+                self.queue_task(move |vram, _| local_to_local(vram, bb, pos, reg));
+            }
             _ => {}
         }
-        let _ = pos;
     }
 
-    /// Host -> local data (HWREG or GIF IMAGE): 64 bits of packed pixels
+    /// Host -> local data (HWREG or GIF IMAGE): 64 bits of packed pixels, collected and
+    /// queued for the drawing side
     fn hwreg(&mut self, v: u64) {
         if !self.xfer.active { return; }
+        self.up.extend_from_slice(&v.to_le_bytes());
+        let reg = self.regs[TRXREG];
+        let (w, h) = (bits(reg, 0, 12).max(1) as u64, bits(reg, 32, 12) as u64);
+        let bpp = mem::xfer_bpp(bits(self.regs[BITBLTBUF], 56, 6)) as u64;
+        let got = (self.up_start + self.up.len() as u64 * 8 / bpp).min(w * h);
+        self.xfer.x = (got % w) as u32;
+        self.xfer.y = (got / w) as u32;
+        if got >= w * h {
+            self.submit_upload();
+            self.xfer.active = false;
+        } else if self.up.len() >= 64 * 1024 {
+            self.submit_upload();
+        }
+    }
+
+    /// Queue the host -> local pixels collected so far (whole pixels; 4-bit: pairs)
+    pub(super) fn submit_upload(&mut self) {
+        if self.up.is_empty() { return; }
         let bb = self.regs[BITBLTBUF];
         let (dbp, dbw, dpsm) = (bits(bb, 32, 14), bits(bb, 48, 6), bits(bb, 56, 6));
         let pos = self.regs[TRXPOS];
         let (dx, dy) = (bits(pos, 32, 11), bits(pos, 48, 11));
         let reg = self.regs[TRXREG];
-        let (w, h) = (bits(reg, 0, 12).max(1), bits(reg, 32, 12));
-        let bpp = mem::xfer_bpp(dpsm);
-        let mut data = std::mem::take(&mut self.xfer.pending);
-        data.extend_from_slice(&v.to_le_bytes());
-        let mut i = 0usize;
-        while self.xfer.y < h {
-            let px = match bpp {
-                32 => { if data.len() - i < 4 { break; } let p = u32::from_le_bytes(data[i..i + 4].try_into().unwrap()); i += 4; p }
-                24 => { if data.len() - i < 3 { break; } let p = data[i] as u32 | (data[i + 1] as u32) << 8 | (data[i + 2] as u32) << 16; i += 3; p }
-                16 => { if data.len() - i < 2 { break; } let p = u16::from_le_bytes([data[i], data[i + 1]]) as u32; i += 2; p }
-                8 => { if data.len() - i < 1 { break; } let p = data[i] as u32; i += 1; p }
-                _ => {
-                    // 4-bit: two pixels a byte, low nibble first
-                    if data.len() - i < 1 { break; }
-                    let byte = data[i] as u32;
-                    i += 1;
-                    for k in 0..2 {
-                        if self.xfer.y >= h { break; }
-                        mem::write(&mut self.vram, dpsm, dx + self.xfer.x, dy + self.xfer.y, dbp, dbw, byte >> (4 * k) & 15);
-                        self.advance(w);
-                    }
-                    continue;
-                }
-            };
-            mem::write(&mut self.vram, dpsm, dx + self.xfer.x, dy + self.xfer.y, dbp, dbw, px);
-            self.advance(w);
+        let (w, h) = (bits(reg, 0, 12).max(1) as u64, bits(reg, 32, 12) as u64);
+        let bpp = mem::xfer_bpp(dpsm) as u64;
+        let left = (w * h).saturating_sub(self.up_start);
+        let mut n = (self.up.len() as u64 * 8 / bpp).min(left);
+        if bpp == 4 && n < left { n &= !1; }
+        if n == 0 {
+            if left == 0 { self.up.clear(); }
+            return;
         }
-        self.xfer.pending = data[i..].to_vec();
-        if self.xfer.y >= h { self.xfer.active = false; }
-    }
-
-    fn advance(&mut self, w: u32) {
-        self.xfer.x += 1;
-        if self.xfer.x >= w { self.xfer.x = 0; self.xfer.y += 1; }
+        let used = ((n * bpp + 7) / 8) as usize;
+        let data: Vec<u8> = self.up.drain(..used).collect();
+        let start = self.up_start;
+        self.up_start += n;
+        if left == n { self.up.clear(); }
+        self.queue_task(move |vram, _| {
+            for k in 0..n {
+                let p = start + k;
+                let (x, y) = ((p % w) as u32, (p / w) as u32);
+                let i = k as usize;
+                let px = match bpp {
+                    32 => u32::from_le_bytes(data[4 * i..4 * i + 4].try_into().unwrap()),
+                    24 => data[3 * i] as u32 | (data[3 * i + 1] as u32) << 8 | (data[3 * i + 2] as u32) << 16,
+                    16 => u16::from_le_bytes([data[2 * i], data[2 * i + 1]]) as u32,
+                    8 => data[i] as u32,
+                    // 4-bit: two pixels a byte, low nibble first (chunks start on a pair)
+                    _ => (data[i / 2] >> (4 * (i & 1)) & 15) as u32,
+                };
+                mem::write(vram, dpsm, dx + x, dy + y, dbp, dbw, px);
+            }
+        });
     }
 
     /// Local -> host: the source rectangle's pixels packed as a host -> local transfer
@@ -532,22 +567,6 @@ impl Gs {
         for q in bytes.chunks(16) { self.readback.push_back(u128::from_le_bytes(q.try_into().unwrap())); }
     }
 
-    fn local_to_local(&mut self) {
-        let bb = self.regs[BITBLTBUF];
-        let (sbp, sbw, spsm) = (bits(bb, 0, 14), bits(bb, 16, 6), bits(bb, 24, 6));
-        let (dbp, dbw, dpsm) = (bits(bb, 32, 14), bits(bb, 48, 6), bits(bb, 56, 6));
-        let pos = self.regs[TRXPOS];
-        let (sx, sy, dx, dy) = (bits(pos, 0, 11), bits(pos, 16, 11), bits(pos, 32, 11), bits(pos, 48, 11));
-        let reg = self.regs[TRXREG];
-        let (w, h) = (bits(reg, 0, 12), bits(reg, 32, 12));
-        for y in 0..h {
-            for x in 0..w {
-                let p = mem::read(&self.vram, spsm, sx + x, sy + y, sbp, sbw);
-                mem::write(&mut self.vram, dpsm, dx + x, dy + y, dbp, dbw, p);
-            }
-        }
-    }
-
     // ------------------------------------------------------------------ the CLUT
 
     /// TEX0's CLD: when the CLUT buffer loads from CBP (CSM1 layout only)
@@ -569,24 +588,23 @@ impl Gs {
         let eight = psm == mem::PSMT8 || psm == mem::PSMT8H;
         let entries = if eight { 256 } else { 16 };
         let cformat = if cpsm == 0 { mem::PSMCT32 } else if cpsm == 0xA { mem::PSMCT16S } else { mem::PSMCT16 };
-        // what's queued draws with the old CLUT (it gets its own copy); wait only if
-        // something being drawn writes where the CLUT comes from
+        // queued: what's queued before draws with the old CLUT, what comes after with this
         self.flush_with(0);
-        let (_, drawing) = self.region_busy(cbp, 1, cformat, 0, 15);
-        if drawing { self.sync(); }
-        for i in 0..entries {
-            // CSM1: 8-bit indices swap bits 3 and 4 and fill 16 x 16; 4-bit fill 8 x 2
-            let (x, y) = if eight {
-                let j = (i & 0xE7) | (i & 8) << 1 | (i & 0x10) >> 1;
-                (j & 15, j >> 4)
-            } else {
-                (i & 7, i >> 3)
-            };
-            let v = mem::read(&self.vram, cformat, x, y, cbp, 1);
-            // CSA offsets in 16-entry units (32-bit CLUTs use the first 256 slots)
-            let slot = (if cformat == mem::PSMCT32 { (csa & 15) * 16 } else { csa * 16 } + i) as usize % 512;
-            self.clut[slot] = v;
-        }
+        self.queue_task(move |vram, clut| {
+            for i in 0..entries {
+                // CSM1: 8-bit indices swap bits 3 and 4 and fill 16 x 16; 4-bit fill 8 x 2
+                let (x, y) = if eight {
+                    let j = (i & 0xE7) | (i & 8) << 1 | (i & 0x10) >> 1;
+                    (j & 15, j >> 4)
+                } else {
+                    (i & 7, i >> 3)
+                };
+                let v = mem::read(vram, cformat, x, y, cbp, 1);
+                // CSA offsets in 16-entry units (32-bit CLUTs use the first 256 slots)
+                let slot = (if cformat == mem::PSMCT32 { (csa & 15) * 16 } else { csa * 16 } + i) as usize % 512;
+                clut[slot] = v;
+            }
+        });
     }
 
     // ------------------------------------------------------------------ the display
@@ -594,21 +612,48 @@ impl Gs {
     /// The picture both read circuits show, as RGBA8, and its size
     pub fn display(&mut self, out: &mut Vec<u8>) -> (usize, usize) {
         self.flush();
-        let pmode = self.pregs[PMODE];
+        display_from(&self.vram, &self.pregs, out)
+    }
+
+    /// The display readout joins the queue; returns the newest finished picture (a frame
+    /// behind). The queue holds at most about one frame: this waits for the last one's
+    pub fn display_queued(&mut self, out: &mut Vec<u8>) -> (usize, usize) {
+        self.flush_with(0);
+        let pregs = self.pregs;
+        let shown = self.shown.clone();
+        self.queue_task(move |vram, _| {
+            let mut g = shown.lock().unwrap();
+            let (w, h) = display_from(vram, &pregs, &mut g.0);
+            g.1 = w;
+            g.2 = h;
+        });
+        let mark = self.pend_submitted();
+        if let Some(m) = self.frame_mark.replace(mark) { self.wait_until(m); }
+        if self.shown.lock().unwrap().1 == 0 { self.wait_until(mark); }
+        let g = self.shown.lock().unwrap();
+        out.clear();
+        out.extend_from_slice(&g.0);
+        (g.1, g.2)
+    }
+}
+
+/// The picture both read circuits show, as RGBA8, and its size
+fn display_from(vram: &[u8], pregs: &[u64; 15], out: &mut Vec<u8>) -> (usize, usize) {
+        let pmode = pregs[PMODE];
         let (en1, en2) = (pmode & 1 != 0, pmode & 2 != 0);
         let circuits: Vec<usize> = [(en1, 0usize), (en2, 1)].iter().filter(|c| c.0).map(|c| c.1).collect();
         // the size from the first enabled circuit (else circuit 2's settings)
         let main = *circuits.first().unwrap_or(&1);
-        let disp = self.pregs[DISPLAY1 + 2 * main];
+        let disp = pregs[DISPLAY1 + 2 * main];
         let magh = bits(disp, 23, 4) + 1;
         let magv = bits(disp, 27, 2) + 1;
         let w = ((bits(disp, 32, 12) + 1) / magh).clamp(1, 1024) as usize;
         let mut h = ((bits(disp, 44, 11) + 1) / magv).clamp(1, 1024) as usize;
-        let smode2 = self.pregs[SMODE2];
+        let smode2 = pregs[SMODE2];
         // interlaced field mode: each field reads half the lines
         if smode2 & 1 != 0 && smode2 & 2 != 0 { h = (h / 2).max(1); }
         out.resize(w * h * 4, 0);
-        let bg = self.pregs[BGCOLOR];
+        let bg = pregs[BGCOLOR];
         let alp = bits(pmode, 8, 8);
         let mmod = pmode >> 5 & 1;
         for y in 0..h {
@@ -616,12 +661,12 @@ impl Gs {
                 let mut c = [bits(bg, 0, 8), bits(bg, 8, 8), bits(bg, 16, 8)];
                 // circuit 2 first (the background), circuit 1 merged over it
                 for &k in circuits.iter().rev() {
-                    let fb = self.pregs[DISPFB1 + 2 * k];
+                    let fb = pregs[DISPFB1 + 2 * k];
                     let fbp = bits(fb, 0, 9) * 32;
                     let fbw = bits(fb, 9, 6);
                     let psm = bits(fb, 15, 5);
                     let (dbx, dby) = (bits(fb, 32, 11), bits(fb, 43, 11));
-                    let p = mem::read(&self.vram, psm, dbx + x as u32, dby + y as u32, fbp, fbw);
+                    let p = mem::read(vram, psm, dbx + x as u32, dby + y as u32, fbp, fbw);
                     let (rgb, a) = draw::to_rgba(p, psm);
                     if k == 1 || circuits.len() == 1 {
                         c = [rgb[0] as u32, rgb[1] as u32, rgb[2] as u32];
@@ -635,7 +680,6 @@ impl Gs {
             }
         }
         (w, h)
-    }
 }
 
 const TEXFLUSH_REG: usize = 0x3F;

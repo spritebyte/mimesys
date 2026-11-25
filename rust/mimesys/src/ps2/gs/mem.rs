@@ -116,9 +116,9 @@ pub fn addr4(x: u32, y: u32, bp: u32, bw: u32) -> usize {
     ((bp + page * 32) as usize * 512 + off as usize) & (2 * VRAM_SIZE - 1)
 }
 
-#[inline] fn rd32(m: &[u8], o: usize) -> u32 { u32::from_le_bytes([m[o], m[o + 1], m[o + 2], m[o + 3]]) }
+#[inline] fn rd32(m: &[u8], o: usize) -> u32 { u32::from_le_bytes(m[o..o + 4].try_into().unwrap()) }
 #[inline] fn wr32(m: &mut [u8], o: usize, v: u32) { m[o..o + 4].copy_from_slice(&v.to_le_bytes()); }
-#[inline] fn rd16(m: &[u8], o: usize) -> u32 { u16::from_le_bytes([m[o], m[o + 1]]) as u32 }
+#[inline] fn rd16(m: &[u8], o: usize) -> u32 { u16::from_le_bytes(m[o..o + 2].try_into().unwrap()) as u32 }
 #[inline] fn wr16(m: &mut [u8], o: usize, v: u32) { m[o..o + 2].copy_from_slice(&(v as u16).to_le_bytes()); }
 
 /// Bits per pixel of a format
@@ -145,6 +145,7 @@ pub fn xfer_bpp(psm: u32) -> u32 {
 
 /// A pixel's raw value (32-bit formats: the whole word; 24: low 24 bits; 16: the halfword;
 /// 8 / 4: the index, also from the high bits of a 32-bit pixel for 8H / 4HL / 4HH)
+#[inline]
 pub fn read(m: &[u8], psm: u32, x: u32, y: u32, bp: u32, bw: u32) -> u32 {
     match psm {
         PSMCT32 => rd32(m, addr32(x, y, bp, bw, false)),
@@ -165,6 +166,7 @@ pub fn read(m: &[u8], psm: u32, x: u32, y: u32, bp: u32, bw: u32) -> u32 {
 }
 
 /// Store a pixel's raw value (the other bits of a shared word are kept)
+#[inline]
 pub fn write(m: &mut [u8], psm: u32, x: u32, y: u32, bp: u32, bw: u32, v: u32) {
     match psm {
         PSMCT32 => wr32(m, addr32(x, y, bp, bw, false), v),
