@@ -152,6 +152,19 @@ pub struct Gs {
     pub draw_ns: u64,
     /// batches drawn
     pub flushes: u64,
+    /// time the drawing threads spent (speed report)
+    #[serde(skip)]
+    pub draw_busy_ns: u64,
+    /// the batch the drawing threads are on
+    #[serde(skip)]
+    pub(crate) inflight: Option<draw::Inflight>,
+    /// a host -> local transfer's buffer and rows (bp, bw, psm, y0, y1)
+    #[serde(skip)]
+    pub(crate) xfer_region: Option<(u32, u32, u32, i32, i32)>,
+}
+
+impl Drop for Gs {
+    fn drop(&mut self) { self.sync(); }
 }
 
 impl Default for Gs {
@@ -203,7 +216,7 @@ impl Gs {
             regs: vec![0; 0x63], vram: vec![0; mem::VRAM_SIZE],
             queue: [Vertex::default(); 3], count: 0, fan_first: None,
             xfer: Transfer::default(), readback: Default::default(), rec: None, trace: false, gif: GifTag::default(),
-            clut: vec![0; 512], cbp: [0; 2], prims: 0, pixels: 0, batch: Default::default(), draw_ns: 0, flushes: 0,
+            clut: vec![0; 512], cbp: [0; 2], prims: 0, pixels: 0, batch: Default::default(), draw_ns: 0, flushes: 0, draw_busy_ns: 0, inflight: None, xfer_region: None,
         }.with_reset_regs()
     }
 
@@ -416,8 +429,19 @@ impl Gs {
     // ------------------------------------------------------------------ transfers
 
     fn start_transfer(&mut self) {
-        self.flush();
         let dir = bits(self.regs[TRXDIR], 0, 2);
+        if dir == 0 {
+            // host -> local: only what uses the pages it writes has to be drawn first
+            let bb = self.regs[BITBLTBUF];
+            let (dbp, dbw, dpsm) = (bits(bb, 32, 14), bits(bb, 48, 6), bits(bb, 56, 6));
+            let y0 = bits(self.regs[TRXPOS], 48, 11) as i32;
+            let h = bits(self.regs[TRXREG], 32, 12) as i32;
+            let (queued, drawing) = self.region_busy(dbp, dbw, dpsm, y0, y0 + h.max(1) - 1);
+            if queued { self.flush(); } else if drawing { self.sync(); }
+            self.xfer_region = Some((dbp, dbw, dpsm, y0, y0 + h.max(1) - 1));
+        } else {
+            self.flush();
+        }
         let pos = self.regs[TRXPOS];
         self.xfer = Transfer { active: false, x: 0, y: 0, pending: Vec::new() };
         match dir {
@@ -432,7 +456,6 @@ impl Gs {
     /// Host -> local data (HWREG or GIF IMAGE): 64 bits of packed pixels
     fn hwreg(&mut self, v: u64) {
         if !self.xfer.active { return; }
-        self.flush();
         let bb = self.regs[BITBLTBUF];
         let (dbp, dbw, dpsm) = (bits(bb, 32, 14), bits(bb, 48, 6), bits(bb, 56, 6));
         let pos = self.regs[TRXPOS];
@@ -540,13 +563,17 @@ impl Gs {
             _ => false,
         };
         if !load { return; }
-        self.flush();
         let psm = bits(tex0, 20, 6);
         let cpsm = bits(tex0, 51, 4);
         let csa = bits(tex0, 56, 5);
         let eight = psm == mem::PSMT8 || psm == mem::PSMT8H;
         let entries = if eight { 256 } else { 16 };
         let cformat = if cpsm == 0 { mem::PSMCT32 } else if cpsm == 0xA { mem::PSMCT16S } else { mem::PSMCT16 };
+        // what's queued draws with the old CLUT (it gets its own copy); wait only if
+        // something being drawn writes where the CLUT comes from
+        self.flush_with(0);
+        let (_, drawing) = self.region_busy(cbp, 1, cformat, 0, 15);
+        if drawing { self.sync(); }
         for i in 0..entries {
             // CSM1: 8-bit indices swap bits 3 and 4 and fill 16 x 16; 4-bit fill 8 x 2
             let (x, y) = if eight {

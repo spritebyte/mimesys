@@ -42,7 +42,7 @@ pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
 /// Printed at the top of the debug log so a log says which build made it
-const PATCH: &str = "0273";
+const PATCH: &str = "0274";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;
@@ -89,6 +89,7 @@ pub struct Ps2System {
     host_ns: [u64; 4],
     host_last: [u64; 5],
     gs_flushes_last: u64,
+    gs_busy_last: u64,
     /// debugging: the waiting threads' code went to the log (once, 20 s in)
     code_dumped: bool,
     /// debugging: EE / IOP RAM written to files (once, 30 s in)
@@ -170,6 +171,7 @@ impl Ps2System {
             host_ns: [0; 4],
             host_last: [0; 5],
             gs_flushes_last: 0,
+            gs_busy_last: 0,
             code_dumped: false,
             next_ram_dump: 1200,
             gs_rec_due: false,
@@ -381,13 +383,14 @@ impl Ps2System {
             crate::dlog!("PS2:   speed {:.1} fps ({:.0}% of full) | per frame: EE {:.2} M cycles ({:.0}% idle-skipped), IOP {:.0}% idle-skipped, VU1 {:.0} k cycles, GS {} prims",
                 fps, 100.0 * fps / 59.94, ee / frames / 1e6, pct(cur.2 - se0, ee), pct(cur.4 - si0, (cur.3 - iop0) as f64),
                 (cur.5 - vu0) as f64 / frames / 1e3, self.hw.gs.prims);
-            crate::dlog!("PS2:   GS drawing {:.1} ms a frame ({:.2} M pixels, {:.0} batches a frame, {} threads)",
-                (cur.6 - gs0) as f64 / frames / 1e6, (cur.7 - px0) as f64 / frames / 1e6,
+            crate::dlog!("PS2:   GS drawing: emulation waited {:.1} ms a frame, drawing threads busy {:.1} ms ({:.2} M pixels, {:.0} batches a frame, {} threads)",
+                (cur.6 - gs0) as f64 / frames / 1e6, (self.hw.gs.draw_busy_ns - self.gs_busy_last) as f64 / frames / 1e6, (cur.7 - px0) as f64 / frames / 1e6,
                 (self.hw.gs.flushes - self.gs_flushes_last) as f64 / frames, gs::draw::draw_threads());
             self.gs_flushes_last = self.hw.gs.flushes;
+            self.gs_busy_last = self.hw.gs.draw_busy_ns;
             let ms = |k: usize, now: u64| (now - self.host_last[k]) as f64 / frames / 1e6;
             let vu = self.hw.vu1.host_ns + self.hw.vu0.host_ns;
-            crate::dlog!("PS2:   host time a frame: total {:.1} ms = EE {:.1} + IOP {:.1} + DMA/VIF/VU/GS/SPU2 {:.1} (VU {:.1}, GS drawing {:.1}) + other {:.1} (display)",
+            crate::dlog!("PS2:   host time a frame: total {:.1} ms = EE {:.1} + IOP {:.1} + DMA/VIF/VU/GS/SPU2 {:.1} (VU {:.1}, waiting for GS drawing {:.1}) + other {:.1} (display)",
                 ms(3, self.host_ns[3]), ms(0, self.host_ns[0]), ms(1, self.host_ns[1]), ms(2, self.host_ns[2]), ms(4, vu),
                 (cur.6 - gs0) as f64 / frames / 1e6,
                 ms(3, self.host_ns[3]) - ms(0, self.host_ns[0]) - ms(1, self.host_ns[1]) - ms(2, self.host_ns[2]));

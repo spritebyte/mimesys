@@ -130,12 +130,13 @@ impl Gs {
         let zr = c.zte.then(|| Target { bp: c.zbp, bw: c.fbw, psm: c.zpsm, pages: pages_of(c.zbp, c.fbw, ph(c.zpsm), y0, y1) });
         let mut alone = zr.as_ref().is_some_and(|z| z.pages.overlaps(&fr.pages));
         let clash = |t: &Target, b: &Batch| b.targets.iter().any(|e| (e.bp, e.bw, e.psm) != (t.bp, t.bw, t.psm) && e.pages.overlaps(&t.pages));
-        if clash(&fr, &self.batch) || zr.as_ref().is_some_and(|z| clash(z, &self.batch)) { self.flush(); }
+        if clash(&fr, &self.batch) || zr.as_ref().is_some_and(|z| clash(z, &self.batch)) { self.flush_with(0); }
         let own = fr.pages | zr.as_ref().map_or(Pages::default(), |z| z.pages);
         if c.tme {
             let tex = pages_of(c.tbp, c.tbw, ph(c.tpsm), 0, c.th as i32 - 1);
-            if tex.overlaps(&self.batch.written) { self.flush(); }
+            if tex.overlaps(&self.batch.written) { self.flush_with(0); }
             alone |= tex.overlaps(&own);
+            self.batch.read = self.batch.read | tex;
         }
         self.batch.written = self.batch.written | own;
         for t in [Some(fr), zr].into_iter().flatten() {
@@ -146,60 +147,108 @@ impl Gs {
         }
         self.batch.area += ((x1 - x0 + 1) as u64) * ((y1 - y0 + 1) as u64);
         self.batch.cmds.push(Cmd { c, k, y0, y1 });
-        if alone || self.batch.cmds.len() >= 4096 { self.flush_with(if alone { 1 } else { 0 }); }
+        // a host -> local transfer still coming in: a primitive using its pages draws now,
+        // before the rest of the data lands
+        let mid_xfer = self.xfer.active && self.xfer_region.is_some_and(|(bp, bw, psm, y0, y1)| {
+            let p = pages_of(bp, bw, ph(psm), y0, y1);
+            self.batch.written.overlaps(&p) || self.batch.read.overlaps(&p)
+        });
+        if mid_xfer { self.flush(); }
+        else if alone || self.batch.cmds.len() >= 4096 { self.flush_with(if alone { 1 } else { 0 }); }
     }
 
-    /// Draw everything queued
-    pub fn flush(&mut self) { self.flush_with(0); }
+    /// Draw everything queued and wait until it's drawn
+    pub fn flush(&mut self) { self.flush_with(0); self.sync(); }
 
-    /// `threads`: 0 picks (one thread for small batches)
-    fn flush_with(&mut self, threads: usize) {
+    /// Wait for the batch the drawing threads are on
+    pub fn sync(&mut self) {
+        if let Some(f) = self.inflight.take() {
+            let t0 = std::time::Instant::now();
+            pool().wait();
+            self.pixels += f.job.total.load(std::sync::atomic::Ordering::Relaxed);
+            self.draw_busy_ns += f.job.busy.load(std::sync::atomic::Ordering::Relaxed);
+            self.draw_ns += t0.elapsed().as_nanos() as u64;
+        }
+    }
+
+    /// Whether a region (rows y0..=y1 of a buffer) is used by the queued batch / by the
+    /// batch being drawn
+    pub(super) fn region_busy(&self, bp: u32, bw: u32, psm: u32, y0: i32, y1: i32) -> (bool, bool) {
+        let p = pages_of(bp, bw, ph(psm), y0, y1);
+        let queued = !self.batch.cmds.is_empty() && (self.batch.written | self.batch.read).overlaps(&p);
+        let drawing = self.inflight.as_ref().is_some_and(|f| f.touched.overlaps(&p));
+        (queued, drawing)
+    }
+
+    /// Hand the queued batch to the drawing threads (after the one they're on); this
+    /// thread carries on. `threads`: 0 picks (one thread for small batches)
+    pub(super) fn flush_with(&mut self, threads: usize) {
         if self.batch.cmds.is_empty() { return; }
+        // a transfer in progress writes memory as its data comes: keep to the order
+        self.sync();
         let t0 = std::time::Instant::now();
         let batch = std::mem::take(&mut self.batch);
         let n = if threads != 0 { threads } else if batch.area < 40_000 { 1 } else { draw_threads() };
-        let clut = &self.clut[..];
-        if n <= 1 {
-            self.flushes += 1;
-            let mut r = Raster { vram: &mut self.vram, clut, y0: 0, y1: 2048, pixels: 0 };
-            for cmd in &batch.cmds { r.draw(cmd); }
-            self.pixels += r.pixels;
-            self.draw_ns += t0.elapsed().as_nanos() as u64;
-            return;
-        }
         // 16-row bands handed out as threads finish; each band runs every primitive that
         // reaches it, in order, so every pixel sees the same sequence as one thread would
-        const BAND: i32 = 16;
         let (lo, hi) = batch.cmds.iter().fold((i32::MAX, i32::MIN), |(l, h), c| (l.min(c.y0), h.max(c.y1)));
         let nb = ((hi - lo) / BAND + 1) as usize;
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let total = std::sync::atomic::AtomicU64::new(0);
-        let vram = VramPtr(self.vram.as_mut_ptr());
-        let cmds = &batch.cmds;
-        let work = || {
-            // SAFETY: bands are disjoint rows, so no two threads touch one pixel of a
-            // frame or Z buffer; textures they read aren't written in this batch
-            let mem = unsafe { std::slice::from_raw_parts_mut(vram.ptr(), mem::VRAM_SIZE) };
-            let mut r = Raster { vram: mem, clut, y0: 0, y1: 0, pixels: 0 };
-            loop {
-                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if k >= nb { break; }
-                r.y0 = lo + k as i32 * BAND;
-                r.y1 = r.y0 + BAND;
-                for cmd in cmds { if cmd.y1 >= r.y0 && cmd.y0 < r.y1 { r.draw(cmd); } }
-            }
-            total.fetch_add(r.pixels, std::sync::atomic::Ordering::Relaxed);
-        };
-        // the pool's threads stay up between batches (starting threads for every batch
-        // cost more than drawing small ones)
-        pool().run(n.min(nb), &work);
+        let single = n <= 1;
+        let job = Box::new(Job {
+            cmds: batch.cmds, clut: self.clut.clone(), vram: VramPtr(self.vram.as_mut_ptr()), lo, nb, single,
+            next: Default::default(), total: Default::default(), busy: Default::default(),
+        });
+        pool().submit(if single { 1 } else { n.min(nb) }, &job);
+        self.inflight = Some(Inflight { job, touched: batch.written | batch.read });
         self.flushes += 1;
-        self.pixels += total.into_inner();
         self.draw_ns += t0.elapsed().as_nanos() as u64;
     }
 }
 
-/// Worker threads that run one job at a time with the caller
+const BAND: i32 = 16;
+
+/// A batch being drawn
+pub struct Inflight { job: Box<Job>, touched: Pages }
+
+struct Job {
+    cmds: Vec<Cmd>,
+    /// the CLUT as it was when the batch was handed over
+    clut: Vec<u32>,
+    vram: VramPtr,
+    lo: i32,
+    nb: usize,
+    single: bool,
+    next: std::sync::atomic::AtomicUsize,
+    total: std::sync::atomic::AtomicU64,
+    busy: std::sync::atomic::AtomicU64,
+}
+
+impl Job {
+    fn work(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let t0 = std::time::Instant::now();
+        // SAFETY: the GS doesn't touch the pages a batch uses until it has been waited
+        // for (`sync`); bands are disjoint rows, so no two threads touch one pixel of a
+        // frame or Z buffer; textures a batch reads aren't written in it
+        let mem = unsafe { std::slice::from_raw_parts_mut(self.vram.ptr(), mem::VRAM_SIZE) };
+        let mut r = Raster { vram: mem, clut: &self.clut, y0: 0, y1: 2048, pixels: 0 };
+        if self.single {
+            for cmd in &self.cmds { r.draw(cmd); }
+        } else {
+            loop {
+                let k = self.next.fetch_add(1, Relaxed);
+                if k >= self.nb { break; }
+                r.y0 = self.lo + k as i32 * BAND;
+                r.y1 = r.y0 + BAND;
+                for cmd in &self.cmds { if cmd.y1 >= r.y0 && cmd.y0 < r.y1 { r.draw(cmd); } }
+            }
+        }
+        self.total.fetch_add(r.pixels, Relaxed);
+        self.busy.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
+    }
+}
+
+/// The drawing threads: they take one batch at a time while the emulation goes on
 struct Pool {
     m: std::sync::Mutex<PoolState>,
     go: std::sync::Condvar,
@@ -207,7 +256,7 @@ struct Pool {
 }
 struct PoolState { round: u64, want: usize, left: usize, job: Option<JobPtr> }
 #[derive(Clone, Copy)]
-struct JobPtr(*const (dyn Fn() + Sync + 'static));
+struct JobPtr(*const Job);
 unsafe impl Send for JobPtr {}
 unsafe impl Sync for JobPtr {}
 
@@ -218,20 +267,20 @@ fn pool() -> &'static Pool {
             m: std::sync::Mutex::new(PoolState { round: 0, want: 0, left: 0, job: None }),
             go: std::sync::Condvar::new(), done: std::sync::Condvar::new(),
         }));
-        for id in 0..draw_threads().saturating_sub(1) {
+        for id in 0..draw_threads().max(1) {
             std::thread::Builder::new().name(format!("gs-draw-{id}")).spawn(move || {
                 let mut seen = 0;
                 loop {
                     let job = {
                         let mut g = p.m.lock().unwrap();
                         loop {
-                            if g.round != seen { seen = g.round; if id + 1 < g.want { break; } }
+                            if g.round != seen { seen = g.round; if id < g.want { break; } }
                             g = p.go.wait(g).unwrap();
                         }
                         g.job.unwrap()
                     };
-                    // SAFETY: run() waits for every thread it asked before it returns
-                    unsafe { (*job.0)() };
+                    // SAFETY: the job stays alive until wait() has seen every thread finish
+                    unsafe { (*job.0).work() };
                     let mut g = p.m.lock().unwrap();
                     g.left -= 1;
                     if g.left == 0 { p.done.notify_all(); }
@@ -243,23 +292,23 @@ fn pool() -> &'static Pool {
 }
 
 impl Pool {
-    /// Run `f` on `n` threads (this one included) and wait for all of them
-    fn run(&self, n: usize, f: &(dyn Fn() + Sync)) {
-        let helpers = n.saturating_sub(1).min(draw_threads().saturating_sub(1));
-        if helpers > 0 {
-            // SAFETY: the job is only used until `left` reaches 0, below
-            let job = JobPtr(unsafe { std::mem::transmute::<*const (dyn Fn() + Sync + '_), *const (dyn Fn() + Sync + 'static)>(f) });
-            let mut g = self.m.lock().unwrap();
-            g.round += 1; g.want = helpers + 1; g.left = helpers; g.job = Some(job);
-            drop(g);
-            self.go.notify_all();
-        }
-        f();
-        if helpers > 0 {
-            let mut g = self.m.lock().unwrap();
-            while g.left > 0 { g = self.done.wait(g).unwrap(); }
-            g.job = None;
-        }
+    /// Start `n` threads on `job` (the last job must have been waited for)
+    fn submit(&self, n: usize, job: &Job) {
+        let n = n.clamp(1, draw_threads().max(1));
+        let mut g = self.m.lock().unwrap();
+        // one GS at a time (tests run several): the slot frees when its owner waits
+        while g.job.is_some() { g = self.done.wait(g).unwrap(); }
+        g.round += 1; g.want = n; g.left = n; g.job = Some(JobPtr(job));
+        drop(g);
+        self.go.notify_all();
+    }
+
+    fn wait(&self) {
+        let mut g = self.m.lock().unwrap();
+        while g.left > 0 { g = self.done.wait(g).unwrap(); }
+        g.job = None;
+        drop(g);
+        self.done.notify_all();
     }
 }
 
@@ -287,7 +336,7 @@ pub struct Cmd { c: Ctx, k: Kind, y0: i32, y1: i32 }
 
 /// The queue (not saved: it's empty between frames)
 #[derive(Default)]
-pub struct Batch { cmds: Vec<Cmd>, area: u64, written: Pages, targets: Vec<Target> }
+pub struct Batch { cmds: Vec<Cmd>, area: u64, written: Pages, read: Pages, targets: Vec<Target> }
 
 /// A buffer the batch draws to
 #[derive(Clone, Copy)]

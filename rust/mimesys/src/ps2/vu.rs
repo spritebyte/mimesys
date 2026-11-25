@@ -95,6 +95,9 @@ pub struct Vu {
     pub programs: u64,
     #[serde(skip)]
     pub kicks: u64,
+    /// per instruction pair: the VF registers it reads (stall check), decoded once
+    #[serde(skip)]
+    reads: Vec<Reads>,
     #[serde(skip)]
     pub illegal: u64,
     /// cycles run, all programs (speed report)
@@ -110,7 +113,7 @@ impl Vu {
             vu1, vf, vi: [0; 16], acc: [0; 4], q: 0, p: 0, i: 0, r: 0, status: 0, mac: 0, clip: 0,
             pc: 0, tpc: 0, running: false, cycle: 0, vf_ready: [[0; 4]; 32], acc_ready: 0, vf_ready_old: [0; 32], acc_ready_old: 0,
             flags: VecDeque::new(), q_pend: None, p_pend: None, branch: None, ending: 0,
-            snap_at: 0, snap: None, host_ns: 0, start_pc: 0, kick: None, top: 0, itop: 0, programs: 0, kicks: 0, illegal: 0, total_cycles: 0,
+            snap_at: 0, snap: None, host_ns: 0, reads: Vec::new(), start_pc: 0, kick: None, top: 0, itop: 0, programs: 0, kicks: 0, illegal: 0, total_cycles: 0,
         }
     }
 
@@ -237,15 +240,14 @@ impl Vu {
         // (per field, as PCSX2 does; vf0 never stalls; ACC chains don't stall)
         let mut ready = 0;
         let fine = pcsx2_stalls();
-        let mut need = |(r, m): (usize, u32)| {
-            if m != 0 && (r != 0 || !fine) {
-                let m = if fine { m } else { 0xF };
-                let t = &self.vf_ready[r];
-                for k in 0..4 { if m & (8 >> k) != 0 { ready = ready.max(t[k]); } }
-            }
-        };
         let lower = hi & (1 << 31) == 0;
         if fine {
+            let mut need = |(r, m): (usize, u32)| {
+                if m != 0 && r != 0 {
+                    let t = &self.vf_ready[r];
+                    for k in 0..4 { if m & (8 >> k) != 0 { ready = ready.max(t[k]); } }
+                }
+            };
             let [a, b] = upper_reads(hi);
             need(a);
             need(b);
@@ -255,11 +257,19 @@ impl Vu {
                 need(b);
             }
         } else {
-            // patch 0270's lists: whole registers, vf0 included
-            for r in upper_reads_old(hi).into_iter().flatten() { need((r, 0xF)); }
-            if lower { for r in lower_reads_old(lo).into_iter().flatten() { need((r, 0xF)); } }
+            // patch 0270's model: whole registers (all fields share one time), vf0 included
+            let k = a >> 3;
+            if self.reads.len() != code.len() / 8 { self.reads = vec![Reads::default(); code.len() / 8]; }
+            let d = &mut self.reads[k];
+            if d.lo != lo || d.hi != hi || !d.valid { *d = Reads::decode(lo, hi); }
+            let (mut m, acc) = (d.vf, d.acc);
+            while m != 0 {
+                let r = m.trailing_zeros() as usize;
+                m &= m - 1;
+                ready = ready.max(self.vf_ready[r][0]);
+            }
+            if acc { ready = ready.max(self.acc_ready); }
         }
-        if !fine && upper_reads_acc(hi) { ready = ready.max(self.acc_ready); }
         self.cycle = self.cycle.max(ready);
         self.land_flags();
         self.land_q();
@@ -810,6 +820,19 @@ fn upper_reads_acc(op: u32) -> bool {
 fn pcsx2_stalls() -> bool {
     static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *P.get_or_init(|| std::env::var("PS2_VU_STALLS").map_or(false, |v| v == "pcsx2"))
+}
+
+/// A pair's stall inputs (patch 0270's model), cached by address
+#[derive(Clone, Copy, Default)]
+struct Reads { lo: u32, hi: u32, valid: bool, vf: u32, acc: bool }
+
+impl Reads {
+    fn decode(lo: u32, hi: u32) -> Self {
+        let mut vf = 0u32;
+        for r in upper_reads_old(hi).into_iter().flatten() { vf |= 1 << r; }
+        if hi & (1 << 31) == 0 { for r in lower_reads_old(lo).into_iter().flatten() { vf |= 1 << r; } }
+        Reads { lo, hi, valid: true, vf, acc: upper_reads_acc(hi) }
+    }
 }
 
 /// Patch 0270's read lists (registers, no fields)
