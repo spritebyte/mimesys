@@ -5,7 +5,7 @@
 //! Bilinear filtering, mipmaps and dithering come later (stage 5).
 
 use super::mem::{self, *};
-use super::{bits, Gs, Vertex, ALPHA_1, CLAMP_1, COLCLAMP, FBA_1, FOGCOL, FRAME_1, PABE, SCISSOR_1, TEST_1, TEX0_1, TEXA, ZBUF_1};
+use super::{bits, Gs, Vertex, ALPHA_1, CLAMP_1, COLCLAMP, FBA_1, FOGCOL, FRAME_1, PABE, RGBAQ, SCISSOR_1, TEST_1, TEX0_1, TEX1_1, TEXA, ZBUF_1};
 
 /// A primitive's settings, decoded once (everything the pixel pipeline needs per pixel)
 #[derive(Clone, Copy)]
@@ -29,6 +29,9 @@ pub struct Ctx {
     wms: u32, wmt: u32, minu: u32, maxu: u32, minv: u32, maxv: u32,
     ta0: i32, ta1: i32, aem: bool,
     tw: u32, th: u32,
+    /// bilinear texture filtering (TEX1 MMAG / MMIN; no mipmaps: the MIPMAP_LINEAR
+    /// minifying modes filter level 0)
+    linear: bool,
     fogcol: [i32; 3],
 }
 
@@ -97,6 +100,23 @@ impl Gs {
             ta0: bits(texa, 0, 8) as i32, ta1: bits(texa, 32, 8) as i32, aem: texa >> 15 & 1 != 0,
             tw: 1 << bits(tex0, 26, 4).min(10),
             th: 1 << bits(tex0, 30, 4).min(10),
+            linear: {
+                let tex1 = r[TEX1_1 + k];
+                let mag = tex1 >> 5 & 1 != 0;
+                let min = matches!(bits(tex1, 6, 3), 1 | 4 | 5);
+                if mag == min { mag } else {
+                    // LOD = K (LCM 1) or log2(1/Q) << L + K, from the Q in RGBAQ (the
+                    // primitive's last vertex); LOD <= 0 magnifies
+                    let kk = ((tex1 >> 32) as u32 & 0xFFF) as i32;
+                    let kk = ((kk << 20) >> 20) as f32 / 16.0;
+                    let lod = if tex1 & 1 != 0 { kk } else {
+                        let q = f32::from_bits((r[RGBAQ] >> 32) as u32).abs();
+                        let q = if q > 0.0 && q.is_finite() { q } else { 1.0 };
+                        (1.0 / q).log2() * (1u32 << bits(tex1, 19, 2)) as f32 + kk
+                    };
+                    if lod <= 0.0 { mag } else { min }
+                }
+            },
             fogcol: [bits(fog, 0, 8) as i32, bits(fog, 8, 8) as i32, bits(fog, 16, 8) as i32],
         }
     }
@@ -670,7 +690,18 @@ impl Raster<'_> {
         // texture function
         let mut col = rgba;
         if c.tme {
-            let tx = self.texel(c, u, v);
+            // (u, v in 1/16 texels)
+            let tx = if c.linear {
+                let (u, v) = (u - 8, v - 8);
+                let (iu, iv, fu, fv) = (u >> 4, v >> 4, u & 15, v & 15);
+                let (a, b) = (self.texel(c, iu, iv), self.texel(c, iu + 1, iv));
+                let (d, e) = (self.texel(c, iu, iv + 1), self.texel(c, iu + 1, iv + 1));
+                core::array::from_fn(|k| {
+                    let top = a[k] * (16 - fu) + b[k] * fu;
+                    let bot = d[k] * (16 - fu) + e[k] * fu;
+                    (top * (16 - fv) + bot * fv) >> 8
+                })
+            } else { self.texel(c, u >> 4, v >> 4) };
             let tcc = c.tcc;
             let m = |t: i32, f: i32| ((t * f) >> 7).min(255);
             col = match c.tfx {
@@ -757,14 +788,15 @@ impl Raster<'_> {
 #[inline]
 fn ffloor(v: f32) -> i32 { let t = v as i32; if (t as f32) > v { t - 1 } else { t } }
 
-/// Texel coordinates: STQ (perspective, normalised to the texture size) or UV (FST)
+/// Texel coordinates in 1/16 texels: STQ (perspective, normalised to the texture size)
+/// or UV (FST, already 12.4)
 #[inline]
 fn tex_coord(c: &Ctx, s: f32, t: f32, q: f32, u: u32, v: u32) -> (i32, i32) {
     if !c.tme { return (0, 0); }
     if c.fst {
-        ((u >> 4) as i32, (v >> 4) as i32)
+        (u as i32, v as i32)
     } else {
         let q = if q == 0.0 { 1.0 } else { q };
-        (ffloor(s / q * c.tw as f32), ffloor(t / q * c.th as f32))
+        (ffloor(s / q * (c.tw * 16) as f32), ffloor(t / q * (c.th * 16) as f32))
     }
 }

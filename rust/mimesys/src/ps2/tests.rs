@@ -1373,6 +1373,8 @@ fn vif1_frame_replay() {
             for (k, q) in gs.iter().enumerate() {
                 let (x, y) = ((*q as u32) & 0xFFFF, ((*q >> 32) as u32) & 0xFFFF);
                 let z = (*q >> 64) as u32;
+                let findq: Option<usize> = std::env::var("VIF_FINDQ").ok().and_then(|v| v.parse().ok());
+                if findq == Some(*all + k) { println!("qw {} is from program {} (started at {:X}), TOP {:X}, +{k} in its packet", *all + k, vu.programs - p0, vu.start_pc, vu.top); }
                 if x == 0xFFFF && y == 0xFFFF && (z == 0x8000_0000 || z == 0x7FFF_FFFF) {
                     bad += 1;
                     if bad > 40 { continue; }
@@ -1409,7 +1411,9 @@ fn vif1_frame_replay() {
         println!("time {:.1} ms, VU1 {} cycles ({:.2} ns a cycle, VIF included); JIT translating {:.1} ms, without it {:.1} ms",
             ns / 1e6, vu.total_cycles - c0, ns / (vu.total_cycles - c0).max(1) as f64, cns / 1e6, (ns - cns) / 1e6);
         println!("VU host time {:.1} ms (translating included)", (vu.host_ns - h0) as f64 / 1e6);
-        if let Some(j) = vu.jit.0.as_ref() { println!("JIT: {} translated ({} stale), {} runs", j.translated, j.stale, j.runs); }
+        println!("VU cycles translated {} / interpreted {}", vu.jit_cycles, vu.interp_cycles);
+    if let Some(j) = vu.jit.0.as_ref() { println!("hot blocks (pc, pairs, runs): {:X?}", j.hot(8)); }
+    if let Some(j) = vu.jit.0.as_ref() { println!("JIT: {} translated ({} stale), {} runs", j.translated, j.stale, j.runs); }
         if _pass + 1 < passes {
             keep = std::mem::take(&mut vu.jit);
             if std::env::var("VIF_WAIT").is_ok() { if let Some(j) = keep.0.as_mut() { j.wait_idle(); } }
@@ -1431,7 +1435,7 @@ fn vif1_frame_replay() {
             let st = (vj.pc, vj.cycle, vj.vi);
             while k < ti.len() && ti[k] != st { k += 1; }
             if k == ti.len() { println!("JIT state never seen by the interpreter: pc {:04X} cycle {} vi {:X?} (after {n} JIT steps)", st.0, st.1, st.2); break; }
-            match jit.get(code, vj.pc, true) {
+            match jit.get(code, vj.pc, true, vj.code_gen) {
                 Some(f) => {
                     let mut ctx = super::vu_jit::Ctx::new(&mut vj, &mut dj, &mut oj);
                     unsafe { f(&mut ctx) };
@@ -1521,4 +1525,27 @@ fn spr_to_tte_writes_tags_into_the_scratchpad() {
     assert_eq!(rd(0x110), qw([1, 2, 3, 4]));
     assert_eq!(rd(0x120), qw([0x7000_0000, 0, 0xCCCC, 0xDDDD]));
     assert_eq!(d.ch[dmac::SPR_TO].chcr & 0x100, 0);
+}
+
+/// PS2_VU1_SRC: an UNPACK writing the watched VU1 quadword names its EE source address and
+/// that address's last writer (run alone: the setting is read once per process)
+#[test]
+#[ignore]
+fn vu1_src_names_the_source_address() {
+    unsafe { std::env::set_var("PS2_VU1_SRC", "10D,8"); }
+    let mut vif = super::vif::Vif::new(true);
+    let mut vu = super::vu::Vu::new(true);
+    let mut code = vec![0u8; 0x4000];
+    let mut data = vec![0u8; 0x4000];
+    let mut gs = Vec::new();
+    crate::common::cpu::r5900::wr_note(0x44B7D0, 0x0012_3450, 0x0012_0008, crate::common::cpu::r5900::WR_EE);
+    // STCYCL 1,1; UNPACK V4-32, 2 rows to 10C, data read from EE 0044B7C0 (twice: w 4, then 8)
+    let words = [0x0100_0101u32, 0x6C02_010C, 1, 2, 3, 4, 5, 6, 7, 8];
+    vif.dbg_srcq.extend([u32::MAX, u32::MAX, 0x44B7C0, 0x44B7C4, 0x44B7C8, 0x44B7CC, 0x44B7D0, 0x44B7D4, 0x44B7D8, 0x44B7DC]);
+    let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs, gif_running: false, gif_held: false };
+    vif.feed(&words, &mut cx);
+    let log = crate::common::cpu::r5900::src_take();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(log[0].starts_with("00000005 00000006 00000007 00000008 from EE 0044B7D0"), "{}", log[0]);
+    assert!(log[0].ends_with("last EE store pc 00123450 ra 00120008"), "{}", log[0]);
 }

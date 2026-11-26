@@ -79,6 +79,12 @@ pub struct Vif {
     pub unpacks: u64,
     #[serde(skip)]
     pub irqs: u64,
+    /// debugging (PS2_VU1_SRC): EE source address of each word not yet read, and of the
+    /// current UNPACK's first data word
+    #[serde(skip)]
+    pub dbg_srcq: VecDeque<u32>,
+    #[serde(skip)]
+    dbg_first: u32,
 }
 
 impl Vif {
@@ -142,6 +148,10 @@ impl Vif {
 
     /// Feed one word of the stream; true if a finished command interrupts
     pub fn word(&mut self, w: u32, cx: &mut VifCtx) -> bool {
+        if self.vif1 && crate::common::cpu::r5900::vu1_src().is_some() {
+            let src = self.dbg_srcq.pop_front().unwrap_or(u32::MAX);
+            if self.left > 0 && self.buf.is_empty() { self.dbg_first = src; }
+        }
         if self.left > 0 && self.vif1 && vif_log() && std::env::var_os("VIF_LOG_DATA").is_some() {
             println!("VIF1   data {w:08X}");
         }
@@ -236,6 +246,7 @@ impl Vif {
             0x4A => {
                 let a = self.addr as usize & (cx.code.len() - 1);
                 cx.code[a..a + 4].copy_from_slice(&w.to_le_bytes());
+                cx.vu.code_gen += 1;
                 self.addr += 4;
             }
             0x50 | 0x51 => {
@@ -285,6 +296,7 @@ impl Vif {
             let has_data = wl <= cl || in_cycle < cl;
             // this row's values (None = undefined)
             let mut vals: [Option<u32>; 4] = [None; 4];
+            let row_bit = bitpos;
             if has_data {
                 if vl == 3 {
                     let v = peek(bitpos, 16); bitpos += 16;
@@ -324,6 +336,18 @@ impl Vif {
                     _ => None,
                 };
                 if let Some(v) = v { cx.data[a + 4 * k..a + 4 * k + 4].copy_from_slice(&v.to_le_bytes()); }
+            }
+            if self.vif1 && has_data {
+                if let Some((q, want)) = crate::common::cpu::r5900::vu1_src_cfg() {
+                    let w3 = u32::from_le_bytes(cx.data[a + 12..a + 16].try_into().unwrap());
+                    if q == addr & qmask && want.is_none_or(|x| x == w3) {
+                        let words: Vec<String> = (0..4).map(|k| format!("{:08X}", u32::from_le_bytes(cx.data[a + 4 * k..a + 4 * k + 4].try_into().unwrap()))).collect();
+                        let src = if self.dbg_first == u32::MAX { u32::MAX } else { self.dbg_first.wrapping_add((row_bit / 8) as u32) };
+                        let who = if src == u32::MAX { "unknown".to_string() } else { crate::common::cpu::r5900::wr_describe(src) };
+                        crate::common::cpu::r5900::src_log(format!("{} from EE {:08X} (UNPACK {:08X} row {}, VU1 programs {}): {}",
+                            words.join(" "), src, c, n, cx.vu.programs, who));
+                    }
+                }
             }
         }
     }

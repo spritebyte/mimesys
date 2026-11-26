@@ -551,6 +551,8 @@ impl EeView<'_> {
             0x0000_0000..=0x01FF_FFFF => wr32m(&mut h.ram, pa as usize & (RAM_SIZE - 1), v, mask),
             0x1000_0000..=0x1000_FFFF => h.ee_io_write(pa, v, mask),
             0x1100_0000..=0x1100_FFFF => {
+                // micro memory changed: the JIT checks its blocks again
+                match pa & 0xC000 { 0x0000 => h.vu0.code_gen += 1, 0x8000 => h.vu1.code_gen += 1, _ => {} }
                 let m = vu_mem_mut(h, pa);
                 let o = (pa & 0x3FFF) as usize & (m.len() - 1);
                 wr32m(m, o, v, mask);

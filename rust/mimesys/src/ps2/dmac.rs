@@ -66,6 +66,8 @@ pub struct Dmac {
     pub vif0_out: Vec<u32>,
     #[serde(skip)]
     pub vif1_out: Vec<u32>,
+    /// debugging (PS2_VU1_SRC): the EE address each vif1_out word was read from (MAX: a tag)
+    pub vif1_src: Vec<u32>,
     /// debugging: transfers finished per channel
     #[serde(skip)]
     pub done: [u64; 10],
@@ -93,7 +95,7 @@ pub struct Dmac {
 impl Default for Dmac {
     fn default() -> Self {
         Self { ch: Default::default(), ctrl: 0, stat: 0, pcr: 0, sqwc: 0, rbsr: 0, rbor: 0, stadr: 0,
-            enable: 0x1201, gif_out: Vec::new(), vif0_out: Vec::new(), vif1_out: Vec::new(), done: [0; 10], mfifo_empty: false, gif_hold: false, gif_one_packet: false, gif_left: 0, gif_eop: false, gif_stop: false }
+            enable: 0x1201, gif_out: Vec::new(), vif0_out: Vec::new(), vif1_out: Vec::new(), vif1_src: Vec::new(), done: [0; 10], mfifo_empty: false, gif_hold: false, gif_one_packet: false, gif_left: 0, gif_eop: false, gif_stop: false }
     }
 }
 
@@ -117,6 +119,7 @@ fn mem_write(ram: &mut [u8], spr: &mut [u8], a: u32, v: u128) {
         if crate::common::cpu::r5900::watch_hit(o as u32, 16) && crate::common::cpu::r5900::watch_note() {
             crate::common::cpu::r5900::watch_log(format!("DMA write [{:08X}] = {:032X}", o, v));
         }
+        crate::common::cpu::r5900::wr_note(o as u32, 0, 0, crate::common::cpu::r5900::WR_DMA);
         ram[o..o + 16].copy_from_slice(&v.to_le_bytes());
     }
 }
@@ -349,7 +352,13 @@ impl Dmac {
                 }
             }
             VIF0 => for k in 0..4 { self.vif0_out.push((q >> (32 * k)) as u32); },
-            VIF1 => for k in 0..4 { self.vif1_out.push((q >> (32 * k)) as u32); },
+            VIF1 => {
+                for k in 0..4 { self.vif1_out.push((q >> (32 * k)) as u32); }
+                if crate::common::cpu::r5900::vu1_src().is_some() {
+                    let a = self.ch[VIF1].madr;
+                    self.vif1_src.extend([a, a + 4, a + 8, a + 12]);
+                }
+            }
             _ => {}
         }
     }
@@ -362,7 +371,10 @@ impl Dmac {
         }
         // VIF: the tag's upper two words are VIF codes
         if n == VIF0 { self.vif0_out.extend([hi as u32, (hi >> 32) as u32]); }
-        if n == VIF1 { self.vif1_out.extend([hi as u32, (hi >> 32) as u32]); }
+        if n == VIF1 {
+            self.vif1_out.extend([hi as u32, (hi >> 32) as u32]);
+            if crate::common::cpu::r5900::vu1_src().is_some() { self.vif1_src.extend([u32::MAX, u32::MAX]); }
+        }
     }
 
     /// SIF0: destination chain, tags and data from the IOP through the FIFO
@@ -408,6 +420,11 @@ impl Dmac {
             // MFIFO: SPR_FROM fills the ring buffer (RBOR + offset & RBSR)
             if mfifo { c.madr = rbor | (c.madr & rbsr); }
             mem_write(ram, spr, c.madr & 0x7FFF_FFFF, q);
+            // PS2_VU1_SRC: the copy keeps the scratchpad quadword's writer
+            if crate::common::cpu::r5900::vu1_src().is_some() {
+                let w = crate::common::cpu::r5900::wr_get(0x8000_0000 | c.sadr);
+                crate::common::cpu::r5900::wr_set_raw(c.madr & 0x01FF_FFF0, w & !3 | crate::common::cpu::r5900::WR_SPR_FROM);
+            }
             c.sadr = (c.sadr + 16) & 0x3FF0;
             c.madr = c.madr.wrapping_add(16);
             if mfifo { c.madr = rbor | (c.madr & rbsr); }

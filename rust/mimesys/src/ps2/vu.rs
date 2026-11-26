@@ -79,6 +79,15 @@ pub struct Vu {
     pub pc: u32,
     pub tpc: u32,
     pub running: bool,
+    /// bumped by every write to micro memory (MPG, EE stores): translated blocks are
+    /// checked against the code again only after one
+    #[serde(skip)]
+    pub code_gen: u64,
+    /// micro-mode cycles run by translated blocks / by the interpreter with the JIT on
+    #[serde(skip)]
+    pub jit_cycles: u64,
+    #[serde(skip)]
+    pub interp_cycles: u64,
     /// cycle count of the current program
     pub cycle: u64,
     /// (unused: keeps the serialized layout of patch 0270 and earlier)
@@ -210,7 +219,7 @@ impl Vu {
             vu1, vf, vi: [0; 16], acc: [0; 4], q: 0, p: 0, i: 0, r: 0, status: 0, mac: 0, clip: 0,
             pc: 0, tpc: 0, running: false, cycle: 0, vf_ready: [[0; 4]; 32], acc_ready: 0, vf_ready_old: [0; 32], acc_ready_old: 0,
             flags: FlagQ::default(), q_pend: None, p_pend: None, branch: NO_BRANCH, ending: 0,
-            snap_at: 0, snap: None, host_ns: 0, reads: Vec::new(), dec: Vec::new(), vi_hist: [0; 4], br_stalled: false, start_pc: 0, kick: None, top: 0, itop: 0, programs: 0, kicks: 0, illegal: 0, total_cycles: 0, next_due: 0, qp_due: 0, kick_on: false, up_pend: None, jit: JitCell(None),
+            snap_at: 0, snap: None, host_ns: 0, reads: Vec::new(), dec: Vec::new(), vi_hist: [0; 4], br_stalled: false, start_pc: 0, kick: None, top: 0, itop: 0, programs: 0, kicks: 0, illegal: 0, total_cycles: 0, next_due: 0, qp_due: 0, code_gen: 0, jit_cycles: 0, interp_cycles: 0, kick_on: false, up_pend: None, jit: JitCell(None),
         }
     }
 
@@ -280,6 +289,11 @@ impl Vu {
             }
         }
     }
+    /// WAITQ's stall (before the pair runs)
+    pub(crate) fn wait_q(&mut self) {
+        if let Some((at, _, _)) = self.q_pend { self.cycle = self.cycle.max(at); }
+    }
+
     fn land_q(&mut self) {
         if let Some((at, v, st)) = self.q_pend {
             if at <= self.cycle {
@@ -352,12 +366,19 @@ impl Vu {
                         println!("   JIT state unseen: pc {:04X} cycle {} (last block start {:04X?})", st.0, st.1, j.last);
                     }
                 }
-                match j.get(code, self.pc, leader) {
+                match j.get(code, self.pc, leader, self.code_gen) {
                     // SAFETY: the block only touches the VU, data memory and path1 through ctx
-                    Some(f) => { unsafe { j.last = Some(self.pc); ctx.vu = self as *mut Vu; f(&mut ctx) }; leader = true; }
+                    Some(f) => {
+                        let c0 = self.cycle;
+                        unsafe { j.last = Some(self.pc); ctx.vu = self as *mut Vu; f(&mut ctx) };
+                        self.jit_cycles += self.cycle - c0;
+                        leader = true;
+                    }
                     None => {
                         let next = self.pc.wrapping_add(8);
+                        let c0 = self.cycle;
                         self.step(code, data, path1);
+                        self.interp_cycles += self.cycle - c0;
                         self.kick_on = self.kick.is_some();
                         self.recalc_due();
                         leader = self.pc != next;
@@ -431,6 +452,9 @@ impl Vu {
         }
         self.br_stalled = ready > self.cycle;
         self.cycle = self.cycle.max(ready);
+        // WAITQ stalls the whole pair: the upper half reads the new Q (DDS's city: MULq
+        // beside WAITQ after DIV used the previous vertex's Q)
+        if hi & (1 << 31) == 0 && is_waitq(lo) { self.wait_q(); }
         self.land_flags();
         self.land_q();
         self.land_p();
@@ -481,6 +505,7 @@ impl Vu {
             qp_due: offset_of!(Vu, qp_due), mac: offset_of!(Vu, mac), status: offset_of!(Vu, status), clip: offset_of!(Vu, clip) }
     }
     pub(crate) fn jit_bvi(&self, r: usize) -> u32 { self.bvi(r) as u32 }
+    pub(crate) fn jit_wait_q(&mut self) { self.wait_q(); self.recalc_due(); }
     /// The (register, fields) a pair waits for (as `step`)
     pub(crate) fn jit_reads(lo: u32, hi: u32) -> Vec<(usize, u32)> {
         let d = Dec::decode(lo, hi);
@@ -717,6 +742,12 @@ impl Vu {
                         let (v, st) = vu_sqrt(self.vf[ft][ftf]);
                         self.start_q(v, st, 7);
                     }
+                    0x3A if self.vf[ft][ftf] & 0x7F80_0000 == 0 => {                       // RSQRT x / 0 (PCSX2)
+                        let (x, y) = (s[fsf], self.vf[ft][ftf]);
+                        let sign = (x ^ y) & 0x8000_0000;
+                        let (v, st) = if x & 0x7F80_0000 == 0 { (sign, ST_D | ST_I) } else { (sign | 0x7F7F_FFFF, ST_D) };
+                        self.start_q(v, st, 13);
+                    }
                     0x3A => {                                                               // RSQRT
                         let (r, st) = vu_sqrt(self.vf[ft][ftf]);
                         let (v, st2) = vu_div(s[fsf], r);
@@ -922,8 +953,18 @@ fn first_field(dest: u32) -> usize { (0..4).find(|k| dest & (8 >> k) != 0).unwra
 fn imm15(op: u32) -> u32 { (op >> 10 & 0x7800) | (op & 0x7FF) }
 fn imm12(op: u32) -> u32 { (op >> 10 & 0x800) | (op & 0x7FF) }
 
+/// WAITQ (lower 40h, special 3BFh)
+pub(crate) fn is_waitq(lo: u32) -> bool { lo >> 25 == 0x40 && lo & 0x7FF == 0x3BF }
+
 /// DIV: x / y with the I (0 / 0) and D (x / 0) status bits
 fn vu_div(x: u32, y: u32) -> (u32, u32) {
+    // by zero: ±0x7F7FFFFF (the largest IEEE single, as PCSX2), not the PS2's 0x7FFFFFFF.
+    // God of War's title: hidden bones (zero matrices) give w = 0; with 0x7FFFFFFF their
+    // vertices were drawn as huge triangles
+    if y & 0x7F80_0000 == 0 {
+        let st = if x & 0x7F80_0000 == 0 { ST_I } else { ST_D };
+        return ((x ^ y) & 0x8000_0000 | 0x7F7F_FFFF, st);
+    }
     let (v, f) = ps2_div(x, y);
     use crate::common::cpu::r5900::fpu::{F_D, F_I};
     let st = if f & F_I != 0 { ST_I } else if f & F_D != 0 { ST_D } else { 0 };

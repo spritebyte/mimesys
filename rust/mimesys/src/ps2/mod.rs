@@ -44,7 +44,7 @@ pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
 /// Printed at the top of the debug log so a log says which build made it
-const PATCH: &str = "0296";
+const PATCH: &str = "0304";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;
@@ -90,6 +90,10 @@ pub struct Ps2System {
     /// VIF, VU1, SPU2...), and the frame total; ns at the last report
     host_ns: [u64; 4],
     host_last: [u64; 5],
+    /// PS2_TICK_PROFILE=1: host time in `tick` by part (timers, DMAC + VIF less VU,
+    /// GIF→GS, SPU2, IOP DMA / CDVD / SIO2, IPU + rest) and at the last report
+    tick_ns: [u64; 6],
+    tick_last: [u64; 6],
     gs_flushes_last: u64,
     gs_busy_last: u64,
     gs_syncs_last: u64,
@@ -133,6 +137,18 @@ pub(crate) fn int0_mode() -> (u64, bool) {
         Err(_) => (4, false),
     })
 }
+/// PS2_REC_EVERY=n (frames, at least 10): GS / VIF1 recordings that often
+fn rec_every() -> Option<u64> {
+    static N: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var("PS2_REC_EVERY").ok().and_then(|v| v.parse::<u64>().ok()).map(|n| n.max(10)))
+}
+
+/// PS2_TICK_PROFILE=1: time `tick`'s parts (report line `tick parts`)
+fn tick_profile() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PS2_TICK_PROFILE").is_ok_and(|v| v != "0"))
+}
+
 fn int0_delay() -> u64 { int0_mode().0 }
 
 /// A loop of nothing but NOPs and one branch back (BEQ $0, $0 or J) with a NOP delay
@@ -186,6 +202,7 @@ impl Ps2System {
             skipped_iop: 0,
             host_ns: [0; 4],
             host_last: [0; 5],
+            tick_ns: [0; 6], tick_last: [0; 6],
             gs_flushes_last: 0,
             gs_busy_last: 0,
             gs_syncs_last: 0,
@@ -203,7 +220,7 @@ impl Ps2System {
             gs_rec_left: 0,
             last_report: None,
             jit: Default::default(),
-            jit_on: std::env::var_os("PS2_NOJIT").is_none() && crate::common::cpu::r5900::watch().is_none(),
+            jit_on: std::env::var_os("PS2_NOJIT").is_none() && !crate::common::cpu::r5900::watching(),
         };
         s.reset_cpus();
         // a disc image: the frontend sends its path
@@ -336,6 +353,15 @@ impl Ps2System {
 
     /// Timers and DMA after `ee` EE cycles, `iop` IOP cycles and `hblank` HBLANKs
     fn tick(&mut self, ee: u32, iop: u32, hblank: u32) {
+        let prof = tick_profile();
+        let mut t = prof.then(std::time::Instant::now);
+        let vu0 = if prof { self.hw.vu1.host_ns + self.hw.vu0.host_ns } else { 0 };
+        let tick_ns = &mut self.tick_ns;
+        let mut lap = |k: usize, sub: u64| if let Some(t0) = t.as_mut() {
+            let n = std::time::Instant::now();
+            tick_ns[k] += ((n - *t0).as_nanos() as u64).saturating_sub(sub);
+            *t0 = n;
+        };
         let h = &mut self.hw;
         for n in 0..4 {
             if h.timers[n].tick(ee / 2, hblank) { h.intc_stat |= hw::INT_TIMER0 << n; }
@@ -343,6 +369,7 @@ impl Ps2System {
         for n in 0..6 {
             if h.iop_timers[n].tick(n, iop, hblank) { h.i_stat |= timers::IOP_TIMER_IRQ[n]; }
         }
+        lap(0, 0);
         h.dmac.step(&mut h.ram, &mut self.ee.scratch, &mut h.sif);
         if h.dmac.ch[dmac::VIF1].chcr & 0x101 == 0x100 {
             h.gs.flush();
@@ -359,8 +386,13 @@ impl Ps2System {
         }
         if !h.dmac.vif1_out.is_empty() {
             let words = std::mem::take(&mut h.dmac.vif1_out);
+            if crate::common::cpu::r5900::vu1_src().is_some() {
+                h.vif1.dbg_srcq.extend(std::mem::take(&mut h.dmac.vif1_src));
+            }
             h.vif_feed(true, &words);
         }
+        let vu = if prof { h.vu1.host_ns + h.vu0.host_ns - vu0 } else { 0 };
+        lap(1, vu);
         // GIF PATH3: what the GIF channel moved goes to the GS
         if !h.dmac.gif_out.is_empty() {
             let q = std::mem::take(&mut h.dmac.gif_out);
@@ -369,9 +401,11 @@ impl Ps2System {
         }
         // VIF1 at a FLUSHA goes on now PATH3's data is in
         h.vif1_flusha_check();
+        lap(2, 0);
         // the SPU2: voices and auto-DMA input play; auto-DMA transfers end at the audio's pace
         h.spu2.tick(iop);
         if std::mem::take(&mut h.spu2.irq) { h.i_stat |= hw::IOP_SPU2; }
+        lap(3, 0);
         h.iop_dma.tick_spu(iop);
         if h.iop_dma.step(&mut h.iop_ram, &mut h.sif, &mut h.sio2, &mut h.spu2) { h.i_stat |= hw::IOP_DMA; }
         // the CDVD drive: seeks, and sectors into DMA channel 3
@@ -384,7 +418,9 @@ impl Ps2System {
         }
         // a SIF0 transfer may have new data for the EE
         if h.dmac.ch[dmac::SIF0].chcr & 0x100 != 0 { h.dmac.step(&mut h.ram, &mut self.ee.scratch, &mut h.sif); }
+        lap(4, 0);
         self.update_irqs();
+        if let Some(t0) = t { self.tick_ns[5] += t0.elapsed().as_nanos() as u64; }
     }
 
     fn update_irqs(&mut self) {
@@ -430,6 +466,15 @@ impl Ps2System {
                 ms(3, self.host_ns[3]), ms(0, self.host_ns[0]), ms(1, self.host_ns[1]), ms(2, self.host_ns[2]), ms(4, vu),
                 (cur.6 - gs0) as f64 / frames / 1e6,
                 ms(3, self.host_ns[3]) - ms(0, self.host_ns[0]) - ms(1, self.host_ns[1]) - ms(2, self.host_ns[2]));
+        }
+        if tick_profile() {
+            if let Some((_, f0, ..)) = self.last_report {
+                let frames = (cur.0 - f0).max(1) as f64;
+                let d: Vec<f64> = (0..6).map(|k| (self.tick_ns[k] - self.tick_last[k]) as f64 / frames / 1e6).collect();
+                crate::dlog!("PS2:   tick parts a frame: timers {:.1} + DMAC/VIF (less VU) {:.1} + GIF->GS {:.1} + SPU2 {:.1} + IOP DMA/CDVD/SIO2 {:.1} + irqs {:.1} ms",
+                    d[0], d[1], d[2], d[3], d[4], d[5]);
+            }
+            self.tick_last = self.tick_ns;
         }
         self.last_report = Some((now, cur.0, cur.1, cur.2, cur.3, cur.4, cur.5, cur.6, cur.7));
         self.host_last = [self.host_ns[0], self.host_ns[1], self.host_ns[2], self.host_ns[3], self.hw.vu1.host_ns + self.hw.vu0.host_ns];
@@ -586,6 +631,10 @@ impl Ps2System {
                 crate::dlog!("PS2:   watch {:08X}+{:X}, last writes:", a, l);
                 for w in crate::common::cpu::r5900::watch_take() { crate::dlog!("PS2:     {}", w); }
             }
+            if let Some(q) = crate::common::cpu::r5900::vu1_src() {
+                crate::dlog!("PS2:   VU1 qw {:03X} sources (latest last):", q);
+                for w in crate::common::cpu::r5900::src_take() { crate::dlog!("PS2:     {}", w); }
+            }
             crate::dlog!("PS2:   SIF RPC recent: {}", r.recent.iter().cloned().collect::<Vec<_>>().join(" | "));
             let w: Vec<String> = r.waiting.values().map(|(t, n)| format!("{t} (call #{n} of {})", r.calls)).collect();
             crate::dlog!("PS2:   SIF RPC still waiting for an answer: {}", if w.is_empty() { "none".to_string() } else { w.join(", ") });
@@ -608,6 +657,13 @@ impl Ps2System {
         crate::dlog!("PS2:   VIF0 MSCAL {} UNPACK {} | VIF1 DIRECT qw {} MSCAL {} UNPACK {} | VU0 programs {} | VU1 programs {} XGKICK {} illegal {}/{}",
             h.vif0.mscal, h.vif0.unpacks, h.vif1.direct_qw, h.vif1.mscal, h.vif1.unpacks, h.vu0.programs, h.vu1.programs, h.vu1.kicks,
             h.vu0.illegal, h.vu1.illegal);
+        for (n, vu) in [(0, &h.vu0), (1, &h.vu1)] {
+            if let Some(j) = vu.jit.0.as_ref() {
+                let (a, b) = (vu.jit_cycles, vu.interp_cycles);
+                crate::dlog!("PS2:   VU{n} JIT: {:.1}% of cycles translated ({} M / {} M interpreted) | {} translated, {} again, {} block runs, {} waiting, epoch {} | hot {:X?}",
+                    100.0 * a as f64 / (a + b).max(1) as f64, a / 1_000_000, b / 1_000_000, j.translated, j.stale, j.runs, j.in_flight(), j.epoch(), j.hot(4));
+            }
+        }
         crate::dlog!("PS2:   VIF I-bit interrupts: VIF0 {} VIF1 {} | stalled {} / {} | waiting words {} / {} | ERR {:X} / {:X}",
             h.vif0.irqs, h.vif1.irqs, h.vif0.stalled, h.vif1.stalled, h.vif0.pending.len(), h.vif1.pending.len(), h.vif0.err, h.vif1.err);
         crate::dlog!("PS2:   VIF1 waiting for PATH3: at FLUSHA {} | for one packet after MSKPATH3 0 {}", h.vif1.flusha_wait, h.vif1.p3_packet_wait);
@@ -696,6 +752,11 @@ impl System for Ps2System {
         self.host_ns[3] += t_frame.elapsed().as_nanos() as u64;
         self.hw.sio2.card_out = self.hw.sio2.card_out.saturating_sub(1);
         if debug() && self.current_frame % 300 == 299 { self.report(); }
+        // PS2_REC_EVERY=n: record gs_frame.bin / vif1_frame.bin every n frames too (the last
+        // one before quitting is kept), to catch a short-lived glitch
+        if let Some(n) = rec_every() {
+            if self.current_frame % n == n - 1 && self.hw.gs.rec.is_none() { self.gs_rec_due = true; }
+        }
         self.current_frame += 1;
     }
 
@@ -829,7 +890,7 @@ impl System for Ps2System {
     fn has_battery(&self) -> bool { false }
 
     fn set_option(&mut self, key: &str, value: i64) {
-        if key == "ee_jit" { self.jit_on = value != 0 && crate::common::cpu::r5900::watch().is_none(); }
+        if key == "ee_jit" { self.jit_on = value != 0 && !crate::common::cpu::r5900::watching(); }
         if key == "debug_report" {
             if value != 0 { crate::dlog!("PS2 core: patch {PATCH} (INT0 {:?}, VU stalls {})", int0_mode(), if vu::pcsx2_stalls() { "pcsx2" } else { "old" }); }
             DEBUG.store(value != 0, std::sync::atomic::Ordering::Relaxed);

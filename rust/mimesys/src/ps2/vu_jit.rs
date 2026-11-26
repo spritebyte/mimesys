@@ -57,6 +57,9 @@ struct Block {
     /// micro memory byte address and the pairs as translated
     addr: usize,
     words: Box<[u64]>,
+    /// the code_gen it was last found to match at
+    seen: u64,
+    hits: u64,
 }
 
 /// To the translator thread: a block to translate, or start over (dropping all code)
@@ -92,6 +95,8 @@ pub struct VuJit {
     sync: bool,
     /// requests sent, not yet back
     in_flight: usize,
+    /// micro memory's write count at this get
+    cgen: u64,
     pub translated: u64,
     pub stale: u64,
     pub runs: u64,
@@ -140,6 +145,10 @@ unsafe extern "C" fn h_bvi(c: *mut Ctx, r: u32) -> u32 {
     let (vu, _, _) = unsafe { parts(c) };
     vu.jit_bvi(r as usize)
 }
+unsafe extern "C" fn h_wait_q(c: *mut Ctx) {
+    let (vu, _, _) = unsafe { parts(c) };
+    vu.jit_wait_q();
+}
 unsafe extern "C" fn h_commit(c: *mut Ctx) {
     let (vu, _, _) = unsafe { parts(c) };
     vu.jit_commit();
@@ -159,6 +168,33 @@ fn fast_on() -> bool {
 }
 
 /// A lower instruction that branches or jumps (its next pair is a delay slot)
+/// Which pairs' inline FMAC MAC / status pushes nobody can see: a later inline FMAC push
+/// (pair j) replaces them, j lands inside the block (pair j + 4 exists; each pair moves
+/// the cycle on at least one), and nothing from this pair to j + 3 reads or writes the
+/// MAC / status flags (FS* / FM*, or an upper half run by a handler). Mid-block exits only come
+/// after pair 0, so a push there is kept. The flags' sticky status bits are ORed in at
+/// once instead (nothing reads status in the window, and landings keep bits 6-11).
+fn dead_pushes(words: &[u64]) -> Vec<bool> {
+    let n = words.len();
+    let mut dead = vec![false; n];
+    if !inline_on() || std::env::var_os("VU_JIT_ALL_FLAGS").is_some() { return dead; }
+    let cls = |w: u64| super::vu::up_class((w >> 32) as u32);
+    let pushes: Vec<bool> = words.iter().map(|&w| matches!(cls(w), UpClass::Fm(..))).collect();
+    let touch: Vec<bool> = words.iter().map(|&w| {
+        let (lo, hi) = (w as u32, (w >> 32) as u32);
+        let flag_op = hi & (1 << 31) == 0 && (0x14..=0x1B).contains(&(lo >> 25));     // FS* / FM* (FC* only see CLIP)
+        let up_helper = !matches!(cls(w), UpClass::Nop | UpClass::Fm(..) | UpClass::Mm(..) | UpClass::Itof(_)
+            | UpClass::Ftoi(_) | UpClass::Abs | UpClass::Clip);
+        flag_op || up_helper
+    }).collect();
+    for i in 1..n {
+        if !pushes[i] { continue; }
+        let Some(j) = (i + 1..n).find(|&j| pushes[j]) else { continue };
+        if j + 4 < n && !touch[i..=j + 3].iter().any(|&t| t) { dead[i] = true; }
+    }
+    dead
+}
+
 fn is_branch(lo: u32) -> bool { matches!(lo >> 25, 0x20 | 0x21 | 0x24 | 0x25 | 0x28 | 0x29 | 0x2C..=0x2F) }
 
 impl Default for VuJit {
@@ -193,12 +229,23 @@ fn spawn() -> Option<(std::sync::mpsc::Sender<Msg>, std::sync::mpsc::Receiver<Do
 
 impl VuJit {
     pub fn new() -> Self {
-        Self { table: Vec::new(), cold: Vec::new(), pending: Vec::new(), local: None, worker: None, epoch: 0, in_epoch: 0, sync: false, in_flight: 0,
+        Self { table: Vec::new(), cold: Vec::new(), pending: Vec::new(), local: None, worker: None, epoch: 0, in_epoch: 0, sync: false, in_flight: 0, cgen: 0,
                translated: 0, stale: 0, runs: 0, last: None, compile_ns: 0 }
     }
 
     /// One that translates on this thread
     pub fn new_sync() -> Self { Self { sync: true, ..Self::new() } }
+
+    pub fn in_flight(&self) -> usize { self.in_flight }
+    pub fn epoch(&self) -> u32 { self.epoch }
+
+    /// The most-run blocks: (start pc, pairs, runs) (debugging)
+    pub fn hot(&self, n: usize) -> Vec<(u32, usize, u64)> {
+        let mut v: Vec<_> = self.table.iter().flatten().map(|b| (b.pc, b.words.len(), b.hits)).collect();
+        v.sort_by_key(|x| std::cmp::Reverse(x.2));
+        v.truncate(n);
+        v
+    }
 
     /// Wait for the translations asked for (tests)
     pub fn wait_idle(&mut self) {
@@ -214,7 +261,8 @@ impl VuJit {
     /// The block starting at `pc` once translated; None: interpret this pair. Blocks are
     /// asked for only at `leader`s (a program's start, a jump's target, the pair after a
     /// block), so a run of interpreted pairs doesn't queue a block at each one
-    pub fn get(&mut self, code: &[u8], pc: u32, leader: bool) -> Option<unsafe extern "C" fn(*mut Ctx)> {
+    pub fn get(&mut self, code: &[u8], pc: u32, leader: bool, cgen: u64) -> Option<unsafe extern "C" fn(*mut Ctx)> {
+        self.cgen = cgen;
         let n = code.len() / 8;
         if self.table.len() != n {
             self.table = (0..n).map(|_| Vec::new()).collect();
@@ -272,9 +320,13 @@ impl VuJit {
     fn find(&mut self, code: &[u8], slot: usize, pc: u32) -> Option<BlockFn> {
         let mask = code.len() - 1;
         let word = |a: usize| u64::from_le_bytes(code[a..a + 8].try_into().unwrap());
-        for b in &self.table[slot] {
+        // (compared again only after micro memory was written)
+        let cgen = self.cgen;
+        for b in &mut self.table[slot] {
             if b.pc != pc { continue; }
-            if b.words.iter().enumerate().all(|(k, &w)| word((b.addr + 8 * k) & mask) == w) {
+            if b.seen == cgen || b.words.iter().enumerate().all(|(k, &w)| word((b.addr + 8 * k) & mask) == w) {
+                b.seen = cgen;
+                b.hits += 1;
                 self.runs += 1;
                 return Some(b.f);
             }
@@ -289,7 +341,7 @@ impl VuJit {
         let v = &mut self.table[slot];
         if v.len() >= VERSIONS { v.remove(0); }
         // SAFETY: `f` is a finished translation that lives as long as its translator
-        v.push(Block { f: unsafe { std::mem::transmute::<usize, BlockFn>(d.f) }, pc: d.pc, addr: d.addr, words: d.words });
+        v.push(Block { f: unsafe { std::mem::transmute::<usize, BlockFn>(d.f) }, pc: d.pc, addr: d.addr, words: d.words, seen: u64::MAX, hits: 0 });
     }
 
     /// The pairs of the block at `pc`
@@ -351,7 +403,7 @@ impl Translator {
             let qn = b.ins().ushr_imm_u(len, 4);
             let qmask = b.ins().iadd_imm_s(qn, -1);
             let mut e = Em { b: &mut b, ptr, fl, ctx: c, vu, cc, sigs: HashMap::new(), data, qmask, o: Vu::jit_offsets(), kb: c,
-                             vwrites: Vec::new(), helper_lower: false };
+                             vwrites: Vec::new(), helper_lower: false, dead_push: false };
             e.pairs(pc, words);
             b.ins().return_(&[]);
             b.seal_all_blocks();
@@ -369,6 +421,7 @@ impl Translator {
         module.clear_context(&mut ctx);
         module.finalize_definitions().expect("finalize block");
         let code = module.get_finalized_function(id);
+        if std::env::var("VU_JIT_DUMP").map_or(false, |v| v == format!("{pc:X}")) { println!("block {pc:04X} at {code:p}"); }
         self.fctx = fctx;
         unsafe { std::mem::transmute::<*const u8, BlockFn>(code) }
     }
@@ -389,6 +442,9 @@ struct Em<'a, 'b> {
     /// this pair's VF writes (register, fields); whether its lower half went to a handler
     vwrites: Vec<(usize, u32)>,
     helper_lower: bool,
+    /// this pair's MAC / status push is never seen (see `dead_pushes`): only its sticky
+    /// status bits are kept
+    dead_push: bool,
 }
 
 /// Vector constants, loaded where used (shared values would stay live across the block
@@ -458,8 +514,20 @@ impl Em<'_, '_> {
         // handler that may write VF
         let mut written: HashMap<(usize, usize), usize> = HashMap::new();
         let mut barrier: Option<usize> = None;
+        let dead = dead_pushes(words);
+        if std::env::var_os("VU_JIT_DEAD").is_some() {
+            let pushes = words.iter().filter(|&&w| matches!(super::vu::up_class((w >> 32) as u32), UpClass::Fm(..))).count();
+            println!("block {start:04X}: {} pairs, {pushes} FMAC pushes, {} dead", words.len(), dead.iter().filter(|&&d| d).count());
+            if std::env::var("VU_JIT_DEAD").is_ok_and(|v| v == format!("{start:X}")) {
+                for (k, &w) in words.iter().enumerate() {
+                    let (lo, hi) = (w as u32, (w >> 32) as u32);
+                    println!("  {:04X} {hi:08X} {lo:08X} up {:?} lo-key {:02X} dead {}", start + 8 * k as u32, super::vu::up_class(hi), lo >> 25, dead[k]);
+                }
+            }
+        }
         for (i, &w) in words.iter().enumerate() {
             self.vwrites.clear();
+            self.dead_push = dead[i];
             let (lo, hi) = (w as u32, (w >> 32) as u32);
             let lower = hi & (1 << 31) == 0;
             let a = start.wrapping_add(8 * i as u32);
@@ -506,6 +574,8 @@ impl Em<'_, '_> {
                 let c2 = self.b.ins().umax(cyc, ready);
                 self.st(c2, o.cycle);
             }
+            // WAITQ stalls the whole pair (the upper half reads the new Q)
+            if lower && super::vu::is_waitq(lo) { self.call(h_wait_q as *const () as usize, &[], false); }
             // flags / Q / P due
             let cyc = self.ld(types::I64, o.cycle);
             let due = self.ld(types::I64, o.next_due);
@@ -893,8 +963,17 @@ impl Em<'_, '_> {
         let t = self.b.ins().imul_imm_u(t, 0x1248);
         let t = self.b.ins().ushr_imm_u(t, 12);
         let stat = self.b.ins().band_imm_u(t, 15);
-        let z = self.c32(0);
-        self.push_flags(mac, stat, z, z);
+        if self.dead_push {
+            // nobody sees this MAC / status before a later push replaces them: only the
+            // sticky bits stay (they'd have landed before anything could read them)
+            let st = self.ld(types::I32, o.status);
+            let s6 = self.b.ins().ishl_imm_u(stat, 6);
+            let st = self.b.ins().bor(st, s6);
+            self.st(st, o.status);
+        } else {
+            let z = self.c32(0);
+            self.push_flags(mac, stat, z, z);
+        }
         Up::Fm { res, acc, fd, dest }
     }
 
@@ -1382,8 +1461,10 @@ mod tests {
         let dest = r.below(16);
         let (ft, fs) = (r.below(32), r.below(32));
         let sp = |n: u32| 0x40 << 25 | dest << 21 | ft << 16 | fs << 11 | (n >> 2) << 6 | 0x3C | (n & 3);
-        match r.below(16) {
+        match r.below(18) {
             0 => 0x8000_033C,
+            16 => [0x14u32, 0x15, 0x16, 0x17][r.below(4) as usize] << 25 | r.below(2) << 21 | (ft & 15) << 16 | r.below(0x800), // FSEQ / FSSET / FSAND / FSOR
+            17 => [0x18u32, 0x1A, 0x1B][r.below(3) as usize] << 25 | (ft & 15) << 16 | (fs & 15) << 11,                   // FMEQ / FMAND / FMOR
             1 => sp(0x30), 2 => sp(0x31), 3 => sp(0x34), 4 => sp(0x35), 5 => sp(0x36), 6 => sp(0x37),
             7 => sp(0x3C), 8 => sp(0x3D), 9 => sp(0x38), 10 => sp(0x3B),
             11 => 0x40 << 25 | r.below(16) << 16 | r.below(16) << 11 | r.below(16) << 6 | [0x30, 0x31, 0x34, 0x35, 0x32][r.below(5) as usize],
@@ -1430,12 +1511,12 @@ mod tests {
             let mut steps = 0;
             while a.running && steps < 500 { a.step(&code, &mut da, &mut pa); steps += 1; }
             let mut j = VuJit::new_sync();
-            assert!(j.get(&code, 0, true).is_none());
+            assert!(j.get(&code, 0, true, 0).is_none());
             b.start(0);
             b.jit_prepare();
             let mut guard = 0;
             while b.running && guard < 500 {
-                match j.get(&code, b.pc, true) {
+                match j.get(&code, b.pc, true, 0) {
                     Some(f) => { let mut ctx = Ctx::new(&mut b, &mut db, &mut pb); unsafe { f(&mut ctx) } }
                     None => { b.step(&code, &mut db, &mut pb); b.jit_prepare(); }
                 }

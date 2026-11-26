@@ -51,6 +51,81 @@ pub fn watch_hit(pa: u32, n: u32) -> bool {
     match watch_cfg() { Some((a, l, _)) => pa < a + l && a < pa + n, None => false }
 }
 
+/// Debugging: PS2_VU1_SRC=qw[,w] (hex): the VIF notes which EE address each UNPACK writing
+/// VU1 data quadword `qw` read its data from (only rows whose 4th word is `w`, if given),
+/// and who last wrote that address: every EE store / DMA write is remembered per quadword
+/// while this is on (`wr_note`). JIT off.
+pub fn vu1_src() -> Option<u32> { vu1_src_cfg().map(|(q, _)| q) }
+
+pub fn vu1_src_cfg() -> Option<(u32, Option<u32>)> {
+    static W: std::sync::OnceLock<Option<(u32, Option<u32>)>> = std::sync::OnceLock::new();
+    *W.get_or_init(|| {
+        let v = std::env::var("PS2_VU1_SRC").ok()?;
+        let hex = |x: &str| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok();
+        let mut it = v.split(',');
+        let q = hex(it.next()?)?;
+        Some((q, it.next().and_then(hex)))
+    })
+}
+
+/// A fixed (PS2_WATCH) or source (PS2_VU1_SRC) watch is on: the JIT stays off
+pub fn watching() -> bool { watch().is_some() || vu1_src().is_some() }
+
+/// Who last wrote each quadword: RAM (32 MB) then the scratchpad (16 KB)
+const WR_SPR: usize = 0x20_0000;
+fn writers() -> Option<&'static Vec<std::sync::atomic::AtomicU64>> {
+    static T: std::sync::OnceLock<Option<Vec<std::sync::atomic::AtomicU64>>> = std::sync::OnceLock::new();
+    T.get_or_init(|| vu1_src().map(|_| (0..WR_SPR + 0x400).map(|_| std::sync::atomic::AtomicU64::new(0)).collect())).as_ref()
+}
+
+/// Writer kinds
+pub const WR_EE: u64 = 1;
+pub const WR_DMA: u64 = 2;
+pub const WR_SPR_FROM: u64 = 3;
+
+fn wr_index(a: u32) -> usize {
+    if a & 0x8000_0000 != 0 { WR_SPR + (a as usize >> 4 & 0x3FF) } else { a as usize >> 4 & (WR_SPR - 1) }
+}
+
+/// Remember who wrote the quadword at `a` (physical; 8000_0000 | offset = scratchpad)
+#[inline]
+pub fn wr_note(a: u32, pc: u32, ra: u32, kind: u64) {
+    if let Some(t) = writers() {
+        t[wr_index(a)].store((pc as u64) << 32 | ((ra >> 2) as u64 & 0x3FFF_FFFF) << 2 | kind, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A raw writer entry (for copies: SPR_FROM keeps the scratchpad writer)
+pub fn wr_get(a: u32) -> u64 { writers().map_or(0, |t| t[wr_index(a)].load(std::sync::atomic::Ordering::Relaxed)) }
+
+pub fn wr_set_raw(a: u32, v: u64) { if let Some(t) = writers() { t[wr_index(a)].store(v, std::sync::atomic::Ordering::Relaxed); } }
+
+/// The writer of `a` as text
+pub fn wr_describe(a: u32) -> String {
+    let v = wr_get(a);
+    let (pc, ra, kind) = ((v >> 32) as u32, ((v >> 2) as u32 & 0x3FFF_FFFF) << 2, v & 3);
+    match kind {
+        WR_EE => format!("last EE store pc {pc:08X} ra {ra:08X}"),
+        WR_DMA => "last written by DMA".to_string(),
+        WR_SPR_FROM => format!("copied by SPR_FROM; scratchpad written by pc {pc:08X} ra {ra:08X}"),
+        _ => "never written since boot".to_string(),
+    }
+}
+
+static SRC_LOG: std::sync::Mutex<std::collections::VecDeque<String>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// PS2_VU1_SRC: keep a line about where a VU1 quadword came from (last 48)
+pub fn src_log(s: String) {
+    if let Ok(mut l) = SRC_LOG.lock() {
+        if l.len() >= 48 { l.pop_front(); }
+        l.push_back(s);
+    }
+}
+
+pub fn src_take() -> Vec<String> {
+    SRC_LOG.lock().map(|l| l.iter().cloned().collect()).unwrap_or_default()
+}
+
 /// The value filter passes `v`
 pub fn watch_value(v: u128) -> bool {
     match watch_cfg() { Some((_, _, Some(x))) => v as u32 == x, _ => true }
@@ -495,20 +570,27 @@ impl R5900 {
     pub(crate) fn store(&mut self, bus: &mut dyn EeBus, va: u32, n: u32, v: u128) -> Res<()> {
         self.check(va, n - 1, EXC_ADES)?;
         match self.translate(va, true)? {
-            Target::Scratch(o) => self.sp_write(o & (0x4000 - n as usize), n as usize, v),
-            Target::Phys(pa) => match n {
-                _ if watch_hit(pa, n) && watch_value(v) && watch_note() => {
-                    watch_log(format!("EE store{} [{:08X}] = {:X} at pc {:08X} ra {:08X} sp {:08X} (va {:08X}) cycle {}",
-                        n * 8, pa, v & (u128::MAX >> (128 - 8 * n)), self.cur_pc, self.gpr[31] as u32, self.gpr[29] as u32, va, self.cycles));
-                    match n { 1 => bus.write8(pa, v as u8), 2 => bus.write16(pa, v as u16), 4 => bus.write32(pa, v as u32),
-                              8 => bus.write64(pa, v as u64), _ => bus.write128(pa, v) }
+            Target::Scratch(o) => {
+                let o = o & (0x4000 - n as usize);
+                wr_note(0x8000_0000 | o as u32, self.cur_pc, self.gpr[31] as u32, WR_EE);
+                self.sp_write(o, n as usize, v)
+            }
+            Target::Phys(pa) => {
+                if pa < 0x0200_0000 { wr_note(pa, self.cur_pc, self.gpr[31] as u32, WR_EE); }
+                match n {
+                    _ if watch_hit(pa, n) && watch_value(v) && watch_note() => {
+                        watch_log(format!("EE store{} [{:08X}] = {:X} at pc {:08X} ra {:08X} sp {:08X} (va {:08X}) cycle {}",
+                            n * 8, pa, v & (u128::MAX >> (128 - 8 * n)), self.cur_pc, self.gpr[31] as u32, self.gpr[29] as u32, va, self.cycles));
+                        match n { 1 => bus.write8(pa, v as u8), 2 => bus.write16(pa, v as u16), 4 => bus.write32(pa, v as u32),
+                                  8 => bus.write64(pa, v as u64), _ => bus.write128(pa, v) }
+                    }
+                    1 => bus.write8(pa, v as u8),
+                    2 => bus.write16(pa, v as u16),
+                    4 => bus.write32(pa, v as u32),
+                    8 => bus.write64(pa, v as u64),
+                    _ => bus.write128(pa, v),
                 }
-                1 => bus.write8(pa, v as u8),
-                2 => bus.write16(pa, v as u16),
-                4 => bus.write32(pa, v as u32),
-                8 => bus.write64(pa, v as u64),
-                _ => bus.write128(pa, v),
-            },
+            }
         }
         // an acknowledged interrupt mustn't be taken again before the system's next look
         if let Some((i0, i1)) = bus.irq_lines() {
