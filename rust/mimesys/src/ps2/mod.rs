@@ -43,7 +43,7 @@ pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
 /// Printed at the top of the debug log so a log says which build made it
-const PATCH: &str = "0291";
+const PATCH: &str = "0292";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;

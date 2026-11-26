@@ -48,6 +48,9 @@ pub struct IopDma {
     /// samples play (48 kHz stereo 16-bit: 768 IOP cycles a word); cycles still to go
     #[serde(default)]
     pub spu_timer: [i64; 2],
+    /// IOP cycles until a finished SIF1 transfer ends (see `sif_delay`)
+    #[serde(default)]
+    pub sif1_timer: i64,
     /// auto-DMA words still to send (channels 4 / 7)
     #[serde(default)]
     pub adma_left: [u32; 2],
@@ -59,7 +62,7 @@ const ADMA_CYCLES_PER_WORD: i64 = 768;
 impl Default for IopDma {
     fn default() -> Self {
         Self { ch: Default::default(), dpcr: 0x0777_7777, dpcr2: 0, dicr: 0, dicr2: 0, dmacen: 0, dmacinten: 0,
-            irq_was: false, done: [0; 13], spu_timer: [0; 2], adma_left: [0; 2] }
+            irq_was: false, done: [0; 13], spu_timer: [0; 2], sif1_timer: 0, adma_left: [0; 2] }
     }
 }
 
@@ -118,6 +121,7 @@ impl IopDma {
                         c.chcr = merge(c.chcr);
                         if was == 0 && c.chcr >> 24 & 1 != 0 { c.words = 0; c.tag_end = false; }
                         if was != c.chcr >> 24 & 1 && (n == 4 || n == 7) { self.spu_timer[(n == 7) as usize] = 0; }
+                        if was != c.chcr >> 24 & 1 && n == SIF1 { self.sif1_timer = 0; }
                     }
                     _ => c.tadr = merge(c.tadr) & 0xFF_FFFF,
                 }
@@ -154,7 +158,7 @@ impl IopDma {
             if self.ch[n].chcr >> 24 & 1 == 0 || !self.enabled(n) || self.dmacen & 1 == 0 { continue; }
             match n {
                 SIF0 => self.sif0(ram, sif),
-                SIF1 => self.sif1(ram, sif),
+                SIF1 => if self.sif1_timer == 0 { self.sif1(ram, sif) },
                 SIO2_IN => self.sio2_in(ram, sio2),
                 SIO2_OUT => self.sio2_out(ram, sio2),
                 CDVD => {}                                       // the drive feeds it (cdvd.rs)
@@ -220,6 +224,13 @@ impl IopDma {
 
     /// A block DMA's channel ends when its time is up (see `step`)
     pub fn tick_spu(&mut self, cycles: u32) {
+        if self.sif1_timer > 0 {
+            self.sif1_timer -= cycles as i64;
+            if self.sif1_timer <= 0 {
+                self.sif1_timer = 0;
+                if self.ch[SIF1].chcr >> 24 & 1 != 0 { self.finish(SIF1); }
+            }
+        }
         for (k, n) in [(0usize, 4usize), (1, 7)] {
             if self.spu_timer[k] > 0 {
                 self.spu_timer[k] -= cycles as i64;
@@ -344,7 +355,11 @@ impl IopDma {
                     }
                 }
             }
-            if c.tag_end { self.finish(SIF1); return; }
+            if c.tag_end {
+                let d = sif_delay();
+                if d > 0 { self.sif1_timer = d as i64; } else { self.finish(SIF1); }
+                return;
+            }
             // the tag is a quadword from the EE: the first two words count
             if sif.fifo1.len() < 4 { return; }
             let t0 = sif.fifo1.pop_front().unwrap();
@@ -363,4 +378,14 @@ impl IopDma {
 pub(crate) fn spu_dma_cycles() -> u32 {
     static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("PS2_SPU2_DMA").ok().and_then(|v| v.parse().ok()).unwrap_or(12))
+}
+
+/// IOP cycles between a SIF1 (EE -> IOP) transfer's last word and its end (the IOP's
+/// interrupt, so SIFCMD sees the packet): stands for the EE side's time per transfer,
+/// which the EE here spends far faster than hardware. Without it, Shadow Hearts' EE polls
+/// two RPC servers back to back so tightly that the IOP's CDVDFSV RPC thread never
+/// sleeps and the equal-priority read thread never runs again (PS2_SIF_DELAY=n, 0 = none)
+pub(crate) fn sif_delay() -> u32 {
+    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("PS2_SIF_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(1000))
 }

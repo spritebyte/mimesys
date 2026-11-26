@@ -78,7 +78,13 @@ fn sif1_carries_a_source_chain_to_iop_memory() {
     let irq = io.step(&mut iop_ram, &mut sif, &mut Default::default(), &mut Default::default());
     let w = |a: usize| u32::from_le_bytes(iop_ram[a..a + 4].try_into().unwrap());
     assert_eq!([w(0x400), w(0x40C), w(0x800), w(0x80C)], [0x11, 0x44, 0x55, 0x88]);
-    assert!(irq, "DICR master flag -> I_STAT 3");
+    // the data is in at once; the channel ends after the SIF delay (and not again before)
+    assert!(!irq);
+    assert_eq!(io.ch[iop_dma::SIF1].chcr >> 24 & 1, 1);
+    io.tick_spu(iop_dma::sif_delay() - 1);
+    assert_eq!(io.ch[iop_dma::SIF1].chcr >> 24 & 1, 1);
+    io.tick_spu(1);
+    assert!(io.irq_rise(), "DICR master flag -> I_STAT 3");
     assert_eq!(io.ch[iop_dma::SIF1].chcr >> 24 & 1, 0);
 }
 
