@@ -26,6 +26,7 @@ const F_SU: u32 = 1 << 3;
 const FMAX: u32 = 0x7FFF_FFFF;
 
 /// A PS2 float's value (denormals = signed zero; exponent 255 is a number)
+#[inline]
 pub fn to_f64(x: u32) -> f64 {
     let e = x >> 23 & 0xFF;
     let sign = (x as u64 >> 31) << 63;
@@ -35,6 +36,7 @@ pub fn to_f64(x: u32) -> f64 {
 }
 
 /// Back to a PS2 float, rounding toward zero; the O / U flags if it didn't fit
+#[inline]
 pub fn from_f64(v: f64) -> (u32, u32) {
     let bits = v.to_bits();
     let sign = ((bits >> 63) as u32) << 31;
@@ -45,8 +47,11 @@ pub fn from_f64(v: f64) -> (u32, u32) {
     (sign | (e as u32) << 23 | (bits >> 29 & 0x7F_FFFF) as u32, 0)
 }
 
+#[inline]
 pub fn ps2_add(a: u32, b: u32) -> (u32, u32) { from_f64(to_f64(a) + to_f64(b)) }
+#[inline]
 pub fn ps2_sub(a: u32, b: u32) -> (u32, u32) { from_f64(to_f64(a) - to_f64(b)) }
+#[inline]
 pub fn ps2_mul(a: u32, b: u32) -> (u32, u32) { from_f64(to_f64(a) * to_f64(b)) }
 
 /// a / b; dividing by zero gives ±Fmax with D (or I for 0 / 0)

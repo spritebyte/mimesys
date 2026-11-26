@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-use crate::common::cpu::r5900::fpu::{from_f64, ps2_add, ps2_div, ps2_mul, ps2_sub, to_f64, F_O, F_U};
+use crate::common::cpu::r5900::fpu::{from_f64, ps2_div, to_f64};
 
 const MAC_LATENCY: u64 = 4;
 /// one program's cap (cycles) in case one never ends
@@ -98,6 +98,9 @@ pub struct Vu {
     /// per instruction pair: the VF registers it reads (stall check), decoded once
     #[serde(skip)]
     reads: Vec<Reads>,
+    /// per instruction pair: stall inputs and VI target, decoded once (PCSX2 stall model)
+    #[serde(skip)]
+    dec: Vec<Dec>,
     /// the last four pairs' VI writes (register, value before, a flag read)
     #[serde(skip)]
     vi_hist: [Option<(u8, u16, bool)>; 4],
@@ -118,7 +121,7 @@ impl Vu {
             vu1, vf, vi: [0; 16], acc: [0; 4], q: 0, p: 0, i: 0, r: 0, status: 0, mac: 0, clip: 0,
             pc: 0, tpc: 0, running: false, cycle: 0, vf_ready: [[0; 4]; 32], acc_ready: 0, vf_ready_old: [0; 32], acc_ready_old: 0,
             flags: VecDeque::new(), q_pend: None, p_pend: None, branch: None, ending: 0,
-            snap_at: 0, snap: None, host_ns: 0, reads: Vec::new(), vi_hist: [None; 4], br_stalled: false, start_pc: 0, kick: None, top: 0, itop: 0, programs: 0, kicks: 0, illegal: 0, total_cycles: 0,
+            snap_at: 0, snap: None, host_ns: 0, reads: Vec::new(), dec: Vec::new(), vi_hist: [None; 4], br_stalled: false, start_pc: 0, kick: None, top: 0, itop: 0, programs: 0, kicks: 0, illegal: 0, total_cycles: 0,
         }
     }
 
@@ -223,6 +226,7 @@ impl Vu {
         }
         let start = self.cycle;
         let t0 = std::time::Instant::now();
+        if self.dec.len() != code.len() / 8 { self.dec = vec![Dec::default(); code.len() / 8]; }
         while self.running {
             self.step(code, data, path1);
             if self.cycle - start > MAX_CYCLES { self.running = false; }
@@ -246,25 +250,18 @@ impl Vu {
         // (per field, as PCSX2 does; vf0 never stalls; ACC chains don't stall)
         let mut ready = 0;
         let fine = pcsx2_stalls();
-        let lower = hi & (1 << 31) == 0;
+        let k = a >> 3;
+        if k >= self.dec.len() { self.dec = vec![Dec::default(); code.len() / 8]; }
+        let raw = (hi as u64) << 32 | lo as u64;
+        if !self.dec[k].ok || self.dec[k].raw != raw { self.dec[k] = Dec::decode(lo, hi); }
+        let d = self.dec[k];
         if fine {
-            let mut need = |(r, m): (usize, u32)| {
-                if m != 0 && r != 0 {
-                    let t = &self.vf_ready[r];
-                    for k in 0..4 { if m & (8 >> k) != 0 { ready = ready.max(t[k]); } }
-                }
-            };
-            let [a, b] = upper_reads(hi);
-            need(a);
-            need(b);
-            if lower {
-                let [a, b] = lower_reads(lo);
-                need(a);
-                need(b);
+            for &(r, m) in &d.rd[..d.n as usize] {
+                let t = &self.vf_ready[r as usize];
+                for f in 0..4 { if m & (8 >> f) != 0 { ready = ready.max(t[f]); } }
             }
         } else {
             // patch 0270's model: whole registers (all fields share one time), vf0 included
-            let k = a >> 3;
             if self.reads.len() != code.len() / 8 { self.reads = vec![Reads::default(); code.len() / 8]; }
             let d = &mut self.reads[k];
             if d.lo != lo || d.hi != hi || !d.valid { *d = Reads::decode(lo, hi); }
@@ -283,18 +280,18 @@ impl Vu {
         self.land_p();
         if self.kick.is_some() { self.pump_kick(data, path1, self.cycle); }
 
-        let up = self.upper(hi);
+        let up = (d.up)(self, hi);
+        let h = &mut self.vi_hist;
+        (h[3], h[2], h[1]) = (h[2], h[1], h[0]);
         if hi & (1 << 31) != 0 {
             self.i = lo;                                     // I bit: the lower word is I
-            self.vi_hist.rotate_right(1);
             self.vi_hist[0] = None;
         } else {
-            let before = self.vi;
-            self.lower(lo, data, path1);
-            // which VI this pair changed, for the branch delay below
-            let w = (1..16).find(|&r| self.vi[r] != before[r]).map(|r| (r as u8, before[r], (0x10..=0x1C).contains(&(lo >> 25))));
-            self.vi_hist.rotate_right(1);
-            self.vi_hist[0] = w;
+            // the VI this pair changed (if any), for the branch delay below
+            let r = d.vit as usize;
+            let before = self.vi[r];
+            (d.lo)(self, lo, data, path1);
+            self.vi_hist[0] = if r != 0 && self.vi[r] != before { Some((r as u8, before, d.vflag)) } else { None };
         }
         self.commit(up);
         self.cycle += 1;
@@ -353,133 +350,26 @@ impl Vu {
     /// One upper instruction; returns where its result goes. Used by macro mode too
     /// (bits 0-24 are laid out alike).
     pub fn upper(&mut self, op: u32) -> Option<(Dst, [u32; 4], bool)> {
-        let dest = op >> 21 & 15;
-        let ft = (op >> 16 & 31) as usize;
-        let fs = (op >> 11 & 31) as usize;
-        let fd = (op >> 6 & 31) as usize;
-        let bc = (op & 3) as usize;
-        let f = op & 0x3F;
-        let s = self.vf[fs];
-        let t = self.vf[ft];
-        let tb = [t[bc]; 4];
-        let qv = [self.q; 4];
-        let iv = [self.i; 4];
-        use Arith::*;
-        let fmac = |me: &mut Self, d: Dst, a: [u32; 4], b: [u32; 4], k: Arith| me.fmac(d, dest, a, b, k);
-        let vd = Dst::Vf(fd, dest);
-        let ac = Dst::Acc(dest);
-        match f {
-            0x00..=0x03 => fmac(self, vd, s, tb, Add),
-            0x04..=0x07 => fmac(self, vd, s, tb, Sub),
-            0x08..=0x0B => fmac(self, vd, s, tb, Madd),
-            0x0C..=0x0F => fmac(self, vd, s, tb, Msub),
-            0x10..=0x13 => Some((vd, minmax(s, tb, true), false)),
-            0x14..=0x17 => Some((vd, minmax(s, tb, false), false)),
-            0x18..=0x1B => fmac(self, vd, s, tb, Mul),
-            0x1C => fmac(self, vd, s, qv, Mul),
-            0x1D => Some((vd, minmax(s, iv, true), false)),
-            0x1E => fmac(self, vd, s, iv, Mul),
-            0x1F => Some((vd, minmax(s, iv, false), false)),
-            0x20 => fmac(self, vd, s, qv, Add),
-            0x21 => fmac(self, vd, s, qv, Madd),
-            0x22 => fmac(self, vd, s, iv, Add),
-            0x23 => fmac(self, vd, s, iv, Madd),
-            0x24 => fmac(self, vd, s, qv, Sub),
-            0x25 => fmac(self, vd, s, qv, Msub),
-            0x26 => fmac(self, vd, s, iv, Sub),
-            0x27 => fmac(self, vd, s, iv, Msub),
-            0x28 => fmac(self, vd, s, t, Add),
-            0x29 => fmac(self, vd, s, t, Madd),
-            0x2A => fmac(self, vd, s, t, Mul),
-            0x2B => Some((vd, minmax(s, t, true), false)),
-            0x2C => fmac(self, vd, s, t, Sub),
-            0x2D => fmac(self, vd, s, t, Msub),
-            0x2E => {                                        // OPMSUB
-                let (a, b) = ([s[1], s[2], s[0], 0], [t[2], t[0], t[1], 0]);
-                self.fmac(vd, dest, a, b, Msub)
-            }
-            0x2F => Some((vd, minmax(s, t, false), false)),
-            0x3C..=0x3F => {
-                let n = (op >> 6 & 31) << 2 | (op & 3);
-                let ftd = Dst::Vf(ft, dest);
-                match n {
-                    0x00..=0x03 => fmac(self, ac, s, tb, Add),
-                    0x04..=0x07 => fmac(self, ac, s, tb, Sub),
-                    0x08..=0x0B => fmac(self, ac, s, tb, Madd),
-                    0x0C..=0x0F => fmac(self, ac, s, tb, Msub),
-                    0x10..=0x13 => {                         // ITOF0/4/12/15
-                        let sh = [0, 4, 12, 15][bc];
-                        let v = s.map(|x| from_f64(x as i32 as f64 / (1u32 << sh) as f64).0);
-                        Some((ftd, v, false))
-                    }
-                    0x14..=0x17 => {                         // FTOI0/4/12/15
-                        let sh = [0, 4, 12, 15][bc];
-                        let v = s.map(|x| {
-                            let f = to_f64(x) * (1u32 << sh) as f64;
-                            f.trunc().clamp(i32::MIN as f64, i32::MAX as f64) as i32 as u32
-                        });
-                        Some((ftd, v, false))
-                    }
-                    0x18..=0x1B => fmac(self, ac, s, tb, Mul),
-                    0x1C => fmac(self, ac, s, qv, Mul),
-                    0x1D => Some((ftd, s.map(|x| x & 0x7FFF_FFFF), false)),   // ABS
-                    0x1E => fmac(self, ac, s, iv, Mul),
-                    0x1F => {                                // CLIP
-                        let w = to_f64(t[3]).abs();
-                        let mut c = 0;
-                        for k in 0..3 {
-                            let v = to_f64(s[k]);
-                            if v > w { c |= 1 << (2 * k); }
-                            if v < -w { c |= 2 << (2 * k); }
-                        }
-                        self.flags.push_back(Flags { at: self.cycle + MAC_LATENCY, mac: 0, stat: 0, clip: Some(c) });
-                        None
-                    }
-                    0x20 => fmac(self, ac, s, qv, Add),
-                    0x21 => fmac(self, ac, s, qv, Madd),
-                    0x22 => fmac(self, ac, s, iv, Add),
-                    0x23 => fmac(self, ac, s, iv, Madd),
-                    0x24 => fmac(self, ac, s, qv, Sub),
-                    0x25 => fmac(self, ac, s, qv, Msub),
-                    0x26 => fmac(self, ac, s, iv, Sub),
-                    0x27 => fmac(self, ac, s, iv, Msub),
-                    0x28 => fmac(self, ac, s, t, Add),
-                    0x29 => fmac(self, ac, s, t, Madd),
-                    0x2A => fmac(self, ac, s, t, Mul),
-                    0x2C => fmac(self, ac, s, t, Sub),
-                    0x2D => fmac(self, ac, s, t, Msub),
-                    0x2E => {                                // OPMULA
-                        let (a, b) = ([s[1], s[2], s[0], 0], [t[2], t[0], t[1], 0]);
-                        self.fmac(ac, dest, a, b, Mul)
-                    }
-                    0x2F => None,                            // NOP
-                    _ => { self.illegal += 1; None }
-                }
-            }
-            _ => { self.illegal += 1; None }
-        }
+        up_handler(op)(self, op)
     }
 
     /// An FMAC operation on the fields in `dest`, queueing its flags
+    #[inline(always)]
     fn fmac(&mut self, d: Dst, dest: u32, a: [u32; 4], b: [u32; 4], k: Arith) -> Option<(Dst, [u32; 4], bool)> {
         let mut out = match d { Dst::Vf(r, _) => self.vf[r], Dst::Acc(_) => self.acc };
-        let (mut mac, mut stat) = (0u32, 0u32);
-        for i in 0..4 {
-            if dest & (8 >> i) == 0 { continue; }
-            let (v, fl) = match k {
-                Arith::Add => ps2_add(a[i], b[i]),
-                Arith::Sub => ps2_sub(a[i], b[i]),
-                Arith::Mul => ps2_mul(a[i], b[i]),
-                Arith::Madd => { let (m, f1) = ps2_mul(a[i], b[i]); let (v, f2) = ps2_add(self.acc[i], m); (v, f1 | f2) }
-                Arith::Msub => { let (m, f1) = ps2_mul(a[i], b[i]); let (v, f2) = ps2_sub(self.acc[i], m); (v, f1 | f2) }
-            };
-            out[i] = v;
-            let bit = 3 - i;
-            if v & 0x7FFF_FFFF == 0 { mac |= 1 << bit; stat |= ST_Z; }
-            if v & 0x8000_0000 != 0 { mac |= 1 << (bit + 4); stat |= ST_S; }
-            if fl & F_U != 0 { mac |= 1 << (bit + 8); stat |= ST_U; }
-            if fl & F_O != 0 { mac |= 1 << (bit + 12); stat |= ST_O; }
-        }
+        use super::vu_simd as v;
+        let (res, fl) = match k {
+            Arith::Add => v::fmac4::<{ v::ADD }>(a, b, self.acc),
+            Arith::Sub => v::fmac4::<{ v::SUB }>(a, b, self.acc),
+            Arith::Mul => v::fmac4::<{ v::MUL }>(a, b, self.acc),
+            Arith::Madd => v::fmac4::<{ v::MADD }>(a, b, self.acc),
+            Arith::Msub => v::fmac4::<{ v::MSUB }>(a, b, self.acc),
+        };
+        for i in 0..4 { if dest & (8 >> i) != 0 { out[i] = res[i]; } }
+        let m4 = dest & 15;
+        let mac = v::mac4(res, fl) & (m4 | m4 << 4 | m4 << 8 | m4 << 12);
+        let stat = (mac & 0xF != 0) as u32 * ST_Z | (mac & 0xF0 != 0) as u32 * ST_S
+            | (mac & 0xF00 != 0) as u32 * ST_U | (mac & 0xF000 != 0) as u32 * ST_O;
         self.flags.push_back(Flags { at: self.cycle + MAC_LATENCY, mac, stat, clip: None });
         Some((d, out, true))
     }
@@ -487,6 +377,14 @@ impl Vu {
     // ================================================================ lower
 
     pub fn lower(&mut self, op: u32, data: &mut [u8], path1: &mut Vec<u128>) {
+        lo_handler(op)(self, op, data, path1)
+    }
+
+    /// `lower` with the opcode (op >> 25) and, for 40h, the special function (op & 3F,
+    /// and n for 3C-3F) passed separately: handlers pass constants so each compiles to its
+    /// own arm
+    #[inline(always)]
+    fn lower_k(&mut self, key: u32, sf: u32, sn: u32, op: u32, data: &mut [u8], path1: &mut Vec<u128>) {
         let dest = op >> 21 & 15;
         let it = (op >> 16 & 15) as usize;
         let is = (op >> 11 & 15) as usize;
@@ -497,7 +395,7 @@ impl Vu {
         let ftf = (op >> 23 & 3) as usize;
         let vi = |me: &Self, r: usize| me.vi[r] as u32;
         let qmask = (data.len() / 16 - 1) as u32;
-        match op >> 25 {
+        match key {
             0x00 => {                                                     // LQ
                 let a = vi(self, is).wrapping_add(imm11);
                 let v = self.load(data, a & qmask);
@@ -547,18 +445,19 @@ impl Vu {
             0x2D => if (self.bvi(is) as i16) > 0 { self.jump_rel(imm11) },                // IBGTZ
             0x2E => if (self.bvi(is) as i16) <= 0 { self.jump_rel(imm11) },               // IBLEZ
             0x2F => if (self.bvi(is) as i16) >= 0 { self.jump_rel(imm11) },               // IBGEZ
-            0x40 => self.lower_special(op, data, path1, dest, ft, fs, it, is, fsf, ftf),
+            0x40 => self.lower_special(sf, sn, op, data, path1, dest, ft, fs, it, is, fsf, ftf),
             _ => self.illegal += 1,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn lower_special(&mut self, op: u32, data: &mut [u8], path1: &mut Vec<u128>, dest: u32,
+    #[inline(always)]
+    fn lower_special(&mut self, sf: u32, sn: u32, op: u32, data: &mut [u8], path1: &mut Vec<u128>, dest: u32,
                      ft: usize, fs: usize, it: usize, is: usize, fsf: usize, ftf: usize) {
         let id = (op >> 6 & 15) as usize;
         let vi = |me: &Self, r: usize| me.vi[r] as u32;
         let qmask = (data.len() / 16 - 1) as u32;
-        match op & 0x3F {
+        match sf {
             0x30 => { let v = vi(self, is).wrapping_add(vi(self, it)); self.set_vi(id, v); }   // IADD
             0x31 => { let v = vi(self, is).wrapping_sub(vi(self, it)); self.set_vi(id, v); }   // ISUB
             0x32 => {                                                                       // IADDI
@@ -569,7 +468,7 @@ impl Vu {
             0x34 => { let v = vi(self, is) & vi(self, it); self.set_vi(id, v); }               // IAND
             0x35 => { let v = vi(self, is) | vi(self, it); self.set_vi(id, v); }               // IOR
             0x3C..=0x3F => {
-                let n = (op >> 6 & 31) << 2 | (op & 3);
+                let n = sn;
                 let s = self.vf[fs];
                 match n {
                     0x30 => self.write_vf(ft, dest, s),                                     // MOVE
@@ -864,6 +763,230 @@ fn upper_reads_acc(op: u32) -> bool {
 pub(crate) fn pcsx2_stalls() -> bool {
     static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *P.get_or_init(|| std::env::var("PS2_VU_STALLS").map_or(true, |v| v != "old"))
+}
+
+/// A pair decoded for `step`: the VF fields it reads (stalls), the VI its lower half
+/// writes and whether that's a flag read (FCEQ..FCGET)
+#[derive(Clone, Copy)]
+struct Dec { raw: u64, ok: bool, n: u8, rd: [(u8, u8); 4], vit: u8, vflag: bool, up: UpH, lo: LoH }
+
+type UpH = fn(&mut Vu, u32) -> Option<(Dst, [u32; 4], bool)>;
+type LoH = fn(&mut Vu, u32, &mut [u8], &mut Vec<u128>);
+
+impl Default for Dec {
+    fn default() -> Self {
+        Dec { raw: 0, ok: false, n: 0, rd: [(0, 0); 4], vit: 0, vflag: false, up: up_bad, lo: lo_any }
+    }
+}
+
+impl Dec {
+    fn decode(lo: u32, hi: u32) -> Self {
+        let mut d = Dec { raw: (hi as u64) << 32 | lo as u64, ok: true, up: up_handler(hi), lo: lo_handler(lo), ..Default::default() };
+        let lower = hi & (1 << 31) == 0;
+        let mut all = upper_reads(hi).to_vec();
+        if lower { all.extend(lower_reads(lo)); }
+        for (r, m) in all {
+            if m != 0 && r != 0 { d.rd[d.n as usize] = (r as u8, m as u8); d.n += 1; }
+        }
+        if lower {
+            d.vit = lower_vi_target(lo) as u8;
+            d.vflag = (0x10..=0x1C).contains(&(lo >> 25));
+        }
+        d
+    }
+}
+
+// ---------------------------------------------------------------- pair handlers
+// `step` calls the handler picked when the pair was decoded: the common FMAC forms
+// directly (same `fmac` as `upper`), everything else through `upper` / `lower`.
+
+fn up_bad(vu: &mut Vu, _: u32) -> Option<(Dst, [u32; 4], bool)> { vu.illegal += 1; None }
+
+/// MAX / MINI with a broadcast field, I, or ft
+fn up_mm<const MAX: bool, const SRC: u8>(vu: &mut Vu, op: u32) -> Option<(Dst, [u32; 4], bool)> {
+    let dest = op >> 21 & 15;
+    let ft = (op >> 16 & 31) as usize;
+    let s = vu.vf[(op >> 11 & 31) as usize];
+    let b = match SRC { BC => [vu.vf[ft][(op & 3) as usize]; 4], I => [vu.i; 4], _ => vu.vf[ft] };
+    Some((Dst::Vf((op >> 6 & 31) as usize, dest), minmax(s, b, MAX), false))
+}
+fn up_itof(vu: &mut Vu, op: u32) -> Option<(Dst, [u32; 4], bool)> {
+    let sh = [0, 4, 12, 15][(op & 3) as usize];
+    let s = vu.vf[(op >> 11 & 31) as usize];
+    let v = s.map(|x| from_f64(x as i32 as f64 / (1u32 << sh) as f64).0);
+    Some((Dst::Vf((op >> 16 & 31) as usize, op >> 21 & 15), v, false))
+}
+fn up_ftoi(vu: &mut Vu, op: u32) -> Option<(Dst, [u32; 4], bool)> {
+    let sh = [0, 4, 12, 15][(op & 3) as usize];
+    let s = vu.vf[(op >> 11 & 31) as usize];
+    let v = s.map(|x| {
+        let f = to_f64(x) * (1u32 << sh) as f64;
+        f.trunc().clamp(i32::MIN as f64, i32::MAX as f64) as i32 as u32
+    });
+    Some((Dst::Vf((op >> 16 & 31) as usize, op >> 21 & 15), v, false))
+}
+fn up_abs(vu: &mut Vu, op: u32) -> Option<(Dst, [u32; 4], bool)> {
+    let s = vu.vf[(op >> 11 & 31) as usize];
+    Some((Dst::Vf((op >> 16 & 31) as usize, op >> 21 & 15), s.map(|x| x & 0x7FFF_FFFF), false))
+}
+fn up_clip(vu: &mut Vu, op: u32) -> Option<(Dst, [u32; 4], bool)> {
+    let s = vu.vf[(op >> 11 & 31) as usize];
+    let t = vu.vf[(op >> 16 & 31) as usize];
+    let w = to_f64(t[3]).abs();
+    let mut c = 0;
+    for k in 0..3 {
+        let v = to_f64(s[k]);
+        if v > w { c |= 1 << (2 * k); }
+        if v < -w { c |= 2 << (2 * k); }
+    }
+    vu.flags.push_back(Flags { at: vu.cycle + MAC_LATENCY, mac: 0, stat: 0, clip: Some(c) });
+    None
+}
+/// OPMULA (ACC) / OPMSUB (fd): the cross product's halves
+fn up_op<const ACC: bool>(vu: &mut Vu, op: u32) -> Option<(Dst, [u32; 4], bool)> {
+    let dest = op >> 21 & 15;
+    let s = vu.vf[(op >> 11 & 31) as usize];
+    let t = vu.vf[(op >> 16 & 31) as usize];
+    let (a, b) = ([s[1], s[2], s[0], 0], [t[2], t[0], t[1], 0]);
+    if ACC { vu.fmac(Dst::Acc(dest), dest, a, b, Arith::Mul) }
+    else { vu.fmac(Dst::Vf((op >> 6 & 31) as usize, dest), dest, a, b, Arith::Msub) }
+}
+fn up_nop(_: &mut Vu, _: u32) -> Option<(Dst, [u32; 4], bool)> { None }
+fn lo_k<const K: u32>(vu: &mut Vu, op: u32, data: &mut [u8], path1: &mut Vec<u128>) { vu.lower_k(K, 0, 0, op, data, path1) }
+fn lo_sp<const F: u32, const N: u32>(vu: &mut Vu, op: u32, data: &mut [u8], path1: &mut Vec<u128>) { vu.lower_k(0x40, F, N, op, data, path1) }
+/// anything else: the general path (same code, opcode not fixed)
+fn lo_any(vu: &mut Vu, op: u32, data: &mut [u8], path1: &mut Vec<u128>) {
+    vu.lower_k(op >> 25, op & 0x3F, (op >> 6 & 31) << 2 | (op & 3), op, data, path1)
+}
+fn lo_nop(_: &mut Vu, _: u32, _: &mut [u8], _: &mut Vec<u128>) {}
+
+const ADD: u8 = 0;
+const SUB: u8 = 1;
+const MUL: u8 = 2;
+const MADD: u8 = 3;
+const MSUB: u8 = 4;
+/// second operand: broadcast field of ft, Q, I, or all of ft
+const BC: u8 = 0;
+const Q: u8 = 1;
+const I: u8 = 2;
+const T: u8 = 3;
+
+fn up_fm<const K: u8, const SRC: u8, const ACC: bool>(vu: &mut Vu, op: u32) -> Option<(Dst, [u32; 4], bool)> {
+    let dest = op >> 21 & 15;
+    let ft = (op >> 16 & 31) as usize;
+    let fs = (op >> 11 & 31) as usize;
+    let fd = (op >> 6 & 31) as usize;
+    let s = vu.vf[fs];
+    let b = match SRC { BC => [vu.vf[ft][(op & 3) as usize]; 4], Q => [vu.q; 4], I => [vu.i; 4], _ => vu.vf[ft] };
+    let d = if ACC { Dst::Acc(dest) } else { Dst::Vf(fd, dest) };
+    let k = match K { ADD => Arith::Add, SUB => Arith::Sub, MUL => Arith::Mul, MADD => Arith::Madd, _ => Arith::Msub };
+    vu.fmac(d, dest, s, b, k)
+}
+
+fn up_handler(op: u32) -> UpH {
+    let f = op & 0x3F;
+    if f >= 0x3C {
+        return match (op >> 6 & 31) << 2 | (op & 3) {
+            0x00..=0x03 => up_fm::<ADD, BC, true>,
+            0x04..=0x07 => up_fm::<SUB, BC, true>,
+            0x08..=0x0B => up_fm::<MADD, BC, true>,
+            0x0C..=0x0F => up_fm::<MSUB, BC, true>,
+            0x10..=0x13 => up_itof,
+            0x14..=0x17 => up_ftoi,
+            0x18..=0x1B => up_fm::<MUL, BC, true>,
+            0x1C => up_fm::<MUL, Q, true>,
+            0x1D => up_abs,
+            0x1F => up_clip,
+            0x1E => up_fm::<MUL, I, true>,
+            0x20 => up_fm::<ADD, Q, true>,
+            0x21 => up_fm::<MADD, Q, true>,
+            0x22 => up_fm::<ADD, I, true>,
+            0x23 => up_fm::<MADD, I, true>,
+            0x24 => up_fm::<SUB, Q, true>,
+            0x25 => up_fm::<MSUB, Q, true>,
+            0x26 => up_fm::<SUB, I, true>,
+            0x27 => up_fm::<MSUB, I, true>,
+            0x28 => up_fm::<ADD, T, true>,
+            0x29 => up_fm::<MADD, T, true>,
+            0x2A => up_fm::<MUL, T, true>,
+            0x2C => up_fm::<SUB, T, true>,
+            0x2D => up_fm::<MSUB, T, true>,
+            0x2E => up_op::<true>,
+            0x2F => up_nop,
+            _ => up_bad,
+        };
+    }
+    match f {
+        0x00..=0x03 => up_fm::<ADD, BC, false>,
+        0x04..=0x07 => up_fm::<SUB, BC, false>,
+        0x08..=0x0B => up_fm::<MADD, BC, false>,
+        0x0C..=0x0F => up_fm::<MSUB, BC, false>,
+        0x10..=0x13 => up_mm::<true, BC>,
+        0x14..=0x17 => up_mm::<false, BC>,
+        0x18..=0x1B => up_fm::<MUL, BC, false>,
+        0x1C => up_fm::<MUL, Q, false>,
+        0x1D => up_mm::<true, I>,
+        0x1E => up_fm::<MUL, I, false>,
+        0x1F => up_mm::<false, I>,
+        0x20 => up_fm::<ADD, Q, false>,
+        0x21 => up_fm::<MADD, Q, false>,
+        0x22 => up_fm::<ADD, I, false>,
+        0x23 => up_fm::<MADD, I, false>,
+        0x24 => up_fm::<SUB, Q, false>,
+        0x25 => up_fm::<MSUB, Q, false>,
+        0x26 => up_fm::<SUB, I, false>,
+        0x27 => up_fm::<MSUB, I, false>,
+        0x28 => up_fm::<ADD, T, false>,
+        0x29 => up_fm::<MADD, T, false>,
+        0x2A => up_fm::<MUL, T, false>,
+        0x2B => up_mm::<true, T>,
+        0x2C => up_fm::<SUB, T, false>,
+        0x2D => up_fm::<MSUB, T, false>,
+        0x2E => up_op::<false>,
+        0x2F => up_mm::<false, T>,
+        _ => up_bad,
+    }
+}
+
+fn lo_handler(op: u32) -> LoH {
+    // MOVE / MR32 to vf0: nothing (the usual lower NOP)
+    if op >> 25 == 0x40 && op & 0x3C == 0x3C && matches!((op >> 6 & 31) << 2 | (op & 3), 0x30 | 0x31) && op >> 16 & 31 == 0 {
+        return lo_nop;
+    }
+    macro_rules! k { ($($v:literal)*) => { match op >> 25 { $($v => return lo_k::<$v>,)* _ => {} } } }
+    k!(0x00 0x01 0x04 0x05 0x08 0x09 0x10 0x11 0x12 0x13 0x14 0x15 0x16 0x17 0x18 0x1A 0x1B 0x1C
+       0x20 0x21 0x24 0x25 0x28 0x29 0x2C 0x2D 0x2E 0x2F);
+    if op >> 25 == 0x40 {
+        macro_rules! f { ($($v:literal)*) => { match op & 0x3F { $($v => return lo_sp::<$v, 0>,)* _ => {} } } }
+        f!(0x30 0x31 0x32 0x34 0x35);
+        if op & 0x3C == 0x3C {
+            macro_rules! n { ($($v:literal)*) => { match (op >> 6 & 31) << 2 | (op & 3) { $($v => return lo_sp::<0x3C, $v>,)* _ => {} } } }
+            n!(0x30 0x31 0x34 0x35 0x36 0x37 0x38 0x39 0x3A 0x3B 0x3C 0x3D 0x3E 0x3F 0x40 0x41 0x42 0x43
+               0x64 0x68 0x69 0x6C 0x70 0x71 0x72 0x73 0x74 0x75 0x76 0x78 0x79 0x7A 0x7B 0x7C 0x7D 0x7E);
+        }
+    }
+    lo_any
+}
+
+/// The VI register a lower instruction may write (0: none)
+fn lower_vi_target(op: u32) -> usize {
+    let it = (op >> 16 & 15) as usize;
+    let is = (op >> 11 & 15) as usize;
+    match op >> 25 {
+        0x04 | 0x08 | 0x09 | 0x14 | 0x16 | 0x17 | 0x18 | 0x1A | 0x1B | 0x1C | 0x21 | 0x25 => it,
+        0x10 | 0x12 | 0x13 => 1,
+        0x40 => match op & 0x3F {
+            0x30 | 0x31 | 0x34 | 0x35 => (op >> 6 & 15) as usize,
+            0x32 => it,
+            0x3C..=0x3F => match (op >> 6 & 31) << 2 | (op & 3) {
+                0x34 | 0x36 => is,
+                0x35 | 0x37 | 0x3C | 0x3E | 0x68 | 0x69 => it,
+                _ => 0,
+            },
+            _ => 0,
+        },
+        _ => 0,
+    }
 }
 
 /// A pair's stall inputs (patch 0270's model), cached by address
