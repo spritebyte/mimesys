@@ -117,6 +117,12 @@ impl RpcLog {
             }
             _ => format!("{} cmd {:X}", if to_iop { "EE" } else { "IOP" }, cid & 0xFFFF),
         };
+        // PS2_SIF_LOG=1: every RPC packet as it goes (with PS2_IOP_PCS, shows the order)
+        static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *LOG.get_or_init(|| std::env::var("PS2_SIF_LOG").is_ok()) {
+            let n = self.counts.get(&text).copied().unwrap_or(0);
+            if n < 4 || n.is_power_of_two() { crate::dlog!("PS2: SIF {} (#{})", text, n + 1); }
+        }
         *self.counts.entry(text.clone()).or_insert(0) += 1;
         if self.recent.len() >= 24 { self.recent.pop_front(); }
         self.recent.push_back(text);

@@ -346,7 +346,8 @@ fn load_prog(code: &mut [u8], pairs: &[(u32, u32)]) {
     }
 }
 
-/// A loop: LQ, ADD in a loop with IBNE (delay slot), SQ, E bit
+/// A loop: LQ, ADD in a loop with IBNE (delay slot), SQ, E bit. The ISUBIU right before
+/// IBNE isn't seen yet by the branch (VI branch delay, 0283): 3 → 4 passes, vi1 ends at -1
 #[test]
 fn vu_runs_a_loop_with_branch_delay_slots() {
     let mut vu = super::vu::Vu::new(true);
@@ -367,8 +368,8 @@ fn vu_runs_a_loop_with_branch_delay_slots() {
     vu.start(0);
     vu.run(&code, &mut data, &mut p1);
     let out = u128::from_le_bytes(data[16..32].try_into().unwrap());
-    assert_eq!(out, qw([fl(3.0), fl(6.0), fl(9.0), fl(12.0)]));
-    assert_eq!(vu.vi[1], 0);
+    assert_eq!(out, qw([fl(4.0), fl(8.0), fl(12.0), fl(16.0)]));
+    assert_eq!(vu.vi[1], 0xFFFF);
     assert_eq!(vu.vi[9], 0, "stopped after the E bit's delay slot");
     assert_eq!(vu.tpc, 8 * 8);
     assert_eq!(vu.illegal, 0);
@@ -1000,10 +1001,12 @@ fn spu2_auto_dma_runs_at_the_audio_rate() {
         t += 10_000;
     }
     assert!((52..=55).contains(&ms(t)), "{} ms", ms(t));
-    // without auto-DMA: at once
+    // without auto-DMA: the data at once, the end after the transfer's time
     spu2.write16(0x5B0, 0);
     d.write(0x1F80_1508, 0x0100_0201, u32::MAX);
     d.step(&mut ram, &mut sif, &mut sio2, &mut spu2);
+    assert_eq!(d.ch[7].chcr >> 24 & 1, 1);
+    d.tick_spu(super::iop_dma::spu_dma_cycles() * 2 * 0x10 * 0xC0);
     assert_eq!(d.ch[7].chcr >> 24 & 1, 0);
 }
 
@@ -1231,8 +1234,15 @@ fn spu2_dma_writes_sound_ram_at_tsa() {
     d.write(0x1F80_10C4, 0x0002_0010, u32::MAX);    // 2 blocks of 16 words
     d.write(0x1F80_10C8, 0x0100_0201, u32::MAX);    // from RAM, start
     d.step(&mut ram, &mut sif, &mut sio2, &mut spu2);
-    assert_eq!(d.ch[4].chcr >> 24 & 1, 0);
     assert_eq!(spu2.ram[0x3000], 0x100);
+    // 32 words: the channel ends after 64 halfwords' time, and not again
+    assert_eq!(d.ch[4].chcr >> 24 & 1, 1);
+    d.step(&mut ram, &mut sif, &mut sio2, &mut spu2);
+    assert_eq!(spu2.read16(0x1AA), 0x3040, "sent once");
+    d.tick_spu(super::iop_dma::spu_dma_cycles() * 64 - 1);
+    assert_eq!(d.ch[4].chcr >> 24 & 1, 1);
+    d.tick_spu(1);
+    assert_eq!(d.ch[4].chcr >> 24 & 1, 0);
     assert_eq!(spu2.ram[0x303F], 0x13F);
     assert!(spu2.irq);
     assert_eq!(spu2.read16(0x1AA), 0x3040);

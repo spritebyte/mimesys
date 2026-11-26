@@ -31,6 +31,10 @@ const MASK: u32 = 0xF_FFFF;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Core {
+    /// STATX (344): 80h = DMA ready (cleared when ATTR leaves DMA mode, PCSX2); reads
+    /// 80h until written otherwise
+    #[serde(default)]
+    statx_clear: bool,
     voices: Vec<Voice>,
     irqa: u32,
     tsa: u32,
@@ -166,8 +170,10 @@ impl Spu2 {
             }
             0x340 => core.endx as u16,
             0x342 => (core.endx >> 16) as u16,
-            // DMA ready, not busy (our transfers finish at once)
-            0x344 => 0x0080,
+            // DMA ready unless ATTR left DMA mode; never busy (our transfers finish at
+            // once). libsd's core reset waits for STATX & 7FF = 0 after writing ATTR (DMC:
+            // with 80h always set, each wait timed out: sceSdInit took 2 seconds)
+            0x344 => if core.statx_clear { 0 } else { 0x0080 },
             _ => self.reg(byte),
         }
     }
@@ -211,7 +217,9 @@ impl Spu2 {
             }
             0x19A => {
                 if v & 0x40 == 0 { self.irqinfo &= !(4 << c); }
-                let _ = old;
+                // DMA mode bits 4-5: off clears STATX's ready bit, on sets it (PCSX2)
+                if v & 0x30 == 0 { self.cores[c].statx_clear = true; }
+                else if old & 0x30 == 0 { self.cores[c].statx_clear = false; }
             }
             0x19C => self.cores[c].irqa = hi(self.cores[c].irqa, v),
             0x19E => self.cores[c].irqa = lo(self.cores[c].irqa, v),
@@ -294,6 +302,7 @@ impl Spu2 {
 
     /// A block transfer from IOP memory to TSA
     pub fn dma_write(&mut self, c: usize, data: &[u16]) {
+        self.cores[c].statx_clear = false;                    // a DMA ended: ready
         let a = self.cores[c].tsa;
         self.touch_range(a, data.len() as u32);
         for (k, &w) in data.iter().enumerate() {
@@ -304,6 +313,7 @@ impl Spu2 {
 
     /// A block transfer from TSA to IOP memory
     pub fn dma_read(&mut self, c: usize, n: usize) -> Vec<u16> {
+        self.cores[c].statx_clear = false;
         let a = self.cores[c].tsa;
         self.touch_range(a, n as u32);
         let v = (0..n).map(|k| self.ram[((a + k as u32) & MASK) as usize]).collect();

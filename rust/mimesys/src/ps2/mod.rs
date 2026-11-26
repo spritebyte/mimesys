@@ -42,7 +42,7 @@ pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
 /// Printed at the top of the debug log so a log says which build made it
-const PATCH: &str = "0282";
+const PATCH: &str = "0290";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;
@@ -91,6 +91,13 @@ pub struct Ps2System {
     gs_flushes_last: u64,
     gs_busy_last: u64,
     gs_syncs_last: u64,
+    /// PS2_IOP_PCS=a,b,..: IOP addresses to log when reached; PS2_IOP_PROFILE=1: where the
+    /// IOP spends its time (64-byte blocks), printed with each report
+    iop_pcs: Vec<u32>,
+    iop_prof: Option<std::collections::HashMap<u32, u64>>,
+    /// PS2_IOP_WINDOW=start,stop: what the IOP runs from reaching `start` until it reaches
+    /// `stop` (64-byte blocks and stacks, i.e. threads), logged at `stop`
+    iop_win: Option<IopWindow>,
     /// debugging: the waiting threads' code went to the log (once, 20 s in)
     code_dumped: bool,
     /// debugging: EE / IOP RAM written to files (once, 30 s in)
@@ -174,6 +181,12 @@ impl Ps2System {
             gs_flushes_last: 0,
             gs_busy_last: 0,
             gs_syncs_last: 0,
+            iop_pcs: std::env::var("PS2_IOP_PCS").map(|v| v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect()).unwrap_or_default(),
+            iop_prof: std::env::var("PS2_IOP_PROFILE").ok().map(|_| Default::default()),
+            iop_win: std::env::var("PS2_IOP_WINDOW").ok().and_then(|v| {
+                let a: Vec<u32> = v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect();
+                (a.len() == 2).then(|| IopWindow { start: a[0], stop: a[1], ..Default::default() })
+            }),
             code_dumped: false,
             next_ram_dump: 1200,
             gs_rec_due: false,
@@ -272,10 +285,18 @@ impl Ps2System {
                 self.iop.idle(n);
                 self.iop_owed -= 8 * n as i64;
                 self.skipped_iop += n as u64;
+                if let Some(w) = self.iop_win.as_mut() { if w.on { w.idle += n as u64; } }
                 iop_cycles = n;
             } else {
                 let mut bus = IopView(&mut self.hw);
                 while self.iop_owed >= 8 {
+                    if !self.iop_pcs.is_empty() && self.iop_pcs.contains(&self.iop.pc) {
+                        let r = &self.iop.regs;
+                        crate::dlog!("PS2: IOP reached {:08X} (frame {} line {}, ra {:08X}, sp {:08X}, v0 {:08X} a0 {:08X} a1 {:08X} s0-s4 {:X} {:X} {:X} {:X} {:X})",
+                            self.iop.pc, self.current_frame + 1, line, r[31], r[29], r[2], r[4], r[5], r[16], r[17], r[18], r[19], r[20]);
+                    }
+                    if let Some(p) = self.iop_prof.as_mut() { *p.entry(self.iop.pc & 0x1F_FFC0).or_insert(0) += 1; }
+                    if let Some(w) = self.iop_win.as_mut() { w.step(self.iop.pc, self.iop.regs[29], self.iop.regs[31], self.current_frame + 1, line); }
                     let n = self.iop.step(&mut bus);
                     self.iop_owed -= 8 * n as i64;
                     iop_cycles += n;
@@ -402,6 +423,14 @@ impl Ps2System {
         self.last_report = Some((now, cur.0, cur.1, cur.2, cur.3, cur.4, cur.5, cur.6, cur.7));
         self.host_last = [self.host_ns[0], self.host_ns[1], self.host_ns[2], self.host_ns[3], self.hw.vu1.host_ns + self.hw.vu0.host_ns];
         let (e, i, h) = (&self.ee, &self.iop, &self.hw);
+        if let Some(p) = self.iop_prof.as_mut() {
+            let total: u64 = p.values().sum();
+            let mut v: Vec<_> = p.iter().map(|(&a, &n)| (n, a)).collect();
+            v.sort_unstable_by(|x, y| y.cmp(x));
+            let top: Vec<String> = v.iter().take(12).map(|(n, a)| format!("{a:X} {:.1}%", 100.0 * *n as f64 / total.max(1) as f64)).collect();
+            crate::dlog!("PS2:   IOP profile (non-idle steps {}): {}", total, top.join(", "));
+            p.clear();
+        }
         crate::dlog!("PS2: frame {} EE pc {:08X} ra {:08X} status {:08X} cause {:08X} | IOP pc {:08X} ra {:08X} sr {:08X}",
             self.current_frame + 1, e.pc, e.gpr[31] as u32, e.cop0[12], e.cause(), i.pc, i.regs[31], i.cop0[12]);
         crate::dlog!("PS2:   INTC {:04X}/{:04X} D_STAT {:08X} D_CTRL {:X} SIF0 {:08X} SIF1 {:08X} | IOP I_STAT {:05X}/{:05X} ctrl {} DICR {:08X} DICR2 {:08X}",
@@ -791,4 +820,67 @@ impl System for Ps2System {
     fn get_current_frame(&self) -> i64 { self.current_frame as i64 }
 
     fn frame_time_usec(&self) -> i64 { (LINES as u64 * EE_PER_LINE as u64 * 1_000_000 / EE_HZ) as i64 }
+}
+
+/// PS2_IOP_WINDOW: a profile of the IOP between two addresses
+#[derive(Default)]
+struct IopWindow {
+    start: u32,
+    stop: u32,
+    on: bool,
+    /// times logged so far (the first few windows only)
+    shown: u32,
+    from: (u64, u32),
+    steps: u64,
+    idle: u64,
+    blocks: std::collections::HashMap<u32, u64>,
+    /// stack pointers by 4 KB: which threads ran
+    stacks: std::collections::HashMap<u32, u64>,
+    /// the order threads ran in (stack 4 KB pages, each change)
+    order: Vec<u32>,
+    /// on thread stacks (sp >= 10000h): exact pcs and the ra values seen
+    pcs: std::collections::HashMap<u32, u64>,
+    ras: std::collections::HashMap<u32, u64>,
+}
+
+impl IopWindow {
+    fn step(&mut self, pc: u32, sp: u32, ra: u32, frame: u64, line: u32) {
+        if self.shown >= 4 { return; }
+        if !self.on {
+            if pc == self.start { self.on = true; self.from = (frame, line); }
+            else { return; }
+        }
+        if pc == self.stop {
+            let mut v: Vec<_> = self.blocks.iter().map(|(&a, &n)| (n, a)).collect();
+            v.sort_unstable_by(|x, y| y.cmp(x));
+            let top: Vec<String> = v.iter().take(24).map(|(n, a)| format!("{a:X}:{n}")).collect();
+            let mut st: Vec<_> = self.stacks.iter().map(|(&a, &n)| (n, a)).collect();
+            st.sort_unstable_by(|x, y| y.cmp(x));
+            let st: Vec<String> = st.iter().map(|(n, a)| format!("{a:X}:{n}")).collect();
+            let ord: Vec<String> = self.order.iter().take(64).map(|a| format!("{a:X}")).collect();
+            crate::dlog!("PS2: IOP window {:X}->{:X}: frame {} line {} to frame {} line {}, {} steps, {} idle cycles",
+                self.start, self.stop, self.from.0, self.from.1, frame, line, self.steps, self.idle);
+            crate::dlog!("PS2:   window blocks: {}", top.join(" "));
+            crate::dlog!("PS2:   window stacks: {} | order: {}", st.join(" "), ord.join(" "));
+            let top = |m: &std::collections::HashMap<u32, u64>, n: usize| {
+                let mut v: Vec<_> = m.iter().map(|(&a, &k)| (k, a)).collect();
+                v.sort_unstable_by(|x, y| y.cmp(x));
+                v.iter().take(n).map(|(k, a)| format!("{a:X}:{k}")).collect::<Vec<_>>().join(" ")
+            };
+            crate::dlog!("PS2:   window thread pcs: {}", top(&self.pcs, 48));
+            crate::dlog!("PS2:   window thread ras: {}", top(&self.ras, 24));
+            let shown = self.shown + 1;
+            *self = IopWindow { start: self.start, stop: self.stop, shown, ..Default::default() };
+            return;
+        }
+        self.steps += 1;
+        *self.blocks.entry(pc & 0x1F_FFC0).or_insert(0) += 1;
+        let page = sp & 0x1F_F000;
+        *self.stacks.entry(page).or_insert(0) += 1;
+        if self.order.last() != Some(&page) && self.order.len() < 256 { self.order.push(page); }
+        if sp & 0x1F_FFFF >= 0x1_0000 {
+            *self.pcs.entry(pc & 0x1F_FFFF).or_insert(0) += 1;
+            *self.ras.entry(ra & 0x1F_FFFF).or_insert(0) += 1;
+        }
+    }
 }

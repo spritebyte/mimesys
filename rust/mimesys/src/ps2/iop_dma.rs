@@ -117,6 +117,7 @@ impl IopDma {
                         let was = c.chcr >> 24 & 1;
                         c.chcr = merge(c.chcr);
                         if was == 0 && c.chcr >> 24 & 1 != 0 { c.words = 0; c.tag_end = false; }
+                        if was != c.chcr >> 24 & 1 && (n == 4 || n == 7) { self.spu_timer[(n == 7) as usize] = 0; }
                     }
                     _ => c.tadr = merge(c.tadr) & 0xFF_FFFF,
                 }
@@ -161,6 +162,11 @@ impl IopDma {
                     let k = (n == 7) as usize;
                     let adma = spu2.admas(k);
                     if !adma {
+                        // a block transfer moves its data at once but ends (CHCR, IRQ)
+                        // only after the time the SPU2 takes (PCSX2: ~24 cycles a
+                        // halfword; DMC's sound thread clears SPU RAM 1 KB at a time
+                        // and would otherwise never sleep, starving the IOP)
+                        if self.spu_timer[k] > 0 { continue; }
                         let words = self.block_words(n);
                         let c = &mut self.ch[n];
                         if c.chcr & 1 != 0 {
@@ -177,7 +183,8 @@ impl IopDma {
                             }
                         }
                         c.madr = (c.madr + 4 * words as u32) & 0xFF_FFFF;
-                        self.finish(n);
+                        let t = spu_dma_cycles() as i64 * 2 * words as i64;
+                        if t > 0 { self.spu_timer[k] = t; } else { self.finish(n); }
                     } else {
                         // auto-DMA: one block (100h words: 100h left + 100h right samples)
                         // whenever the SPU2 has a free half, so the data plays in order;
@@ -211,7 +218,7 @@ impl IopDma {
         rise
     }
 
-    /// Auto-DMA audio transfers play out: a channel ends when its samples have
+    /// A block DMA's channel ends when its time is up (see `step`)
     pub fn tick_spu(&mut self, cycles: u32) {
         for (k, n) in [(0usize, 4usize), (1, 7)] {
             if self.spu_timer[k] > 0 {
@@ -350,4 +357,10 @@ impl IopDma {
             if c.words > 0 { sif.rpc.blk = Some((c.madr, c.words)); }
         }
     }
+}
+
+/// IOP cycles a halfword for SPU2 block DMA (PS2_SPU2_DMA=n; 0 = ends at once, as before 0289)
+pub(crate) fn spu_dma_cycles() -> u32 {
+    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("PS2_SPU2_DMA").ok().and_then(|v| v.parse().ok()).unwrap_or(12))
 }

@@ -98,6 +98,11 @@ pub struct Vu {
     /// per instruction pair: the VF registers it reads (stall check), decoded once
     #[serde(skip)]
     reads: Vec<Reads>,
+    /// the last four pairs' VI writes (register, value before, a flag read)
+    #[serde(skip)]
+    vi_hist: [Option<(u8, u16, bool)>; 4],
+    #[serde(skip)]
+    br_stalled: bool,
     #[serde(skip)]
     pub illegal: u64,
     /// cycles run, all programs (speed report)
@@ -113,7 +118,7 @@ impl Vu {
             vu1, vf, vi: [0; 16], acc: [0; 4], q: 0, p: 0, i: 0, r: 0, status: 0, mac: 0, clip: 0,
             pc: 0, tpc: 0, running: false, cycle: 0, vf_ready: [[0; 4]; 32], acc_ready: 0, vf_ready_old: [0; 32], acc_ready_old: 0,
             flags: VecDeque::new(), q_pend: None, p_pend: None, branch: None, ending: 0,
-            snap_at: 0, snap: None, host_ns: 0, reads: Vec::new(), start_pc: 0, kick: None, top: 0, itop: 0, programs: 0, kicks: 0, illegal: 0, total_cycles: 0,
+            snap_at: 0, snap: None, host_ns: 0, reads: Vec::new(), vi_hist: [None; 4], br_stalled: false, start_pc: 0, kick: None, top: 0, itop: 0, programs: 0, kicks: 0, illegal: 0, total_cycles: 0,
         }
     }
 
@@ -166,6 +171,7 @@ impl Vu {
         self.land_q();
         self.land_p();
         self.vf_ready = [[0; 4]; 32];
+        self.vi_hist = [None; 4];
         self.acc_ready = 0;
         self.cycle = 0;
     }
@@ -270,6 +276,7 @@ impl Vu {
             }
             if acc { ready = ready.max(self.acc_ready); }
         }
+        self.br_stalled = ready > self.cycle;
         self.cycle = self.cycle.max(ready);
         self.land_flags();
         self.land_q();
@@ -279,8 +286,15 @@ impl Vu {
         let up = self.upper(hi);
         if hi & (1 << 31) != 0 {
             self.i = lo;                                     // I bit: the lower word is I
+            self.vi_hist.rotate_right(1);
+            self.vi_hist[0] = None;
         } else {
+            let before = self.vi;
             self.lower(lo, data, path1);
+            // which VI this pair changed, for the branch delay below
+            let w = (1..16).find(|&r| self.vi[r] != before[r]).map(|r| (r as u8, before[r], (0x10..=0x1C).contains(&(lo >> 25))));
+            self.vi_hist.rotate_right(1);
+            self.vi_hist[0] = w;
         }
         self.commit(up);
         self.cycle += 1;
@@ -527,12 +541,12 @@ impl Vu {
                 self.set_vi(it, l);
                 self.branch = Some(t);
             }
-            0x28 => if self.vi[it] == self.vi[is] { self.jump_rel(imm11) },               // IBEQ
-            0x29 => if self.vi[it] != self.vi[is] { self.jump_rel(imm11) },               // IBNE
-            0x2C => if (self.vi[is] as i16) < 0 { self.jump_rel(imm11) },                 // IBLTZ
-            0x2D => if (self.vi[is] as i16) > 0 { self.jump_rel(imm11) },                 // IBGTZ
-            0x2E => if (self.vi[is] as i16) <= 0 { self.jump_rel(imm11) },                // IBLEZ
-            0x2F => if (self.vi[is] as i16) >= 0 { self.jump_rel(imm11) },                // IBGEZ
+            0x28 => if self.bvi(it) == self.bvi(is) { self.jump_rel(imm11) },             // IBEQ
+            0x29 => if self.bvi(it) != self.bvi(is) { self.jump_rel(imm11) },             // IBNE
+            0x2C => if (self.bvi(is) as i16) < 0 { self.jump_rel(imm11) },                // IBLTZ
+            0x2D => if (self.bvi(is) as i16) > 0 { self.jump_rel(imm11) },                // IBGTZ
+            0x2E => if (self.bvi(is) as i16) <= 0 { self.jump_rel(imm11) },               // IBLEZ
+            0x2F => if (self.bvi(is) as i16) >= 0 { self.jump_rel(imm11) },               // IBGEZ
             0x40 => self.lower_special(op, data, path1, dest, ft, fs, it, is, fsf, ftf),
             _ => self.illegal += 1,
         }
@@ -668,6 +682,34 @@ impl Vu {
     fn jump_rel(&mut self, imm: u32) {
         // relative to the instruction after the branch
         self.branch = Some(self.pc.wrapping_add(imm.wrapping_mul(8)));
+    }
+
+    /// A VI register as a branch sees it. Branches read VI a stage early (PCSX2's
+    /// analyzeBranchVI): when the pair just before wrote it (not a flag read), the branch
+    /// gets the value from before the oldest of the last four pairs that wrote it in a row
+    /// back from there; not when the branch itself stalled. Conditional branches only (as
+    /// PCSX2). PS2_VU_BRANCH_VI=0: off
+    fn bvi(&self, r: usize) -> u16 {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let on = *ON.get_or_init(|| std::env::var("PS2_VU_BRANCH_VI").map_or(true, |v| v != "0"));
+        if r == 0 || !on || self.br_stalled { return self.vi[r]; }
+        match self.vi_hist[0] {
+            Some((x, _, false)) if x as usize == r => {}
+            _ => return self.vi[r],
+        }
+        let mut v = self.vi[r];
+        for (k, h) in self.vi_hist.iter().enumerate() {
+            match *h {
+                Some((x, old, flags)) if x as usize == r => {
+                    if flags && k > 0 { break; }
+                    v = old;
+                }
+                // (only a run of writes back from the branch: PCSX2 also counts a write
+                // further back in the same block; the games here come out the same)
+                _ => break,
+            }
+        }
+        v
     }
 
     fn set_vi(&mut self, r: usize, v: u32) { if r != 0 { self.vi[r & 15] = v as u16; } }

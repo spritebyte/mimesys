@@ -293,7 +293,7 @@ fn gs_frame_replay() {
     println!("replayed in {:?} ({} batches, {} waits)", t.elapsed(), gs.flushes, gs.syncs);
     let mut out = Vec::new();
     let (w, h) = gs.display(&mut out);
-    println!("display {w}x{h} PMODE {:X} DISPFB2 {:X} DISPLAY2 {:X}", gs.pregs[0], gs.pregs[9], gs.pregs[10]);
+    println!("display {w}x{h} PMODE {:X} SMODE2 {:X} DISPFB1 {:X} DISPLAY1 {:X} DISPFB2 {:X} DISPLAY2 {:X}", gs.pregs[0], gs.pregs[2], gs.pregs[7], gs.pregs[8], gs.pregs[9], gs.pregs[10]);
     if let Ok(p) = std::env::var("PS2_PPM") {
         let mut ppm = format!("P6 {w} {h} 255\n").into_bytes();
         for px in out.chunks(4) { ppm.extend_from_slice(&px[..3]); }

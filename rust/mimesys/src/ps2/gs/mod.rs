@@ -652,40 +652,57 @@ impl Gs {
 fn display_from(vram: &[u8], pregs: &[u64; 15], out: &mut Vec<u8>) -> (usize, usize) {
         let pmode = pregs[PMODE];
         let (en1, en2) = (pmode & 1 != 0, pmode & 2 != 0);
-        let circuits: Vec<usize> = [(en1, 0usize), (en2, 1)].iter().filter(|c| c.0).map(|c| c.1).collect();
-        // the size from the first enabled circuit (else circuit 2's settings)
-        let main = *circuits.first().unwrap_or(&1);
-        let disp = pregs[DISPLAY1 + 2 * main];
-        let magh = bits(disp, 23, 4) + 1;
-        let magv = bits(disp, 27, 2) + 1;
-        let w = ((bits(disp, 32, 12) + 1) / magh).clamp(1, 1024) as usize;
-        let mut h = ((bits(disp, 44, 11) + 1) / magv).clamp(1, 1024) as usize;
+        let mut circuits: Vec<usize> = [(en1, 0usize), (en2, 1)].iter().filter(|c| c.0).map(|c| c.1).collect();
+        if circuits.is_empty() { circuits.push(1); }      // nothing on: circuit 2's settings
+        // each circuit's screen rectangle (display clocks across, lines down) and scale
+        struct Rect { k: usize, x: u32, y: u32, w: u32, h: u32, mh: u32, mv: u32 }
+        let rects: Vec<Rect> = circuits.iter().map(|&k| {
+            let d = pregs[DISPLAY1 + 2 * k];
+            Rect { k, x: bits(d, 0, 12), y: bits(d, 12, 11), w: bits(d, 32, 12) + 1, h: bits(d, 44, 11) + 1,
+                   mh: bits(d, 23, 4) + 1, mv: bits(d, 27, 2) + 1 }
+        }).collect();
+        // the picture spans both rectangles, scaled like the bigger one (DMC shows a
+        // 64-line strip on circuit 1 over a 448-line circuit 2)
+        let r = rects.iter().max_by_key(|r| r.w as u64 * r.h as u64).unwrap();
+        let (mh, mv) = (r.mh, r.mv);
+        let x0 = rects.iter().map(|r| r.x).min().unwrap();
+        let y0 = rects.iter().map(|r| r.y).min().unwrap();
+        let x1 = rects.iter().map(|r| r.x + r.w).max().unwrap();
+        let y1 = rects.iter().map(|r| r.y + r.h).max().unwrap();
+        let w = ((x1 - x0) / mh).clamp(1, 1024) as usize;
+        let mut h = ((y1 - y0) / mv).clamp(1, 1024) as usize;
         let smode2 = pregs[SMODE2];
         // interlaced field mode: each field reads half the lines
         let field = smode2 & 1 != 0 && smode2 & 2 != 0;
+        let fstep = if field { 2 } else { 1 };
         if field { h = (h / 2).max(1); }
         // the screen has only so many lines (NTSC 240 a field, PAL 288; SMODE1 CMOD 3 =
         // PAL): a taller DH reads no further (Legaia 2 sets DH 896 over 224-line buffers)
         let pal = pregs[1] >> 13 & 3 == 3;
         let lines = if pal { 288 } else { 240 } * if field || smode2 & 1 == 0 { 1 } else { 2 };
-        h = h.min(lines / if field { 1 } else { magv as usize }).max(1);
+        h = h.min(lines / if field { 1 } else { mv as usize }).max(1);
         out.resize(w * h * 4, 0);
         let bg = pregs[BGCOLOR];
         let alp = bits(pmode, 8, 8);
         let mmod = pmode >> 5 & 1;
+        let both = rects.len() == 2;
         for y in 0..h {
+            let sy = y0 + y as u32 * mv * fstep;
             for x in 0..w {
+                let sx = x0 + x as u32 * mh;
                 let mut c = [bits(bg, 0, 8), bits(bg, 8, 8), bits(bg, 16, 8)];
                 // circuit 2 first (the background), circuit 1 merged over it
-                for &k in circuits.iter().rev() {
-                    let fb = pregs[DISPFB1 + 2 * k];
+                for r in rects.iter().rev() {
+                    if sx < r.x || sx >= r.x + r.w || sy < r.y || sy >= r.y + r.h { continue; }
+                    let (px, py) = ((sx - r.x) / r.mh, (sy - r.y) / (r.mv * fstep));
+                    let fb = pregs[DISPFB1 + 2 * r.k];
                     let fbp = bits(fb, 0, 9) * 32;
                     let fbw = bits(fb, 9, 6);
                     let psm = bits(fb, 15, 5);
                     let (dbx, dby) = (bits(fb, 32, 11), bits(fb, 43, 11));
-                    let p = mem::read(vram, psm, dbx + x as u32, dby + y as u32, fbp, fbw);
+                    let p = mem::read(vram, psm, dbx + px, dby + py, fbp, fbw);
                     let (rgb, a) = draw::to_rgba(p, psm);
-                    if k == 1 || circuits.len() == 1 {
+                    if r.k == 1 || !both {
                         c = [rgb[0] as u32, rgb[1] as u32, rgb[2] as u32];
                     } else {
                         let a = if mmod == 1 { alp } else { (a as u32 * 2).min(255) };
