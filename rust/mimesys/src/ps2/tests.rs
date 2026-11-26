@@ -1350,52 +1350,99 @@ fn vif1_frame_replay() {
     assert_eq!(&file[..4], b"VIF1");
     let n = u64::from_le_bytes(file[4..12].try_into().unwrap()) as usize;
     let cfg = bincode::config::standard().with_fixed_int_encoding();
-    let ((mut vif, mut vu, mut code, mut data), _): ((super::vif::Vif, super::vu::Vu, Vec<u8>, Vec<u8>), usize) =
-        bincode::serde::decode_from_slice(&file[12..12 + n], cfg).unwrap();
-    let (ev, _): (Vec<VifEvent>, usize) = bincode::serde::decode_from_slice(&file[12 + n..], cfg).unwrap();
-    println!("VIF1 at the start: {}", vif.feeding());
-    let dump_at: u64 = std::env::var("VIF_DUMP").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let p0 = vu.programs;
-    if dump_at > 0 { vu.snap_at = p0 + dump_at; }
-    let mut all = 0usize;
-    let mut bad = 0;
-    let mut gs = Vec::new();
-    let t0 = std::time::Instant::now();
-    let c0 = vu.total_cycles;
-    let mut out: Vec<u8> = Vec::new();
-    let mut scan = |gs: &mut Vec<u128>, vu: &super::vu::Vu, vif: &super::vif::Vif, all: &mut usize| {
-        for (k, q) in gs.iter().enumerate() {
-            let (x, y) = ((*q as u32) & 0xFFFF, ((*q >> 32) as u32) & 0xFFFF);
-            let z = (*q >> 64) as u32;
-            if x == 0xFFFF && y == 0xFFFF && (z == 0x8000_0000 || z == 0x7FFF_FFFF) {
-                bad += 1;
-                if bad > 40 { continue; }
-                println!("bad vertex: qw {} of the frame (+{k} in its packet), program {} (started at {:X}), TOP {:X}",
-                    *all + k, vu.programs - p0, vu.start_pc, vif.top);
-            }
-        }
-        *all += gs.len();
-        out.extend(gs.iter().flat_map(|q| q.to_le_bytes()));
-        gs.clear();
-    };
-    for e in ev {
-        match e {
-            VifEvent::Feed(words, r, h) => {
-                for w in words {
-                    let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs, gif_running: r, gif_held: h };
-                    // just before program n: its data memory and code
-                    vif.feed(&[w], &mut cx);
-                    if !gs.is_empty() { scan(&mut gs, &vu, &vif, &mut all); }
+    // VIF_REPEAT=n: replay n times keeping the VU JIT's translations (steady-state speed)
+    let passes: usize = std::env::var("VIF_REPEAT").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let mut keep = super::vu::JitCell(None);
+    for _pass in 0..passes {
+        let ((mut vif, mut vu, mut code, mut data), _): ((super::vif::Vif, super::vu::Vu, Vec<u8>, Vec<u8>), usize) =
+            bincode::serde::decode_from_slice(&file[12..12 + n], cfg).unwrap();
+        let (ev, _): (Vec<VifEvent>, usize) = bincode::serde::decode_from_slice(&file[12 + n..], cfg).unwrap();
+        vu.jit = std::mem::take(&mut keep);
+        println!("VIF1 at the start: {}", vif.feeding());
+        let dump_at: u64 = std::env::var("VIF_DUMP").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let p0 = vu.programs;
+        if dump_at > 0 { vu.snap_at = p0 + dump_at; }
+        let mut all = 0usize;
+        let mut bad = 0;
+        let mut gs = Vec::new();
+        let t0 = std::time::Instant::now();
+        let c0 = vu.total_cycles;
+        let h0 = vu.host_ns;
+        let mut out: Vec<u8> = Vec::new();
+        let mut scan = |gs: &mut Vec<u128>, vu: &super::vu::Vu, vif: &super::vif::Vif, all: &mut usize| {
+            for (k, q) in gs.iter().enumerate() {
+                let (x, y) = ((*q as u32) & 0xFFFF, ((*q >> 32) as u32) & 0xFFFF);
+                let z = (*q >> 64) as u32;
+                if x == 0xFFFF && y == 0xFFFF && (z == 0x8000_0000 || z == 0x7FFF_FFFF) {
+                    bad += 1;
+                    if bad > 40 { continue; }
+                    println!("bad vertex: qw {} of the frame (+{k} in its packet), program {} (started at {:X}), TOP {:X}",
+                        *all + k, vu.programs - p0, vu.start_pc, vif.top);
                 }
             }
-            VifEvent::Run(a) => { vu.start(a); vu.run(&code, &mut data, &mut gs); scan(&mut gs, &vu, &vif, &mut all); }
+            *all += gs.len();
+            out.extend(gs.iter().flat_map(|q| q.to_le_bytes()));
+            gs.clear();
+        };
+        for e in ev {
+            match e {
+                VifEvent::Feed(words, r, h) => {
+                    for w in words {
+                        let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs, gif_running: r, gif_held: h };
+                        // just before program n: its data memory and code
+                        vif.feed(&[w], &mut cx);
+                        if !gs.is_empty() { scan(&mut gs, &vu, &vif, &mut all); }
+                    }
+                }
+                VifEvent::Run(a) => {
+                    vu.start(a);
+                    vu.run(&code, &mut data, &mut gs);
+                    if std::env::var("VIF_CYC").is_ok() { println!("prog {} at {:04X}: total cycles {} gs {}", vu.programs, a, vu.total_cycles, gs.len()); }
+                    scan(&mut gs, &vu, &vif, &mut all);
+                }
+            }
         }
-    }
-    if let Ok(p) = std::env::var("VIF_OUT") { std::fs::write(p, &out).unwrap(); }
-    println!("{} GS quadwords, {} programs, {} bad vertices", all, vu.programs - p0, bad);
-    let ns = t0.elapsed().as_nanos() as f64;
-    println!("time {:.1} ms, VU1 {} cycles ({:.2} ns a cycle, VIF included)", ns / 1e6, vu.total_cycles - c0, ns / (vu.total_cycles - c0).max(1) as f64);
+        if let Ok(p) = std::env::var("VIF_OUT") { std::fs::write(p, &out).unwrap(); }
+        println!("{} GS quadwords, {} programs, {} bad vertices", all, vu.programs - p0, bad);
+        let ns = t0.elapsed().as_nanos() as f64;
+        let cns = vu.jit.0.as_ref().map_or(0, |j| j.compile_ns) as f64;
+        println!("time {:.1} ms, VU1 {} cycles ({:.2} ns a cycle, VIF included); JIT translating {:.1} ms, without it {:.1} ms",
+            ns / 1e6, vu.total_cycles - c0, ns / (vu.total_cycles - c0).max(1) as f64, cns / 1e6, (ns - cns) / 1e6);
+        println!("VU host time {:.1} ms (translating included)", (vu.host_ns - h0) as f64 / 1e6);
+        if let Some(j) = vu.jit.0.as_ref() { println!("JIT: {} translated ({} stale), {} runs", j.translated, j.stale, j.runs); }
+        if _pass + 1 < passes {
+            keep = std::mem::take(&mut vu.jit);
+            if std::env::var("VIF_WAIT").is_ok() { if let Some(j) = keep.0.as_mut() { j.wait_idle(); } }
+            continue;
+        }
     // VIF_DUMP=n: program n again, step by step (pc, vi registers, stores' targets)
+    if let (Some((v0, d0, code)), true) = (vu.snap.as_ref(), std::env::var("VIF_JITCMP").is_ok()) {
+        // the interpreter step by step, then the JIT block by block: the first JIT block
+        // boundary whose state the interpreter never had
+        let (mut vi, mut di, mut oi) = ((**v0).clone(), d0.clone(), Vec::new());
+        let mut ti = Vec::new();
+        while vi.running && ti.len() < 200_000 { ti.push((vi.pc, vi.cycle, vi.vi)); vi.step(code, &mut di, &mut oi); }
+        let (mut vj, mut dj, mut oj) = ((**v0).clone(), d0.clone(), Vec::new());
+        let mut jit = super::vu_jit::VuJit::new();
+        let mut k = 0;
+        let mut n = 0;
+        vj.jit_prepare();
+        while vj.running && n < 200_000 {
+            let st = (vj.pc, vj.cycle, vj.vi);
+            while k < ti.len() && ti[k] != st { k += 1; }
+            if k == ti.len() { println!("JIT state never seen by the interpreter: pc {:04X} cycle {} vi {:X?} (after {n} JIT steps)", st.0, st.1, st.2); break; }
+            match jit.get(code, vj.pc, true) {
+                Some(f) => {
+                    let mut ctx = super::vu_jit::Ctx::new(&mut vj, &mut dj, &mut oj);
+                    unsafe { f(&mut ctx) };
+                    println!("block from {:04X} (interp step {k})", st.0);
+                }
+                None => { vj.step(code, &mut dj, &mut oj); vj.jit_prepare(); }
+            }
+            n += 1;
+        }
+        println!("interp {} steps end pc {:04X} cycle {} | jit end pc {:04X} cycle {}", ti.len(), vi.pc, vi.cycle, vj.pc, vj.cycle);
+    }
     if let Some((mut v, mut d, code)) = vu.snap.take() {
         std::fs::write("vif_dump_data.bin", &d).unwrap();
         std::fs::write("vif_dump_code.bin", &code).unwrap();
@@ -1433,6 +1480,7 @@ fn vif1_frame_replay() {
         for q in &out { f.extend_from_slice(&q.to_le_bytes()); }
         std::fs::write("vif_dump_out.bin", f).unwrap();
     }
+    }
 }
 
 /// STCYCL WL 0 means 256: UNPACK S-8 with CL 1 / WL 0 reads one element and fills the rest
@@ -1451,4 +1499,26 @@ fn unpack_wl_0_means_256() {
     }
     assert_eq!(vif.stat() & 3, 0, "UNPACK done");
     assert_eq!(u32::from_le_bytes(data[0..4].try_into().unwrap()), 7);
+}
+
+/// SPR_TO in chain mode with TTE: each tag quadword lands in the scratchpad before its data
+#[test]
+fn spr_to_tte_writes_tags_into_the_scratchpad() {
+    let mut ram = vec![0u8; 0x10000];
+    let mut spr = vec![0u8; 0x4000];
+    put(&mut ram, 0x1000, qw([0x3000_0001, 0x2000, 0xAAAA, 0xBBBB]));   // ref, 1 qw at 0x2000
+    put(&mut ram, 0x1010, qw([0x7000_0000, 0, 0xCCCC, 0xDDDD]));        // end
+    put(&mut ram, 0x2000, qw([1, 2, 3, 4]));
+    let mut d = Dmac::default();
+    let mut sif = Sif::default();
+    d.write(0xE000, 1, u32::MAX);
+    d.write(0xD480, 0x100, u32::MAX);            // SADR
+    d.write(0xD430, 0x1000, u32::MAX);           // TADR
+    d.write(0xD400, 0x144, u32::MAX);            // chain, TTE, STR
+    d.step(&mut ram, &mut spr, &mut sif);
+    let rd = |a: usize| u128::from_le_bytes(spr[a..a + 16].try_into().unwrap());
+    assert_eq!(rd(0x100), qw([0x3000_0001, 0x2000, 0xAAAA, 0xBBBB]));
+    assert_eq!(rd(0x110), qw([1, 2, 3, 4]));
+    assert_eq!(rd(0x120), qw([0x7000_0000, 0, 0xCCCC, 0xDDDD]));
+    assert_eq!(d.ch[dmac::SPR_TO].chcr & 0x100, 0);
 }

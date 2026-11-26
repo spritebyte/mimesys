@@ -67,6 +67,10 @@ pub struct Spu2 {
     /// an interrupt to pass to the IOP (I_STAT bit 9)
     pub irq: bool,
     cycles: u32,
+    /// where the output areas (voice 1 / 3, dry / wet mixes, core 0's output) are written
+    /// next, 0..1FFh
+    #[serde(default)]
+    out_pos: u32,
     /// debugging: interrupts raised, voices keyed on
     #[serde(skip)]
     pub irqs: u64,
@@ -85,7 +89,7 @@ impl Spu2 {
     pub fn new() -> Self {
         Self {
             regs: vec![0; 0x400], ram: vec![0; RAM_WORDS], cores: vec![Core::new(), Core::new()],
-            irqinfo: 0, irq: false, cycles: 0, irqs: 0, key_ons: 0, out: Vec::new(),
+            irqinfo: 0, irq: false, cycles: 0, out_pos: 0, irqs: 0, key_ons: 0, out: Vec::new(),
         }
     }
 
@@ -109,6 +113,14 @@ impl Spu2 {
         for c in 0..2 {
             if self.cores[c].irqa == a & MASK { self.raise(c); }
         }
+    }
+
+    /// A sample the SPU2 itself writes to an output area of sound RAM (an IRQ if IRQA is
+    /// there, as PCSX2's spu2M_WriteFast); games read these (Vice City times its streaming
+    /// against core 1's dry output at 1800h)
+    fn out_write(&mut self, a: u32, v: i32) {
+        self.ram[a as usize] = clamp16(v) as i16 as u16;
+        self.touch(a);
     }
 
     /// Words `a .. a + n` were accessed
@@ -414,15 +426,32 @@ impl Spu2 {
         for c in 0..2 {
             let base = 0x400 * c as u32;
             let (vl_mask, vr_mask) = (self.bits24(base + 0x188), self.bits24(base + 0x190));
+            let (wl_mask, wr_mask) = (self.bits24(base + 0x18C), self.bits24(base + 0x194));
             let (mut l, mut r) = (0i32, 0i32);
+            let (mut wl, mut wr) = (0i32, 0i32);
             let mut prev = 0;
+            let op = self.out_pos;
             for n in 0..24 {
                 let out = self.voice_sample(c, n, prev);
                 prev = out;
                 let v = &self.cores[c].voices[n];
-                if vl_mask & (1 << n) != 0 { l += (out * v.vol_l.level) >> 15; }
-                if vr_mask & (1 << n) != 0 { r += (out * v.vol_r.level) >> 15; }
+                let (vl, vr) = ((out * v.vol_l.level) >> 15, (out * v.vol_r.level) >> 15);
+                if vl_mask & (1 << n) != 0 { l += vl; }
+                if vr_mask & (1 << n) != 0 { r += vr; }
+                if wl_mask & (1 << n) != 0 { wl += vl; }
+                if wr_mask & (1 << n) != 0 { wr += vr; }
+                // voices 1 and 3 (after the envelope) into their output areas
+                if n == 1 || n == 3 {
+                    let a = [[0x400, 0x600], [0xC00, 0xE00]][c][(n == 3) as usize] + op;
+                    self.out_write(a, out);
+                }
             }
+            // the voice mixes into the output areas (dry L / R, wet L / R), as PCSX2
+            let ob = if c == 0 { 0x1000 } else { 0x1800 };
+            self.out_write(ob + op, l);
+            self.out_write(ob + 0x200 + op, r);
+            self.out_write(ob + 0x400 + op, wl);
+            self.out_write(ob + 0x600 + op, wr);
             let mmix = self.reg(base + 0x198) as u32;
             if mmix & 0x800 == 0 { l = 0; }
             if mmix & 0x400 == 0 { r = 0; }
@@ -455,7 +484,13 @@ impl Spu2 {
             let or = (clamp16(r) * k.mvol_r.level) >> 15;
             k.out = (ol, or);
             final_out = (ol, or);
+            // core 0's output (after its master volume) into its area before core 1 mixes
+            if c == 0 {
+                self.out_write(0x800 + self.out_pos, ol);
+                self.out_write(0xA00 + self.out_pos, or);
+            }
         }
+        self.out_pos = (self.out_pos + 1) & 0x1FF;
         if self.out.len() < 2 * 48_000 {
             self.out.push(clamp16(final_out.0) as f32 / 32768.0);
             self.out.push(clamp16(final_out.1) as f32 / 32768.0);

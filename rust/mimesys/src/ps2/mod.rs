@@ -25,6 +25,7 @@ pub mod timers;
 pub mod vif;
 pub mod vu;
 mod vu_simd;
+mod vu_jit;
 #[cfg(test)]
 mod tests;
 
@@ -43,7 +44,7 @@ pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
 /// Printed at the top of the debug log so a log says which build made it
-const PATCH: &str = "0292";
+const PATCH: &str = "0296";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;
@@ -95,6 +96,9 @@ pub struct Ps2System {
     /// PS2_IOP_PCS=a,b,..: IOP addresses to log when reached; PS2_IOP_PROFILE=1: where the
     /// IOP spends its time (64-byte blocks), printed with each report
     iop_pcs: Vec<u32>,
+    /// hits per PS2_IOP_PCS address (each logged only for its first 24 hits; the counts
+    /// go in the report)
+    iop_pc_hits: std::collections::HashMap<u32, u64>,
     iop_prof: Option<std::collections::HashMap<u32, u64>>,
     /// PS2_IOP_WINDOW=start,stop: what the IOP runs from reaching `start` until it reaches
     /// `stop` (64-byte blocks and stacks, i.e. threads), logged at `stop`
@@ -103,6 +107,9 @@ pub struct Ps2System {
     code_dumped: bool,
     /// debugging: EE / IOP RAM written to files (once, 30 s in)
     next_ram_dump: u64,
+    /// a crash's memory was saved (ee_ram_crash.bin ...: once, at the first frame after
+    /// the EE's fatal-exception trace)
+    crash_dumped: bool,
     /// debugging: record the next frame's GS commands
     gs_rec_due: bool,
     /// frames (vsyncs) the recording still covers
@@ -182,6 +189,7 @@ impl Ps2System {
             gs_flushes_last: 0,
             gs_busy_last: 0,
             gs_syncs_last: 0,
+            iop_pc_hits: Default::default(),
             iop_pcs: std::env::var("PS2_IOP_PCS").map(|v| v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect()).unwrap_or_default(),
             iop_prof: std::env::var("PS2_IOP_PROFILE").ok().map(|_| Default::default()),
             iop_win: std::env::var("PS2_IOP_WINDOW").ok().and_then(|v| {
@@ -190,6 +198,7 @@ impl Ps2System {
             }),
             code_dumped: false,
             next_ram_dump: 1200,
+            crash_dumped: false,
             gs_rec_due: false,
             gs_rec_left: 0,
             last_report: None,
@@ -291,7 +300,8 @@ impl Ps2System {
             } else {
                 let mut bus = IopView(&mut self.hw);
                 while self.iop_owed >= 8 {
-                    if !self.iop_pcs.is_empty() && self.iop_pcs.contains(&self.iop.pc) {
+                    if !self.iop_pcs.is_empty() && self.iop_pcs.contains(&self.iop.pc)
+                        && { let n = self.iop_pc_hits.entry(self.iop.pc).or_insert(0); *n += 1; *n <= 24 } {
                         let r = &self.iop.regs;
                         crate::dlog!("PS2: IOP reached {:08X} (frame {} line {}, ra {:08X}, sp {:08X}, v0 {:08X} a0 {:08X} a1 {:08X} s0-s4 {:X} {:X} {:X} {:X} {:X})",
                             self.iop.pc, self.current_frame + 1, line, r[31], r[29], r[2], r[4], r[5], r[16], r[17], r[18], r[19], r[20]);
@@ -432,6 +442,10 @@ impl Ps2System {
             crate::dlog!("PS2:   IOP profile (non-idle steps {}): {}", total, top.join(", "));
             p.clear();
         }
+        if !self.iop_pcs.is_empty() {
+            let hits: Vec<String> = self.iop_pcs.iter().map(|a| format!("{a:X}:{}", self.iop_pc_hits.get(a).copied().unwrap_or(0))).collect();
+            crate::dlog!("PS2:   IOP PC hits so far: {}", hits.join(" "));
+        }
         crate::dlog!("PS2: frame {} EE pc {:08X} ra {:08X} status {:08X} cause {:08X} | IOP pc {:08X} ra {:08X} sr {:08X}",
             self.current_frame + 1, e.pc, e.gpr[31] as u32, e.cop0[12], e.cause(), i.pc, i.regs[31], i.cop0[12]);
         crate::dlog!("PS2:   INTC {:04X}/{:04X} D_STAT {:08X} D_CTRL {:X} SIF0 {:08X} SIF1 {:08X} | IOP I_STAT {:05X}/{:05X} ctrl {} DICR {:08X} DICR2 {:08X}",
@@ -452,6 +466,20 @@ impl Ps2System {
         // BIOS is waiting for
         // (every 1200 frames, overwriting: the latest state is the useful one)
         let mut gs_rec = false;
+        if self.ee.trace_dumped && !self.crash_dumped {
+            self.crash_dumped = true;
+            if let Some(d) = crate::common::debug_log::data_dir() {
+                let dir = d.join("GD_EMU").join("PS2");
+                let _ = std::fs::create_dir_all(&dir);
+                let a = std::fs::write(dir.join("ee_ram_crash.bin"), &self.hw.ram);
+                let _ = std::fs::write(dir.join("iop_ram_crash.bin"), &self.hw.iop_ram);
+                let _ = std::fs::write(dir.join("scratch_crash.bin"), &self.ee.scratch);
+                let mut vu = self.hw.vu0_code.clone();
+                vu.extend_from_slice(&self.hw.vu0_data);
+                let _ = std::fs::write(dir.join("vu0_mem_crash.bin"), vu);
+                crate::dlog!("PS2:   crash memory saved to {} (ee_ram_crash.bin {:?}, iop_ram_crash.bin, scratch_crash.bin, vu0_mem_crash.bin) at frame {}", dir.display(), a.is_ok(), self.current_frame);
+            }
+        }
         if self.current_frame >= self.next_ram_dump {
             self.next_ram_dump = self.current_frame + 1200;
             if let Some(d) = crate::common::debug_log::data_dir() {

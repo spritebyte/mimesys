@@ -14,7 +14,6 @@
 //! Programs run to completion when started (MSCAL / VCALLMS / CMSAR1).
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 
 use crate::common::cpu::r5900::fpu::{from_f64, ps2_div, to_f64};
 
@@ -35,8 +34,34 @@ pub const ST_D: u32 = 32;
 #[derive(Clone, Copy, Serialize, Deserialize)]
 struct Kick { addr: u32, left: Option<u32>, eop: bool, at: u64, tags: u32 }
 
+/// A result's flags on their way: MAC + status, or (`is_clip`) a CLIP judgement
+#[repr(C)]
 #[derive(Clone, Copy, Serialize, Deserialize, Default)]
-struct Flags { at: u64, mac: u32, stat: u32, clip: Option<u32> }
+pub(crate) struct Flags { pub at: u64, pub mac: u32, pub stat: u32, pub clip: u32, pub is_clip: u32 }
+
+/// The flags pipeline: a ring (translated code pushes and pops it too)
+#[repr(C)]
+#[derive(Clone, Copy, Serialize, Deserialize, Default)]
+pub(crate) struct FlagQ { pub q: [Flags; 16], pub head: u32, pub len: u32 }
+
+impl FlagQ {
+    pub fn front(&self) -> Option<&Flags> { (self.len > 0).then(|| &self.q[self.head as usize & 15]) }
+    pub fn back(&self) -> Option<&Flags> { (self.len > 0).then(|| &self.q[(self.head + self.len - 1) as usize & 15]) }
+    pub fn pop_front(&mut self) { if self.len > 0 { self.head = (self.head + 1) & 15; self.len -= 1; } }
+    pub fn push_back(&mut self, f: Flags) {
+        debug_assert!(self.len < 16);
+        if self.len == 16 { self.pop_front(); }
+        self.q[(self.head + self.len) as usize & 15] = f;
+        self.len += 1;
+    }
+    /// Drop the CLIP entries (FCSET)
+    pub fn drop_clips(&mut self) {
+        let keep: Vec<Flags> = (0..self.len).map(|k| self.q[(self.head + k) as usize & 15]).filter(|f| f.is_clip == 0).collect();
+        self.head = 0;
+        self.len = 0;
+        for f in keep { self.push_back(f); }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Vu {
@@ -65,11 +90,13 @@ pub struct Vu {
     vf_ready: [[u64; 4]; 32],
     #[serde(skip)]
     acc_ready: u64,
-    flags: VecDeque<Flags>,
+    #[serde(with = "flagq_serde")]
+    pub(crate) flags: FlagQ,
     q_pend: Option<(u64, u32, u32)>,
     p_pend: Option<(u64, u32)>,
     /// branch target after the delay slot
-    branch: Option<u32>,
+    #[serde(with = "branch_serde")]
+    pub(crate) branch: u32,
     /// E bit seen: stop after the next pair
     ending: u8,
     /// XGKICK in progress (PATH1 reads the packet a quadword a cycle while the program
@@ -103,7 +130,7 @@ pub struct Vu {
     dec: Vec<Dec>,
     /// the last four pairs' VI writes (register, value before, a flag read)
     #[serde(skip)]
-    vi_hist: [Option<(u8, u16, bool)>; 4],
+    pub(crate) vi_hist: [u32; 4],
     #[serde(skip)]
     br_stalled: bool,
     #[serde(skip)]
@@ -111,6 +138,68 @@ pub struct Vu {
     /// cycles run, all programs (speed report)
     #[serde(skip)]
     pub total_cycles: u64,
+    /// the JIT's view: the earliest cycle a flag / Q / P result lands (never later than
+    /// the truth; 0 = check), whether an XGKICK is running, the upper result waiting for
+    /// its commit
+    #[serde(skip)]
+    next_due: u64,
+    /// the earliest Q / P result (u64::MAX: none)
+    #[serde(skip)]
+    qp_due: u64,
+    #[serde(skip)]
+    kick_on: bool,
+    #[serde(skip)]
+    up_pend: Option<(Dst, [u32; 4], bool)>,
+    #[serde(skip)]
+    pub jit: JitCell,
+}
+
+/// The layouts recordings and states were saved with (flags as a VecDeque of
+/// {at, mac, stat, clip: Option}, the branch as an Option)
+mod flagq_serde {
+    use super::{FlagQ, Flags};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    #[derive(Serialize, Deserialize)]
+    struct Old { at: u64, mac: u32, stat: u32, clip: Option<u32> }
+    pub fn serialize<S: Serializer>(q: &FlagQ, s: S) -> Result<S::Ok, S::Error> {
+        let v: std::collections::VecDeque<Old> = (0..q.len).map(|k| {
+            let f = q.q[(q.head + k) as usize & 15];
+            Old { at: f.at, mac: f.mac, stat: f.stat, clip: (f.is_clip != 0).then_some(f.clip) }
+        }).collect();
+        v.serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<FlagQ, D::Error> {
+        let v = std::collections::VecDeque::<Old>::deserialize(d)?;
+        let mut q = FlagQ::default();
+        for o in v { q.push_back(Flags { at: o.at, mac: o.mac, stat: o.stat, clip: o.clip.unwrap_or(0), is_clip: o.clip.is_some() as u32 }); }
+        Ok(q)
+    }
+}
+mod branch_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    pub fn serialize<S: Serializer>(b: &u32, s: S) -> Result<S::Ok, S::Error> { (*b != super::NO_BRANCH).then_some(*b).serialize(s) }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> { Ok(Option::<u32>::deserialize(d)?.unwrap_or(super::NO_BRANCH)) }
+}
+
+/// No branch waiting for its delay slot
+pub(crate) const NO_BRANCH: u32 = u32::MAX;
+
+/// A `vi_hist` entry: VI `r` was written (it held `old`), by a flag read when `flag`
+pub(crate) fn hist(r: usize, old: u16, flag: bool) -> u32 { 1 << 31 | (flag as u32) << 24 | (r as u32) << 16 | old as u32 }
+
+/// The VU JIT's translations (not copied with the VU)
+#[derive(Default)]
+pub struct JitCell(pub Option<Box<super::vu_jit::VuJit>>);
+impl Clone for JitCell { fn clone(&self) -> Self { JitCell(None) } }
+
+/// Field offsets for translated code
+#[derive(Clone, Copy)]
+pub(crate) struct JitOffsets {
+    pub pc: usize, pub cycle: usize, pub vf_ready: usize, pub br_stalled: usize,
+    pub next_due: usize, pub kick_on: usize, pub ending: usize, pub running: usize,
+    pub vf: usize, pub vi: usize, pub acc: usize, pub acc_ready: usize, pub q: usize, pub i: usize,
+    pub flags: usize, pub fl_head: usize, pub fl_len: usize, pub branch: usize, pub vi_hist: usize,
+    pub qp_due: usize, pub mac: usize, pub status: usize, pub clip: usize,
 }
 
 impl Vu {
@@ -120,8 +209,8 @@ impl Vu {
         Self {
             vu1, vf, vi: [0; 16], acc: [0; 4], q: 0, p: 0, i: 0, r: 0, status: 0, mac: 0, clip: 0,
             pc: 0, tpc: 0, running: false, cycle: 0, vf_ready: [[0; 4]; 32], acc_ready: 0, vf_ready_old: [0; 32], acc_ready_old: 0,
-            flags: VecDeque::new(), q_pend: None, p_pend: None, branch: None, ending: 0,
-            snap_at: 0, snap: None, host_ns: 0, reads: Vec::new(), dec: Vec::new(), vi_hist: [None; 4], br_stalled: false, start_pc: 0, kick: None, top: 0, itop: 0, programs: 0, kicks: 0, illegal: 0, total_cycles: 0,
+            flags: FlagQ::default(), q_pend: None, p_pend: None, branch: NO_BRANCH, ending: 0,
+            snap_at: 0, snap: None, host_ns: 0, reads: Vec::new(), dec: Vec::new(), vi_hist: [0; 4], br_stalled: false, start_pc: 0, kick: None, top: 0, itop: 0, programs: 0, kicks: 0, illegal: 0, total_cycles: 0, next_due: 0, qp_due: 0, kick_on: false, up_pend: None, jit: JitCell(None),
         }
     }
 
@@ -174,7 +263,7 @@ impl Vu {
         self.land_q();
         self.land_p();
         self.vf_ready = [[0; 4]; 32];
-        self.vi_hist = [None; 4];
+        self.vi_hist = [0; 4];
         self.acc_ready = 0;
         self.cycle = 0;
     }
@@ -183,8 +272,8 @@ impl Vu {
         while let Some(f) = self.flags.front().copied() {
             if f.at > self.cycle { break; }
             self.flags.pop_front();
-            if let Some(c) = f.clip {
-                self.clip = (self.clip << 6 | c) & 0xFF_FFFF;
+            if f.is_clip != 0 {
+                self.clip = (self.clip << 6 | f.clip) & 0xFF_FFFF;
             } else {
                 self.mac = f.mac;
                 self.status = (self.status & !0xF) | f.stat | (f.stat << 6);
@@ -211,7 +300,7 @@ impl Vu {
         self.start_pc = addr;
         self.pc = addr;
         self.running = true;
-        self.branch = None;
+        self.branch = NO_BRANCH;
         self.ending = 0;
         self.programs += 1;
     }
@@ -227,13 +316,80 @@ impl Vu {
         let start = self.cycle;
         let t0 = std::time::Instant::now();
         if self.dec.len() != code.len() / 8 { self.dec = vec![Dec::default(); code.len() / 8]; }
+        // debugging: VU_JITCHECK=1 runs each program on the interpreter too and reports
+        // the first one whose results differ
+        static CHECK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let check = *CHECK.get_or_init(|| std::env::var("VU_JITCHECK").is_ok());
+        let reference = if check && super::vu_jit::enabled() {
+            let mut v = self.clone();
+            let mut d = data.to_vec();
+            let mut p = path1.clone();
+            v.snap_at = 1;      // (keeps the JIT out of it)
+            v.programs = 0;
+            let mut ti = Vec::new();
+            while v.running {
+                ti.push((v.pc, v.cycle, v.vi));
+                v.step(code, &mut d, &mut p);
+                if v.cycle - start > MAX_CYCLES { v.running = false; }
+            }
+            v.pump_kick(&d, &mut p, u64::MAX);
+            Some((v, d, p, ti))
+        } else { None };
+        if super::vu_jit::enabled() && pcsx2_stalls() && self.snap_at == 0 {
+            self.kick_on = self.kick.is_some();
+            self.recalc_due();
+            let mut j = self.jit.0.take().unwrap_or_default();
+            let mut ctx = super::vu_jit::Ctx::new(self as *mut Vu, data, path1 as *mut _);
+            let mut tk = 0;
+            let mut reported = false;
+            let mut leader = true;
+            while self.running {
+                if let Some((_, _, _, ti)) = reference.as_ref() {
+                    let st = (self.pc, self.cycle, self.vi);
+                    while tk < ti.len() && ti[tk] != st { tk += 1; }
+                    if tk == ti.len() && !reported {
+                        reported = true;
+                        println!("   JIT state unseen: pc {:04X} cycle {} (last block start {:04X?})", st.0, st.1, j.last);
+                    }
+                }
+                match j.get(code, self.pc, leader) {
+                    // SAFETY: the block only touches the VU, data memory and path1 through ctx
+                    Some(f) => { unsafe { j.last = Some(self.pc); ctx.vu = self as *mut Vu; f(&mut ctx) }; leader = true; }
+                    None => {
+                        let next = self.pc.wrapping_add(8);
+                        self.step(code, data, path1);
+                        self.kick_on = self.kick.is_some();
+                        self.recalc_due();
+                        leader = self.pc != next;
+                    }
+                }
+                if self.cycle - start > MAX_CYCLES { self.running = false; }
+            }
+            self.jit.0 = Some(j);
+        }
         while self.running {
             self.step(code, data, path1);
             if self.cycle - start > MAX_CYCLES { self.running = false; }
         }
         self.pump_kick(data, path1, u64::MAX);
+        if let Some((v, d, p, _)) = reference {
+            let same = v.pc == self.pc && v.cycle == self.cycle && v.vf == self.vf && v.vi == self.vi && v.acc == self.acc
+                && v.q == self.q && v.p == self.p && v.mac == self.mac && v.status == self.status && v.clip == self.clip
+                && d == *data && p == *path1;
+            if !same {
+                println!("VU JIT differs in program {} (start {:04X}): pc {:04X}/{:04X} cycle {}/{} vi {:X?}/{:X?} data same {} out same {}",
+                    self.programs, self.start_pc, v.pc, self.pc, v.cycle, self.cycle, v.vi, self.vi, d == *data, p == *path1);
+                for r in 0..32 { if v.vf[r] != self.vf[r] { println!("   vf{r} {:08X?} / {:08X?}", v.vf[r], self.vf[r]); } }
+            }
+        }
         self.tpc = self.pc;
         self.total_cycles += self.cycle - start;
+        {
+            static DBG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *DBG.get_or_init(|| std::env::var("VU_CYC").is_ok()) {
+                println!("vu prog {} at {:04X}: {} cycles, pc {:04X}, out {}", self.programs, self.start_pc, self.cycle - start, self.pc, path1.len());
+            }
+        }
         self.host_ns += t0.elapsed().as_nanos() as u64;
         self.settle();
     }
@@ -243,7 +399,7 @@ impl Vu {
         let lo = u32::from_le_bytes(code[a..a + 4].try_into().unwrap());
         let hi = u32::from_le_bytes(code[a + 4..a + 8].try_into().unwrap());
         // a branch in the pair before: this pair is its delay slot
-        let delay = self.branch.take();
+        let delay = std::mem::replace(&mut self.branch, NO_BRANCH);
         self.pc = self.pc.wrapping_add(8);
 
         // stalls: VF sources an FMAC is still writing
@@ -285,22 +441,84 @@ impl Vu {
         (h[3], h[2], h[1]) = (h[2], h[1], h[0]);
         if hi & (1 << 31) != 0 {
             self.i = lo;                                     // I bit: the lower word is I
-            self.vi_hist[0] = None;
+            self.vi_hist[0] = 0;
         } else {
             // the VI this pair changed (if any), for the branch delay below
             let r = d.vit as usize;
             let before = self.vi[r];
             (d.lo)(self, lo, data, path1);
-            self.vi_hist[0] = if r != 0 && self.vi[r] != before { Some((r as u8, before, d.vflag)) } else { None };
+            self.vi_hist[0] = if r != 0 && self.vi[r] != before { hist(r, before, d.vflag) } else { 0 };
         }
         self.commit(up);
         self.cycle += 1;
-        if let Some(t) = delay { self.pc = t; }
+        if delay != NO_BRANCH { self.pc = delay; }
         if self.ending > 0 {
             self.ending -= 1;
             if self.ending == 0 { self.running = false; }
         }
         if hi & (1 << 30) != 0 { self.ending = 1; }
+    }
+
+    // ------------------------------------------------------------ for the JIT
+
+    pub(crate) fn jit_prepare(&mut self) { self.kick_on = self.kick.is_some(); self.recalc_due(); }
+    fn recalc_due(&mut self) {
+        let mut d = u64::MAX;
+        if let Some((at, _, _)) = self.q_pend { d = d.min(at); }
+        if let Some((at, _)) = self.p_pend { d = d.min(at); }
+        self.qp_due = d;
+        self.next_due = d.min(self.flags.front().map_or(u64::MAX, |f| f.at));
+    }
+    pub(crate) fn jit_offsets() -> JitOffsets {
+        use std::mem::offset_of;
+        JitOffsets { pc: offset_of!(Vu, pc), cycle: offset_of!(Vu, cycle), vf_ready: offset_of!(Vu, vf_ready),
+            br_stalled: offset_of!(Vu, br_stalled), next_due: offset_of!(Vu, next_due), kick_on: offset_of!(Vu, kick_on),
+            ending: offset_of!(Vu, ending), running: offset_of!(Vu, running),
+            vf: offset_of!(Vu, vf), vi: offset_of!(Vu, vi), acc: offset_of!(Vu, acc), acc_ready: offset_of!(Vu, acc_ready),
+            q: offset_of!(Vu, q), i: offset_of!(Vu, i), flags: offset_of!(Vu, flags) + offset_of!(FlagQ, q),
+            fl_head: offset_of!(Vu, flags) + offset_of!(FlagQ, head), fl_len: offset_of!(Vu, flags) + offset_of!(FlagQ, len),
+            branch: offset_of!(Vu, branch), vi_hist: offset_of!(Vu, vi_hist),
+            qp_due: offset_of!(Vu, qp_due), mac: offset_of!(Vu, mac), status: offset_of!(Vu, status), clip: offset_of!(Vu, clip) }
+    }
+    pub(crate) fn jit_bvi(&self, r: usize) -> u32 { self.bvi(r) as u32 }
+    /// The (register, fields) a pair waits for (as `step`)
+    pub(crate) fn jit_reads(lo: u32, hi: u32) -> Vec<(usize, u32)> {
+        let d = Dec::decode(lo, hi);
+        d.rd[..d.n as usize].iter().map(|&(r, m)| (r as usize, m as u32)).collect()
+    }
+    pub(crate) fn jit_upper_fn(hi: u32) -> usize { up_handler(hi) as usize }
+    pub(crate) fn jit_lower_fn(lo: u32) -> usize { lo_handler(lo) as usize }
+    /// The VI the lower half may write, and bit 8: it's a flag read
+    pub(crate) fn jit_vit(lo: u32) -> u32 {
+        lower_vi_target(lo) as u32 | ((0x10..=0x1C).contains(&(lo >> 25)) as u32) << 8
+    }
+    pub(crate) fn jit_land(&mut self) {
+        self.land_flags();
+        self.land_q();
+        self.land_p();
+        self.recalc_due();
+    }
+    pub(crate) fn jit_kick(&mut self, data: &[u8], path1: &mut Vec<u128>) {
+        self.pump_kick(data, path1, self.cycle);
+        self.kick_on = self.kick.is_some();
+    }
+    pub(crate) fn jit_upper(&mut self, hi: u32, f: fn(&mut Vu, u32) -> Option<(Dst, [u32; 4], bool)>) {
+        self.up_pend = f(self, hi);
+        self.recalc_due();
+    }
+    pub(crate) fn jit_lower(&mut self, lo: u32, f: fn(&mut Vu, u32, &mut [u8], &mut Vec<u128>), vit: u32, data: &mut [u8], path1: &mut Vec<u128>) {
+        let h = &mut self.vi_hist;
+        (h[3], h[2], h[1]) = (h[2], h[1], h[0]);
+        let r = (vit & 0xFF) as usize;
+        let before = self.vi[r];
+        f(self, lo, data, path1);
+        self.vi_hist[0] = if r != 0 && self.vi[r] != before { hist(r, before, vit & 0x100 != 0) } else { 0 };
+        self.kick_on = self.kick.is_some();
+        self.recalc_due();
+    }
+    pub(crate) fn jit_commit(&mut self) {
+        let up = self.up_pend.take();
+        self.commit(up);
     }
 
     /// Write an upper instruction's result (after the lower half has run)
@@ -370,7 +588,7 @@ impl Vu {
         let mac = v::mac4(res, fl) & (m4 | m4 << 4 | m4 << 8 | m4 << 12);
         let stat = (mac & 0xF != 0) as u32 * ST_Z | (mac & 0xF0 != 0) as u32 * ST_S
             | (mac & 0xF00 != 0) as u32 * ST_U | (mac & 0xF000 != 0) as u32 * ST_O;
-        self.flags.push_back(Flags { at: self.cycle + MAC_LATENCY, mac, stat, clip: None });
+        self.flags.push_back(Flags { at: self.cycle + MAC_LATENCY, mac, stat, clip: 0, is_clip: 0 });
         Some((d, out, true))
     }
 
@@ -432,12 +650,12 @@ impl Vu {
             0x1C => { let c = self.clip_now(); self.set_vi(it, c & 0xFFF); }               // FCGET
             0x20 => self.jump_rel(imm11),                                                  // B
             0x21 => { let l = self.pc.wrapping_add(8) / 8; self.set_vi(it, l); self.jump_rel(imm11); } // BAL
-            0x24 => self.branch = Some(vi(self, is) * 8),                                  // JR
+            0x24 => self.branch = vi(self, is) * 8,                                  // JR
             0x25 => {                                                                      // JALR
                 let t = vi(self, is) * 8;
                 let l = self.pc.wrapping_add(8) / 8;
                 self.set_vi(it, l);
-                self.branch = Some(t);
+                self.branch = t;
             }
             0x28 => if self.bvi(it) == self.bvi(is) { self.jump_rel(imm11) },             // IBEQ
             0x29 => if self.bvi(it) != self.bvi(is) { self.jump_rel(imm11) },             // IBNE
@@ -576,11 +794,11 @@ impl Vu {
     }
 
     fn clip_now(&mut self) -> u32 { self.clip }
-    fn land_all_clip(&mut self) { self.flags.retain(|f| f.clip.is_none()); }
+    fn land_all_clip(&mut self) { self.flags.drop_clips(); }
 
     fn jump_rel(&mut self, imm: u32) {
         // relative to the instruction after the branch
-        self.branch = Some(self.pc.wrapping_add(imm.wrapping_mul(8)));
+        self.branch = self.pc.wrapping_add(imm.wrapping_mul(8));
     }
 
     /// A VI register as a branch sees it. Branches read VI a stage early (PCSX2's
@@ -592,20 +810,17 @@ impl Vu {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let on = *ON.get_or_init(|| std::env::var("PS2_VU_BRANCH_VI").map_or(true, |v| v != "0"));
         if r == 0 || !on || self.br_stalled { return self.vi[r]; }
-        match self.vi_hist[0] {
-            Some((x, _, false)) if x as usize == r => {}
-            _ => return self.vi[r],
-        }
+        let h0 = self.vi_hist[0];
+        if !(h0 >> 31 != 0 && (h0 >> 16 & 15) as usize == r && h0 >> 24 & 1 == 0) { return self.vi[r]; }
         let mut v = self.vi[r];
-        for (k, h) in self.vi_hist.iter().enumerate() {
-            match *h {
-                Some((x, old, flags)) if x as usize == r => {
-                    if flags && k > 0 { break; }
-                    v = old;
-                }
+        for (k, &h) in self.vi_hist.iter().enumerate() {
+            if h >> 31 != 0 && (h >> 16 & 15) as usize == r {
+                if h >> 24 & 1 != 0 && k > 0 { break; }
+                v = h as u16;
+            } else {
                 // (only a run of writes back from the branch: PCSX2 also counts a write
                 // further back in the same block; the games here come out the same)
-                _ => break,
+                break;
             }
         }
         v
@@ -839,7 +1054,7 @@ fn up_clip(vu: &mut Vu, op: u32) -> Option<(Dst, [u32; 4], bool)> {
         if v > w { c |= 1 << (2 * k); }
         if v < -w { c |= 2 << (2 * k); }
     }
-    vu.flags.push_back(Flags { at: vu.cycle + MAC_LATENCY, mac: 0, stat: 0, clip: Some(c) });
+    vu.flags.push_back(Flags { at: vu.cycle + MAC_LATENCY, mac: 0, stat: 0, clip: c, is_clip: 1 });
     None
 }
 /// OPMULA (ACC) / OPMSUB (fd): the cross product's halves
@@ -860,16 +1075,16 @@ fn lo_any(vu: &mut Vu, op: u32, data: &mut [u8], path1: &mut Vec<u128>) {
 }
 fn lo_nop(_: &mut Vu, _: u32, _: &mut [u8], _: &mut Vec<u128>) {}
 
-const ADD: u8 = 0;
-const SUB: u8 = 1;
-const MUL: u8 = 2;
-const MADD: u8 = 3;
-const MSUB: u8 = 4;
+pub(crate) const ADD: u8 = 0;
+pub(crate) const SUB: u8 = 1;
+pub(crate) const MUL: u8 = 2;
+pub(crate) const MADD: u8 = 3;
+pub(crate) const MSUB: u8 = 4;
 /// second operand: broadcast field of ft, Q, I, or all of ft
-const BC: u8 = 0;
-const Q: u8 = 1;
-const I: u8 = 2;
-const T: u8 = 3;
+pub(crate) const BC: u8 = 0;
+pub(crate) const Q: u8 = 1;
+pub(crate) const I: u8 = 2;
+pub(crate) const T: u8 = 3;
 
 fn up_fm<const K: u8, const SRC: u8, const ACC: bool>(vu: &mut Vu, op: u32) -> Option<(Dst, [u32; 4], bool)> {
     let dest = op >> 21 & 15;
@@ -883,7 +1098,88 @@ fn up_fm<const K: u8, const SRC: u8, const ACC: bool>(vu: &mut Vu, op: u32) -> O
     vu.fmac(d, dest, s, b, k)
 }
 
+/// What an upper instruction is, for the JIT: an FMAC form (`up_fm::<K, SRC, ACC>`), NOP,
+/// or something else
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum UpClass { Fm(u8, u8, bool), Mm(bool, u8), Itof(u32), Ftoi(u32), Abs, Clip, Nop, Other }
+
+pub(crate) fn up_class(op: u32) -> UpClass {
+    use UpClass::*;
+    let f = op & 0x3F;
+    if f >= 0x3C {
+        return match (op >> 6 & 31) << 2 | (op & 3) {
+            0x00..=0x03 => Fm(ADD, BC, true),
+            0x04..=0x07 => Fm(SUB, BC, true),
+            0x08..=0x0B => Fm(MADD, BC, true),
+            0x0C..=0x0F => Fm(MSUB, BC, true),
+            0x18..=0x1B => Fm(MUL, BC, true),
+            0x1C => Fm(MUL, Q, true),
+            0x1E => Fm(MUL, I, true),
+            0x20 => Fm(ADD, Q, true),
+            0x21 => Fm(MADD, Q, true),
+            0x22 => Fm(ADD, I, true),
+            0x23 => Fm(MADD, I, true),
+            0x24 => Fm(SUB, Q, true),
+            0x25 => Fm(MSUB, Q, true),
+            0x26 => Fm(SUB, I, true),
+            0x27 => Fm(MSUB, I, true),
+            0x28 => Fm(ADD, T, true),
+            0x29 => Fm(MADD, T, true),
+            0x2A => Fm(MUL, T, true),
+            0x2C => Fm(SUB, T, true),
+            0x2D => Fm(MSUB, T, true),
+            0x10..=0x13 => Itof(op & 3),
+            0x14..=0x17 => Ftoi(op & 3),
+            0x1D => Abs,
+            0x1F => Clip,
+            0x2F => Nop,
+            _ => Other,
+        };
+    }
+    match f {
+        0x00..=0x03 => Fm(ADD, BC, false),
+        0x04..=0x07 => Fm(SUB, BC, false),
+        0x08..=0x0B => Fm(MADD, BC, false),
+        0x0C..=0x0F => Fm(MSUB, BC, false),
+        0x18..=0x1B => Fm(MUL, BC, false),
+        0x1C => Fm(MUL, Q, false),
+        0x1E => Fm(MUL, I, false),
+        0x20 => Fm(ADD, Q, false),
+        0x21 => Fm(MADD, Q, false),
+        0x22 => Fm(ADD, I, false),
+        0x23 => Fm(MADD, I, false),
+        0x24 => Fm(SUB, Q, false),
+        0x25 => Fm(MSUB, Q, false),
+        0x26 => Fm(SUB, I, false),
+        0x27 => Fm(MSUB, I, false),
+        0x28 => Fm(ADD, T, false),
+        0x29 => Fm(MADD, T, false),
+        0x2A => Fm(MUL, T, false),
+        0x2C => Fm(SUB, T, false),
+        0x2D => Fm(MSUB, T, false),
+        0x10..=0x13 => Mm(true, BC),
+        0x14..=0x17 => Mm(false, BC),
+        0x1D => Mm(true, I),
+        0x1F => Mm(false, I),
+        0x2B => Mm(true, T),
+        0x2F => Mm(false, T),
+        _ => Other,
+    }
+}
+
 fn up_handler(op: u32) -> UpH {
+    // the FMAC forms come from `up_class` (the JIT's view too)
+    if let UpClass::Fm(k, s, a) = up_class(op) {
+        macro_rules! fm { ($($k:ident)*) => { $( if k == $k {
+            return match (s, a) {
+                (BC, true) => up_fm::<$k, BC, true>, (Q, true) => up_fm::<$k, Q, true>,
+                (I, true) => up_fm::<$k, I, true>, (_, true) => up_fm::<$k, T, true>,
+                (BC, false) => up_fm::<$k, BC, false>, (Q, false) => up_fm::<$k, Q, false>,
+                (I, false) => up_fm::<$k, I, false>, (_, false) => up_fm::<$k, T, false>,
+            };
+        } )* } }
+        fm!(ADD SUB MUL MADD MSUB);
+    }
     let f = op & 0x3F;
     if f >= 0x3C {
         return match (op >> 6 & 31) << 2 | (op & 3) {
@@ -969,7 +1265,7 @@ fn lo_handler(op: u32) -> LoH {
 }
 
 /// The VI register a lower instruction may write (0: none)
-fn lower_vi_target(op: u32) -> usize {
+pub(crate) fn lower_vi_target(op: u32) -> usize {
     let it = (op >> 16 & 15) as usize;
     let is = (op >> 11 & 15) as usize;
     match op >> 25 {

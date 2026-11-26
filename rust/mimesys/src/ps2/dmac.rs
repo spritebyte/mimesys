@@ -307,8 +307,14 @@ impl Dmac {
             c.tag_end = end;
             // TTE: the tag's upper 64 bits go first
             if self.ch[n].chcr & (1 << 6) != 0 {
-                let hi = (tag >> 64) as u64;
-                self.sink_tag(n, hi, sif);
+                if n == SPR_TO {
+                    // the whole tag quadword lands in the scratchpad before its data (GTA3
+                    // lays objects out after their tags and patches the tag IDs later)
+                    self.sink(n, tag, ram, spr, sif);
+                } else {
+                    let hi = (tag >> 64) as u64;
+                    self.sink_tag(n, hi, sif);
+                }
             }
             guard += 1;
             if guard > 0x10_0000 { return; }
