@@ -653,7 +653,7 @@ impl EeBus for EeView<'_> {
         if pa < RAM_SIZE as u32 { let o = pa as usize; self.0.ram[o..o + 16].copy_from_slice(&v.to_le_bytes()); return; }
         // the FIFOs (1000_4000-1000_7FFF) take whole quadwords: the GIF's (1000_6000) goes
         // to the GS (PATH3); VIF / IPU in later stages
-        if (0x1000_6000..0x1000_7000).contains(&pa) { self.0.gs.feed(v); self.0.update_gs_irq(); return; }
+        if (0x1000_6000..0x1000_7000).contains(&pa) { super::gs::set_feed_path(4); self.0.gs.feed(v); self.0.update_gs_irq(); return; }
         if (0x1000_4000..0x1000_6000).contains(&pa) {
             let words: [u32; 4] = std::array::from_fn(|k| (v >> (32 * k)) as u32);
             self.0.vif_feed(pa >= 0x1000_5000, &words);
@@ -758,6 +758,19 @@ impl Hw {
             self.update_gif_hold();
             if self.vif1.p3_packet_wait { self.dmac.gif_one_packet = true; }
         }
+        let srcs = std::mem::take(&mut self.vif1.dbg_gs_src);
+        if vif1 && !srcs.is_empty() && !gs.is_empty() {
+            let mut src = vec![u32::MAX; gs.len()];
+            for (i, a) in srcs { if i < src.len() { src[i] = a; } }
+            super::gs::set_feed_path(2);
+            for (q, a) in gs.into_iter().zip(src) {
+                super::gs::set_feed_src(a);
+                self.gs.feed(q);
+            }
+            super::gs::set_feed_src(u32::MAX);
+            self.update_gs_irq();
+            return;
+        }
         self.to_gs(gs);
     }
 
@@ -777,6 +790,7 @@ impl Hw {
 
     fn to_gs(&mut self, qs: Vec<u128>) {
         if qs.is_empty() { return; }
+        super::gs::set_feed_path(2);
         for q in qs { self.gs.feed(q); }
         self.update_gs_irq();
     }

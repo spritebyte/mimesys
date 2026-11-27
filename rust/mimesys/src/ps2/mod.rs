@@ -44,7 +44,7 @@ pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
 /// Printed at the top of the debug log so a log says which build made it
-const PATCH: &str = "0304";
+const PATCH: &str = "0312";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;
@@ -298,7 +298,10 @@ impl Ps2System {
                     c = self.ee.run_jit(&mut bus, &mut self.jit, target);
                     self.skipped_ee += std::mem::take(&mut self.jit.idle);
                 } else {
-                    while c < target { c += self.ee.step(&mut bus); }
+                    while c < target {
+                        c += self.ee.step(&mut bus);
+                        if crate::common::cpu::r5900::slice_break() { break; }
+                    }
                 }
             }
             done += c;
@@ -332,6 +335,7 @@ impl Ps2System {
             }
             let t_tick = std::time::Instant::now();
             self.host_ns[1] += (t_tick - t_iop).as_nanos() as u64;
+            if crate::common::cpu::r5900::src_track() { crate::common::cpu::r5900::set_now(self.ee.cycles); }
             self.tick(c, iop_cycles, 0);
             self.host_ns[2] += t_tick.elapsed().as_nanos() as u64;
         }
@@ -386,7 +390,7 @@ impl Ps2System {
         }
         if !h.dmac.vif1_out.is_empty() {
             let words = std::mem::take(&mut h.dmac.vif1_out);
-            if crate::common::cpu::r5900::vu1_src().is_some() {
+            if crate::common::cpu::r5900::src_track() {
                 h.vif1.dbg_srcq.extend(std::mem::take(&mut h.dmac.vif1_src));
             }
             h.vif_feed(true, &words);
@@ -396,7 +400,13 @@ impl Ps2System {
         // GIF PATH3: what the GIF channel moved goes to the GS
         if !h.dmac.gif_out.is_empty() {
             let q = std::mem::take(&mut h.dmac.gif_out);
-            for v in q { h.gs.feed(v); }
+            gs::set_feed_path(3);
+            let src = std::mem::take(&mut h.dmac.gif_src);
+            for (i, v) in q.into_iter().enumerate() {
+                if !src.is_empty() { gs::set_feed_src(src.get(i).copied().unwrap_or(u32::MAX)); }
+                h.gs.feed(v);
+            }
+            gs::set_feed_src(u32::MAX);
             h.update_gs_irq();
         }
         // VIF1 at a FLUSHA goes on now PATH3's data is in
@@ -616,8 +626,9 @@ impl Ps2System {
             let tm: Vec<String> = self.hw.timers.iter().map(|t| format!("mode {:X} count {:X} comp {:X}", t.mode, t.count, t.comp)).collect();
             crate::dlog!("PS2:   EE timers: {}", tm.join(" | "));
         }
-        crate::dlog!("PS2:   EE JIT: {} | {} blocks, {} translated, {} retranslated (code changed), {} runs",
-            if self.jit_on { "on" } else { "off" }, self.jit.len(), self.jit.translated, self.jit.stale, self.jit.runs);
+        crate::dlog!("PS2:   EE JIT: {} | {} blocks, {} translated, {} retranslated (code changed), {} runs ({} through links{})",
+            if self.jit_on { "on" } else { "off" }, self.jit.len(), self.jit.translated, self.jit.stale, self.jit.runs,
+            self.jit.linked, if crate::common::cpu::r5900::jit::linking() { "" } else { ", linking off" });
         {
             let r = &self.hw.sif.rpc;
             let counts: Vec<String> = r.counts.iter().map(|(k, v)| format!("{k} x{v}")).collect();

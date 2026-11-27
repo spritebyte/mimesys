@@ -694,8 +694,13 @@ impl Raster<'_> {
             let tx = if c.linear {
                 let (u, v) = (u - 8, v - 8);
                 let (iu, iv, fu, fv) = (u >> 4, v >> 4, u & 15, v & 15);
-                let (a, b) = (self.texel(c, iu, iv), self.texel(c, iu + 1, iv));
-                let (d, e) = (self.texel(c, iu, iv + 1), self.texel(c, iu + 1, iv + 1));
+                // (a neighbour with weight 0 isn't fetched: 1:1 sprites land on texel centres)
+                let a = self.texel(c, iu, iv);
+                let b = if fu != 0 { self.texel(c, iu + 1, iv) } else { a };
+                let (d, e) = if fv != 0 {
+                    let d = self.texel(c, iu, iv + 1);
+                    (d, if fu != 0 { self.texel(c, iu + 1, iv + 1) } else { d })
+                } else { (a, b) };
                 core::array::from_fn(|k| {
                     let top = a[k] * (16 - fu) + b[k] * fu;
                     let bot = d[k] * (16 - fu) + e[k] * fu;

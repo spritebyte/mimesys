@@ -85,6 +85,12 @@ pub struct Vif {
     pub dbg_srcq: VecDeque<u32>,
     #[serde(skip)]
     dbg_first: u32,
+    /// debugging (PS2_GS_XFER): the source of the word being read, and (index in the
+    /// output, source) of each DIRECT quadword sent to the GS
+    #[serde(skip)]
+    dbg_word_src: u32,
+    #[serde(skip)]
+    pub dbg_gs_src: Vec<(usize, u32)>,
 }
 
 impl Vif {
@@ -148,9 +154,10 @@ impl Vif {
 
     /// Feed one word of the stream; true if a finished command interrupts
     pub fn word(&mut self, w: u32, cx: &mut VifCtx) -> bool {
-        if self.vif1 && crate::common::cpu::r5900::vu1_src().is_some() {
+        if self.vif1 && crate::common::cpu::r5900::src_track() {
             let src = self.dbg_srcq.pop_front().unwrap_or(u32::MAX);
             if self.left > 0 && self.buf.is_empty() { self.dbg_first = src; }
+            self.dbg_word_src = src;
         }
         if self.left > 0 && self.vif1 && vif_log() && std::env::var_os("VIF_LOG_DATA").is_some() {
             println!("VIF1   data {w:08X}");
@@ -250,6 +257,9 @@ impl Vif {
                 self.addr += 4;
             }
             0x50 | 0x51 => {
+                if self.buf.is_empty() && self.dbg_word_src != 0 && crate::common::cpu::r5900::src_track() {
+                    self.dbg_gs_src.push((cx.gs.len(), self.dbg_word_src));
+                }
                 self.buf.push(w);
                 if self.buf.len() == 4 {
                     let q = self.buf.iter().enumerate().fold(0u128, |a, (k, &x)| a | (x as u128) << (32 * k));

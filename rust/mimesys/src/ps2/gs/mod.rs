@@ -468,6 +468,7 @@ impl Gs {
         // what came of a transfer cut short still lands first
         self.submit_upload();
         let dir = bits(self.regs[TRXDIR], 0, 2);
+        xfer_log(dir, self.regs[BITBLTBUF], self.regs[TRXPOS], self.regs[TRXREG]);
         self.xfer = Transfer { active: false, x: 0, y: 0, pending: Vec::new() };
         self.up.clear();
         self.up_start = 0;
@@ -488,6 +489,7 @@ impl Gs {
     /// queued for the drawing side
     fn hwreg(&mut self, v: u64) {
         if !self.xfer.active { return; }
+        xfer_data(v);
         self.up.extend_from_slice(&v.to_le_bytes());
         let reg = self.regs[TRXREG];
         let (w, h) = (bits(reg, 0, 12).max(1) as u64, bits(reg, 32, 12) as u64);
@@ -717,3 +719,101 @@ fn display_from(vram: &[u8], pregs: &[u64; 15], out: &mut Vec<u8>) -> (usize, us
 }
 
 const TEXFLUSH_REG: usize = 0x3F;
+
+/// Debugging: PS2_GS_XFER=bp (hex block) logs GS transfers whose destination (host->local,
+/// local->local) or source (local->host, local->local) starts within 80h blocks of `bp`
+/// ("all": every transfer); the first 300. A host->local transfer's line says which GIF
+/// path set it up; then its first 64 bytes, how many bytes came (of how many) and through
+/// which paths.
+pub static FEED_PATH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(3);
+
+/// Set by the feeders: 2 = PATH1 / PATH2 (VU1 XGKICK, VIF1 DIRECT), 3 = PATH3 (GIF DMA),
+/// 4 = the EE writing the GIF FIFO
+pub fn set_feed_path(p: u8) { FEED_PATH.store(p, std::sync::atomic::Ordering::Relaxed); }
+
+/// Debugging (PS2_GS_XFER): EE address the quadword being fed came from (FFFFFFFF unknown)
+pub static FEED_SRC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+pub fn set_feed_src(a: u32) { FEED_SRC.store(a, std::sync::atomic::Ordering::Relaxed); }
+
+/// "from EE 00123450 (last EE store pc .. ra ..)" for a logged upload's data
+fn src_text() -> String {
+    let a = FEED_SRC.load(std::sync::atomic::Ordering::Relaxed);
+    if a == u32::MAX { return "from an unknown address".into(); }
+    let pa = if a & 0x8000_0000 != 0 { a & 0x8000_3FFF } else { a & 0x01FF_FFFF };
+    let place = if a & 0x8000_0000 != 0 { format!("scratchpad {:04X}", a & 0x3FFF) } else { format!("EE {pa:08X}") };
+    format!("from {place} ({})", crate::common::cpu::r5900::wr_describe(pa))
+}
+
+#[derive(Default)]
+struct XferLog { on: bool, data: Vec<u64>, printed: bool, got: u64, want: u64, paths: u8 }
+static XFER: std::sync::Mutex<XferLog> =
+    std::sync::Mutex::new(XferLog { on: false, data: Vec::new(), printed: false, got: 0, want: 0, paths: 0 });
+
+fn path_names(m: u8) -> String {
+    let n: Vec<&str> = [(4u8, "PATH1/2"), (8, "PATH3"), (16, "GIF FIFO")].iter().filter(|(b, _)| m & b != 0).map(|(_, s)| *s).collect();
+    if n.is_empty() { "none".into() } else { n.join("+") }
+}
+
+/// A logged host->local transfer's data
+fn xfer_data(v: u64) {
+    let Ok(mut x) = XFER.lock() else { return };
+    if !x.on { return; }
+    // the source of the first 4 quadwords (one qword = 2 dwords), and of the last
+    if x.got % 16 == 0 && (x.got < 64 || x.got + 16 >= x.want) {
+        crate::dlog!("GS:   bytes {}..{} {}", x.got, x.got + 16, src_text());
+    }
+    x.got += 8;
+    x.paths |= 1 << FEED_PATH.load(std::sync::atomic::Ordering::Relaxed);
+    if !x.printed {
+        x.data.push(v);
+        if x.data.len() == 8 { xfer_words(&mut x); }
+    }
+    if x.got >= x.want { xfer_end(&mut x); }
+}
+
+fn xfer_words(x: &mut XferLog) {
+    if x.printed || x.data.is_empty() { return; }
+    let w: Vec<String> = x.data.iter().flat_map(|&v| [v as u32, (v >> 32) as u32]).map(|v| format!("{v:08X}")).collect();
+    crate::dlog!("GS:   data (32-bit words) {}", w.join(" "));
+    x.printed = true;
+}
+
+fn xfer_end(x: &mut XferLog) {
+    if !x.on { return; }
+    xfer_words(x);
+    if crate::common::cpu::r5900::tl_on() {
+        crate::common::cpu::r5900::tl("GS upload done (details below)");
+        crate::common::cpu::r5900::tl_flush();
+    }
+    crate::dlog!("GS:   received {} of {} bytes, through {}", x.got, x.want, path_names(x.paths));
+    *x = XferLog::default();
+}
+
+fn xfer_log(dir: u32, bb: u64, pos: u64, reg: u64) {
+    static CFG: std::sync::OnceLock<Option<Option<u32>>> = std::sync::OnceLock::new();
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let Some(want) = *CFG.get_or_init(|| {
+        let v = std::env::var("PS2_GS_XFER").ok()?;
+        Some(if v == "all" { None } else { u32::from_str_radix(v.trim_start_matches("0x"), 16).ok() })
+    }) else { return };
+    let Ok(mut x) = XFER.lock() else { return };
+    // the last logged transfer, cut short
+    xfer_end(&mut x);
+    let (sbp, dbp) = (bits(bb, 0, 14) as u32, bits(bb, 32, 14) as u32);
+    let near = |b: u32| want.is_none_or(|w| b.abs_diff(w) < 0x80);
+    let hit = match dir { 0 => near(dbp), 1 => near(sbp), 2 => near(sbp) || near(dbp), _ => false };
+    if !hit || N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 300 { return; }
+    let dirs = ["host->local", "local->host", "local->local", "off"];
+    if crate::common::cpu::r5900::tl_on() {
+        crate::common::cpu::r5900::tl(&format!("GS upload to {dbp:04X} set up (details below)"));
+        crate::common::cpu::r5900::tl_flush();
+    }
+    crate::dlog!("GS transfer {}: src {:04X} bw {} psm {:02X} -> dst {:04X} bw {} psm {:02X} | src pos {},{} dst pos {},{} | size {}x{} | set up through {}",
+        dirs[dir as usize & 3], sbp, bits(bb, 16, 6), bits(bb, 24, 6), dbp, bits(bb, 48, 6), bits(bb, 56, 6),
+        bits(pos, 0, 11), bits(pos, 16, 11), bits(pos, 32, 11), bits(pos, 48, 11), bits(reg, 0, 12), bits(reg, 32, 12),
+        path_names(1 << FEED_PATH.load(std::sync::atomic::Ordering::Relaxed)));
+    if dir == 0 {
+        let bytes = bits(reg, 0, 12) as u64 * bits(reg, 32, 12) as u64 * mem::xfer_bpp(bits(bb, 56, 6)) as u64 / 8;
+        *x = XferLog { on: true, want: bytes, ..Default::default() };
+    }
+}

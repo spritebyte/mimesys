@@ -11,9 +11,18 @@
 //!   store that isn't plain memory or would fault, calls the interpreter for that one
 //!   instruction (`h_exec`); if that changed the flow (an exception, ERET, a COP branch)
 //!   the block stops there.
-//! - Before a block runs, its code words are compared with memory (code gets loaded and
-//!   rewritten). A TLB change or a new RAM throws the blocks away.
+//! - Code gets loaded and rewritten: every write to RAM (CPU stores, translated or not,
+//!   and DMA) bumps its 4 KB page's generation if a block was translated from that page
+//!   (`note_write`). A block whose page generation moved compares its code words with
+//!   memory before it runs again. A TLB change or a new RAM throws the blocks away.
 //! - Interrupts are taken between blocks; the COP0 timer advances a block at a time.
+//! - Linking: a block that ends at a fixed address (fall-through, J / JAL, either side of
+//!   a conditional branch) goes straight on to the translated block there through a link
+//!   cell the dispatcher fills (`Link`), without coming back, while: the slice's cycles
+//!   (and the cycles until the COP0 timer's Compare) last, the target's page generation is
+//!   still the one it was checked at, and no store / load went through the interpreter in
+//!   this run (it could have raised an interrupt). Never into a pure block (polling loops
+//!   are spotted by the dispatcher). `PS2_EE_LINK=0` turns it off.
 
 use super::*;
 use cranelift_codegen::ir::{self, condcodes::IntCC, types, AbiParam, InstBuilder, MemFlagsData, Value};
@@ -44,13 +53,43 @@ pub struct Ctx {
     map: *const u32,
     sp: *mut u8,
     ram_len: u64,
-    /// set by the block: the cycles it took
+    /// added to by each block: the cycles it took
     cycles: u32,
     /// a block that loops to itself goes round again while it's taken fewer cycles than this
     budget: u32,
+    /// linking goes on while blocks have taken fewer cycles than this (left)
+    chain: u32,
+    /// set when the interpreter ran a load / store: no more linking this run
+    nochain: u32,
+    /// blocks entered through links
+    hops: u32,
+    /// the last block run (its index), for filling its link cell
+    last: u32,
 }
 
-type BlockFn = unsafe extern "C" fn(*mut Ctx) -> u32;
+/// A block's answer: the next block to run (a link), or 0 to go back to the dispatcher
+type BlockFn = unsafe extern "C" fn(*mut Ctx) -> usize;
+
+/// Where a block's fixed exit goes, filled by the dispatcher: the translated block there
+/// and the page generation its code was last checked at
+#[repr(C)]
+struct Link {
+    f: usize,
+    genp: *const u32,
+    pgen: u32,
+    pc: u32,
+}
+
+/// The generation a block in ROM is checked against (never moves)
+static ROM_GEN: u32 = 0;
+
+/// Linking is on (not PS2_EE_LINK=0)
+pub fn linking() -> bool { link_on() }
+
+fn link_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PS2_EE_LINK").map_or(true, |v| v != "0"))
+}
 
 /// `h_exec`'s answer: the instruction changed the flow, stop the block
 const EXIT: u32 = 0x8000_0000;
@@ -61,13 +100,40 @@ const NONE: u32 = u32::MAX;
 /// Translated blocks before the code memory is thrown away and started again
 const MAX_COMPILED: usize = 200_000;
 
+/// RAM pages (4 KB, physical, 32 MB) blocks were translated from, and how often each has
+/// been written since. Shared by every R5900 in the process: another one's writes only
+/// cost a needless compare of the code words.
+const PAGES: usize = 0x200_0000 >> 12;
+static CODE_PAGE: [std::sync::atomic::AtomicU8; PAGES] = [const { std::sync::atomic::AtomicU8::new(0) }; PAGES];
+static PAGE_GEN: [std::sync::atomic::AtomicU32; PAGES] = [const { std::sync::atomic::AtomicU32::new(0) }; PAGES];
+
+/// RAM at physical `pa` was written: blocks from its page check their code before running
+#[inline]
+pub fn note_write(pa: u32) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let p = (pa as usize >> 12) & (PAGES - 1);
+    if CODE_PAGE[p].load(Relaxed) != 0 { PAGE_GEN[p].fetch_add(1, Relaxed); }
+}
+
+fn no_links() -> Box<[Link; 2]> {
+    Box::new([const { Link { f: 0, genp: &ROM_GEN, pgen: 0, pc: NONE } }; 2])
+}
+
+fn page_gen(p: usize) -> u32 { PAGE_GEN[p & (PAGES - 1)].load(std::sync::atomic::Ordering::Relaxed) }
+
 struct Block {
     f: Option<BlockFn>,
+    /// for code in RAM: its page (physical >> 12) and that page's generation when the code
+    /// words were last known to match
+    page: u32,
+    pgen: u32,
     /// the code words as translated, and where they are now
     src: *const u32,
     words: Box<[u32]>,
     /// in RAM (ROM code doesn't change)
     check: bool,
+    /// the fixed exits' link cells (their addresses are in the code)
+    links: Box<[Link; 2]>,
     /// only ALU instructions, branches and ordinary loads: run again with the same
     /// registers (and the hardware still, as it is within a slice) it does the same
     pure: bool,
@@ -90,6 +156,8 @@ pub struct Jit {
     names: u64,
     /// stats: blocks run, translated, thrown away for changed code
     pub runs: u64,
+    /// of those, entered through a link
+    pub linked: u64,
     pub translated: u64,
     pub stale: u64,
     /// cycles skipped in polling loops (taken by the system's speed report)
@@ -106,6 +174,9 @@ impl Default for Jit {
 /// `expect` (`ipc + 4`, or for a delay slot the branch's destination)
 unsafe extern "C" fn h_exec<B: EeBus>(c: *mut Ctx, ipc: u32, instr: u32, expect: u32, slot: u32) -> u32 {
     unsafe {
+        // a load / store here may be I/O (and raise an interrupt): back to the
+        // dispatcher at the block's end
+        if (0x1A..=0x3F).contains(&(instr >> 26)) { (*c).nochain = 1; }
         let cpu = &mut *(*c).cpu;
         let bus = &mut *((*c).bus as *mut B);
         cpu.cur_pc = ipc;
@@ -170,7 +241,7 @@ impl Jit {
             module: None, fctx: FunctionBuilderContext::new(),
             slots: vec![(NONE, NONE); SLOTS], index: HashMap::new(), blocks: Vec::new(),
             cold: HashMap::new(), hot: 16, tlb: 0, mem: None, compiled: 0, names: 0,
-            runs: 0, translated: 0, stale: 0, idle: 0,
+            runs: 0, linked: 0, translated: 0, stale: 0, idle: 0,
         }
     }
 
@@ -197,8 +268,8 @@ impl Jit {
     }
 
     /// The block for `va`, if it's translated and its code is unchanged
-    #[inline]
-    fn get<B: EeBus>(&mut self, cpu: &R5900, va: u32) -> Option<(BlockFn, u32, bool)> {
+    #[inline(always)]
+    fn get<B: EeBus>(&mut self, cpu: &R5900, va: u32) -> Option<(BlockFn, u32, bool, u32)> {
         let s = (va >> 2) as usize & (SLOTS - 1);
         let (sva, si) = self.slots[s];
         let idx = if sva == va { si } else {
@@ -209,8 +280,8 @@ impl Jit {
                     *n += 1;
                     if *n < self.hot { return None; }
                     self.cold.remove(&va);
-                    let b = self.translate::<B>(cpu, va);
                     let i = self.blocks.len() as u32;
+                    let b = self.translate::<B>(cpu, va, i);
                     self.blocks.push(b);
                     self.index.insert(va, i);
                     self.slots[s] = (va, i);
@@ -218,20 +289,39 @@ impl Jit {
                 }
             }
         };
-        let b = &self.blocks[idx as usize];
+        let b = &mut self.blocks[idx as usize];
         if b.check {
-            let mut same = true;
-            for (k, &w) in b.words.iter().enumerate() {
-                if unsafe { b.src.add(k).read_unaligned() } != w { same = false; break; }
-            }
-            if !same {
-                self.stale += 1;
-                let nb = self.translate::<B>(cpu, va);
-                self.blocks[idx as usize] = nb;
+            let g = page_gen(b.page as usize);
+            if g != b.pgen {
+                let mut same = true;
+                for (k, &w) in b.words.iter().enumerate() {
+                    if unsafe { b.src.add(k).read_unaligned() } != w { same = false; break; }
+                }
+                if same {
+                    b.pgen = g;
+                } else {
+                    self.stale += 1;
+                    let nb = self.translate::<B>(cpu, va, idx);
+                    self.blocks[idx as usize] = nb;
+                }
             }
         }
         let b = &self.blocks[idx as usize];
-        Some((b.f?, b.words[0], b.pure))
+        Some((b.f?, b.words[0], b.pure, idx))
+    }
+
+    /// Block `from` just ended at `pc` and block `to` (not pure) starts there: point `from`'s link
+    /// cell for `pc` at it (not a pure block: polling loops go through the dispatcher)
+    #[inline]
+    fn link(&mut self, from: u32, pc: u32, to: u32) {
+        let Some(t) = self.blocks.get(to as usize) else { return };
+        let (Some(f), false) = (t.f, t.pure) else { return };
+        let genp: *const u32 = if t.check { PAGE_GEN[t.page as usize & (PAGES - 1)].as_ptr() } else { &ROM_GEN };
+        let pgen = t.pgen;
+        let Some(b) = self.blocks.get_mut(from as usize) else { return };
+        for c in b.links.iter_mut() {
+            if c.pc == pc { c.f = f as usize; c.genp = genp; c.pgen = pgen; }
+        }
     }
 
     /// The host address of the code at `va` and how many words are readable there (to
@@ -255,11 +345,16 @@ impl Jit {
         None
     }
 
-    fn translate<B: EeBus>(&mut self, cpu: &R5900, va: u32) -> Block {
-        let none = Block { f: None, src: std::ptr::null(), words: Box::new([]), check: false, pure: false };
+    /// Translate the code at `va` as block number `idx`
+    fn translate<B: EeBus>(&mut self, cpu: &R5900, va: u32, idx: u32) -> Block {
+        let none = Block { f: None, page: 0, pgen: 0, src: std::ptr::null(), words: Box::new([]), check: false, pure: false, links: no_links() };
         let Some((src, avail)) = self.code(cpu, va) else { return none };
-        let word = |k: usize| unsafe { src.add(k).read_unaligned() };
         let check = self.mem.is_some_and(|m| (src as usize).wrapping_sub(m.ram as usize) < m.ram_len);
+        // watch the page for writes from now on, before reading the code
+        let page = self.mem.map_or(0, |m| ((src as usize).wrapping_sub(m.ram as usize) >> 12) as u32);
+        if check { CODE_PAGE[page as usize & (PAGES - 1)].store(1, std::sync::atomic::Ordering::Relaxed); }
+        let pgen = page_gen(page as usize);
+        let word = |k: usize| unsafe { src.add(k).read_unaligned() };
         let mut ins = Vec::new();
         let lim = avail.min(MAX_LEN);
         while ins.len() < lim {
@@ -279,7 +374,7 @@ impl Jit {
             }
         }
         let words: Box<[u32]> = ins.clone().into_boxed_slice();
-        if ins.is_empty() { return Block { f: None, src, words, check, pure: false }; }
+        if ins.is_empty() { return Block { f: None, page, pgen, src, words, check, pure: false, links: no_links() }; }
         let pure = ins.iter().all(|&w| match kind(w) {
             K::Alu | K::Branch => true,
             // not LQ: the FIFOs are read by quadwords
@@ -288,11 +383,15 @@ impl Jit {
         });
         self.translated += 1;
         self.compiled += 1;
-        let f = self.emit::<B>(va, &ins);
-        Block { f: Some(f), src, words, check, pure }
+        let mut links = no_links();
+        let (f, targets) = self.emit::<B>(va, &ins, &links, idx);
+        for (k, t) in targets.into_iter().enumerate() { links[k].pc = t; }
+        Block { f: Some(f), page, pgen, src, words, check, pure, links }
     }
 
-    fn emit<B: EeBus>(&mut self, va: u32, ins: &[u32]) -> BlockFn {
+    /// The host code for `ins` at `va` (block `idx`, link cells `links`), and the fixed
+    /// exits in link cell order
+    fn emit<B: EeBus>(&mut self, va: u32, ins: &[u32], links: &[Link; 2], idx: u32) -> (BlockFn, Vec<u32>) {
         self.names += 1;
         let name = format!("ee{}", self.names);
         let mut fctx = std::mem::replace(&mut self.fctx, FunctionBuilderContext::new());
@@ -303,8 +402,9 @@ impl Jit {
         let mut ctx = module.make_context();
         ctx.func.signature = ir::Signature::new(cc);
         ctx.func.signature.params.push(AbiParam::new(ptr));
-        ctx.func.signature.returns.push(AbiParam::new(types::I32));
+        ctx.func.signature.returns.push(AbiParam::new(ptr));
         let id = module.declare_function(&name, Linkage::Local, &ctx.func.signature).expect("declare block");
+        let targets;
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
             let entry = b.create_block();
@@ -319,8 +419,10 @@ impl Jit {
             let head = b.create_block();
             b.ins().jump(head, &[]);
             b.switch_to_block(head);
-            let mut e = Em { b: &mut b, ptr, fl, ctx: c, cpu, cyc, n: 0, exec: h_exec::<B> as *const () as usize, cc, sig: None, start: va, head };
+            let mut e = Em { b: &mut b, ptr, fl, ctx: c, cpu, cyc, n: 0, exec: h_exec::<B> as *const () as usize, cc, sig: None, start: va, head,
+                links: links.as_ptr() as usize, targets: Vec::new(), idx };
             e.block(va, ins);
+            targets = std::mem::take(&mut e.targets);
             b.seal_all_blocks();
             b.finalize(tcfg);
         }
@@ -329,7 +431,7 @@ impl Jit {
         module.finalize_definitions().expect("finalize block");
         let code = module.get_finalized_function(id);
         self.fctx = fctx;
-        unsafe { std::mem::transmute::<*const u8, BlockFn>(code) }
+        (unsafe { std::mem::transmute::<*const u8, BlockFn>(code) }, targets)
     }
 }
 
@@ -349,6 +451,11 @@ struct Em<'a, 'b> {
     /// the block's address and its first instruction's IR block (for loops)
     start: u32,
     head: ir::Block,
+    /// the link cells (2) and the fixed exits given one so far
+    links: usize,
+    targets: Vec<u32>,
+    /// this block's number
+    idx: u32,
 }
 
 impl Em<'_, '_> {
@@ -371,26 +478,96 @@ impl Em<'_, '_> {
     }
     fn bool64(&mut self, cc: Value) -> Value { self.b.ins().uextend(types::I64, cc) }
 
-    /// Store the cycles and return
-    fn ret(&mut self) {
+    /// The cycles this block took; added to the run's count
+    fn count(&mut self) -> Value {
         let x = self.b.use_var(self.cyc);
         let x = self.b.ins().iadd_imm_u(x, self.n as i64);
-        self.b.ins().store(self.fl, x, self.ctx, ctx_off(std::mem::offset_of!(Ctx, cycles)));
-        let z = self.c32(0);
+        let o = ctx_off(std::mem::offset_of!(Ctx, cycles));
+        let t = self.b.ins().load(types::I32, self.fl, self.ctx, o);
+        let t = self.b.ins().iadd(t, x);
+        self.b.ins().store(self.fl, t, self.ctx, o);
+        x
+    }
+
+    /// Count the cycles and go back to the dispatcher
+    fn ret(&mut self) {
+        self.count();
+        let z = self.b.ins().iconst(self.ptr, 0);
         self.b.ins().return_(&[z]);
     }
 
-    /// The block ends normally: on to `pc`
-    fn finish(&mut self, pc: Value) {
+    /// The block ends normally: on to `pc`, back to the dispatcher
+    fn finish(&mut self, pc: Value) { self.finish_link(pc, &[]); }
+
+    /// The block ends normally at `pc`, which is one of `targets` (fixed addresses): go
+    /// straight on through that exit's link cell if it can (see the module notes)
+    fn finish_link(&mut self, pc: Value, targets: &[u32]) {
         self.b.ins().store(self.fl, pc, self.cpu, off_pc());
         let np = self.b.ins().iadd_imm_u(pc, 4);
         self.b.ins().store(self.fl, np, self.cpu, off_next_pc());
-        self.ret();
+        if targets.is_empty() || !link_on() { self.ret(); return; }
+        let took = self.count();
+        let fl = self.fl;
+        // back to the dispatcher, which can fill this block's cell for `pc`
+        let back = self.b.create_block();
+        for &t in targets {
+            let k = match self.targets.iter().position(|&x| x == t) {
+                Some(k) => k,
+                None => { self.targets.push(t); self.targets.len() - 1 }
+            };
+            assert!(k < 2, "a block has at most 2 fixed exits");
+            let cell = self.b.ins().iconst(self.ptr, (self.links + k * std::mem::size_of::<Link>()) as i64);
+            let (this, next) = (self.b.create_block(), self.b.create_block());
+            let at = self.b.ins().icmp_imm_u(IntCC::Equal, pc, t as i64);
+            self.b.ins().brif(at, this, &[], next, &[]);
+            self.b.switch_to_block(this);
+            let f = self.b.ins().load(self.ptr, fl, cell, std::mem::offset_of!(Link, f) as i32);
+            let check = self.b.create_block();
+            self.b.ins().brif(f, check, &[], back, &[]);
+            self.b.switch_to_block(check);
+            // the target's code unchanged, within the slice / timer, no interpreted load / store?
+            let gp = self.b.ins().load(self.ptr, fl, cell, std::mem::offset_of!(Link, genp) as i32);
+            let want = self.b.ins().load(types::I32, fl, cell, std::mem::offset_of!(Link, pgen) as i32);
+            let g = self.b.ins().load(types::I32, fl, gp, 0);
+            let same = self.b.ins().icmp(IntCC::Equal, g, want);
+            let oc = ctx_off(std::mem::offset_of!(Ctx, chain));
+            let left = self.b.ins().load(types::I32, fl, self.ctx, oc);
+            let more = self.b.ins().icmp(IntCC::UnsignedLessThan, took, left);
+            let nc = self.b.ins().load(types::I32, fl, self.ctx, ctx_off(std::mem::offset_of!(Ctx, nochain)));
+            let free = self.b.ins().icmp_imm_u(IntCC::Equal, nc, 0);
+            let ok = self.b.ins().band(same, more);
+            let ok = self.b.ins().band(ok, free);
+            let hop = self.b.create_block();
+            self.b.ins().brif(ok, hop, &[], back, &[]);
+            self.b.switch_to_block(hop);
+            // the next block's budgets are what's left
+            let rest = self.b.ins().isub(left, took);
+            self.b.ins().store(fl, rest, self.ctx, oc);
+            let ob = ctx_off(std::mem::offset_of!(Ctx, budget));
+            let bud = self.b.ins().load(types::I32, fl, self.ctx, ob);
+            let over = self.b.ins().icmp(IntCC::UnsignedLessThan, bud, took);
+            let bl = self.b.ins().isub(bud, took);
+            let z32 = self.c32(0);
+            let bl = self.b.ins().select(over, z32, bl);
+            self.b.ins().store(fl, bl, self.ctx, ob);
+            let oh = ctx_off(std::mem::offset_of!(Ctx, hops));
+            let h = self.b.ins().load(types::I32, fl, self.ctx, oh);
+            let h = self.b.ins().iadd_imm_u(h, 1);
+            self.b.ins().store(fl, h, self.ctx, oh);
+            self.b.ins().return_(&[f]);
+            self.b.switch_to_block(next);
+        }
+        self.b.ins().jump(back, &[]);
+        self.b.switch_to_block(back);
+        let me = self.c32(self.idx);
+        self.b.ins().store(fl, me, self.ctx, ctx_off(std::mem::offset_of!(Ctx, last)));
+        let z = self.b.ins().iconst(self.ptr, 0);
+        self.b.ins().return_(&[z]);
     }
 
     /// The end of a branch to `pc`, which can be the block's own start (`to`, the
     /// destination if taken): then round again while within the budget
-    fn finish_to(&mut self, pc: Value, to: Option<u32>) {
+    fn finish_to(&mut self, pc: Value, to: Option<u32>, targets: &[u32]) {
         if to == Some(self.start) {
             let x = self.b.use_var(self.cyc);
             let total = self.b.ins().iadd_imm_u(x, self.n as i64);
@@ -405,7 +582,7 @@ impl Em<'_, '_> {
             self.b.ins().jump(self.head, &[]);
             self.b.switch_to_block(out);
         }
-        self.finish(pc);
+        self.finish_link(pc, targets);
     }
 
     /// The interpreter runs `i` (already counted in `n`); stop if the flow changed
@@ -458,8 +635,9 @@ impl Em<'_, '_> {
             }
             k += 1;
         }
-        let end = self.c32(va.wrapping_add(4 * ins.len() as u32));
-        self.finish(end);
+        let to = va.wrapping_add(4 * ins.len() as u32);
+        let end = self.c32(to);
+        self.finish_link(end, &[to]);
     }
 
     /// An instruction that isn't a branch; `expect` is the PC after it
@@ -614,6 +792,27 @@ impl Em<'_, '_> {
         let hb = self.b.ins().select(is_sp, sp, ram);
         let h = self.b.ins().iadd(hb, pa64);
         if store {
+            // a page with translated code: bump its generation (RAM only)
+            let p = self.b.ins().ushr_imm_u(pa, 12);
+            let p = self.b.ins().band_imm_u(p, PAGES as i64 - 1);
+            let p = self.b.ins().uextend(types::I64, p);
+            let cp = self.b.ins().iconst(self.ptr, CODE_PAGE.as_ptr() as i64);
+            let fa = self.b.ins().iadd(cp, p);
+            let flag = self.b.ins().uload8(types::I32, fl, fa, 0);
+            let nsp = self.b.ins().icmp_imm_u(IntCC::Equal, is_sp, 0);
+            let nsp = self.b.ins().uextend(types::I32, nsp);
+            let hit = self.b.ins().band(flag, nsp);
+            let (bump, go) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(hit, bump, &[], go, &[]);
+            self.b.switch_to_block(bump);
+            let gb = self.b.ins().iconst(self.ptr, PAGE_GEN.as_ptr() as i64);
+            let p4 = self.b.ins().ishl_imm_u(p, 2);
+            let ga = self.b.ins().iadd(gb, p4);
+            let g = self.b.ins().load(types::I32, fl, ga, 0);
+            let g = self.b.ins().iadd_imm_u(g, 1);
+            self.b.ins().store(fl, g, ga, 0);
+            self.b.ins().jump(go, &[]);
+            self.b.switch_to_block(go);
             match n {
                 1 => { let v = self.g64(rt); self.b.ins().istore8(fl, v, h, 0); }
                 2 => { let v = self.g64(rt); self.b.ins().istore16(fl, v, h, 0); }
@@ -693,12 +892,16 @@ impl Em<'_, '_> {
         self.n += 1;
         let spc = pc.wrapping_add(4);
         match (cond, likely) {
-            (None, _) => { self.one(spc, slot, dest, true); self.finish_to(dest, to); }
+            (None, _) => {
+                self.one(spc, slot, dest, true);
+                let t: Vec<u32> = to.into_iter().collect();
+                self.finish_to(dest, to, &t);
+            }
             (Some(c), false) => {
                 let a = self.c32(after);
                 let next = self.b.ins().select(c, dest, a);
                 self.one(spc, slot, next, true);
-                self.finish_to(next, to);
+                self.finish_to(next, to, &[rel, after]);
             }
             (Some(c), true) => {
                 let (yes, no) = (self.b.create_block(), self.b.create_block());
@@ -706,11 +909,11 @@ impl Em<'_, '_> {
                 self.b.switch_to_block(no);
                 let a = self.c32(after);
                 let n = self.n;
-                self.finish(a);
+                self.finish_link(a, &[after]);
                 self.b.switch_to_block(yes);
                 self.n = n;
                 self.one(spc, slot, dest, true);
-                self.finish_to(dest, to);
+                self.finish_to(dest, to, &[rel]);
             }
         }
     }
@@ -722,7 +925,7 @@ impl R5900 {
     pub fn run_jit<B: EeBus>(&mut self, bus: &mut B, jit: &mut Jit, target: u32) -> u32 {
         let mut c = 0;
         let Some(mem) = bus.jit_mem() else {
-            while c < target { c += self.step(bus); }
+            while c < target { c += self.step(bus); if super::slice_break() { break; } }
             return c;
         };
         if jit.mem != Some(mem) || jit.tlb != self.tlb_gen {
@@ -733,24 +936,32 @@ impl R5900 {
         let mut ctx = Ctx {
             cpu: std::ptr::null_mut(), bus: std::ptr::null_mut(), ram: mem.ram,
             map: self.map.as_ptr(), sp: self.scratch.as_mut_ptr(), ram_len: mem.ram_len as u64, cycles: 0, budget: 0,
+            chain: 0, nochain: 0, hops: 0, last: NONE,
         };
+        // the block that ran last (for linking it to the next one)
+        let mut prev = NONE;
         // polling loops: the registers at the start of a run of pure blocks
         let mut snap: Option<(u32, [u128; 32], u128, u128)> = None;
         let mut pure_run = 0u32;
         while c < target {
+            // a DMA was started: end the slice so it runs now (not inside a delay slot)
+            if c > 0 && !self.branch_pending && super::slice_break() { break; }
             if self.branch_pending || self.irq_ready() || self.map.len() != 1 << 20 {
                 c += self.step(bus);
                 pure_run = 0;
+                prev = NONE;
                 continue;
             }
             // a TLB write in the last block
-            if jit.tlb != self.tlb_gen { jit.flush(); jit.tlb = self.tlb_gen; }
+            if jit.tlb != self.tlb_gen { jit.flush(); jit.tlb = self.tlb_gen; prev = NONE; }
             let pc = self.pc;
             match jit.get::<B>(self, pc) {
-                Some((f, w, pure)) => {
+                Some((f, w, pure, idx)) => {
+                    if prev != NONE && !pure && link_on() { jit.link(prev, pc, idx); }
                     if !pure {
                         pure_run = 0;
-                    } else if pure_run > 0 && snap.as_ref().is_some_and(|s| s.0 == pc && s.1 == self.gpr && s.2 == self.hi && s.3 == self.lo) {
+                    } else if pure_run % 4 == 0 && pure_run > 0
+                        && snap.as_ref().is_some_and(|s| s.0 == pc && s.1 == self.gpr && s.2 == self.hi && s.3 == self.lo) {
                         // round a loop that only reads, back where it was: it would
                         // go round the same way until the hardware moves (the slice's end)
                         let n = target - c;
@@ -758,7 +969,8 @@ impl R5900 {
                         jit.idle += n as u64;
                         return target;
                     } else {
-                        if pure_run % 8 == 0 { snap = Some((pc, self.gpr, self.hi, self.lo)); }
+                        // (snapshots and compares are spaced out: a counting loop pays for them)
+                        if pure_run % 16 == 0 { snap = Some((pc, self.gpr, self.hi, self.lo)); }
                         pure_run += 1;
                     }
                     if !self.trace.is_empty() {
@@ -770,14 +982,29 @@ impl R5900 {
                     ctx.map = self.map.as_ptr();
                     ctx.cycles = 0;
                     ctx.budget = target - c;
-                    unsafe { f(&mut ctx); }
-                    jit.runs += 1;
+                    // links stop at the COP0 timer's Compare, so it fires where it would have
+                    let to_cmp = self.cop0[COMPARE].wrapping_sub(self.cop0[COUNT]);
+                    ctx.chain = if to_cmp == 0 { ctx.budget } else { ctx.budget.min(to_cmp) };
+                    ctx.nochain = 0;
+                    ctx.hops = 0;
+                    ctx.last = idx;
+                    let mut f = f;
+                    loop {
+                        let next = unsafe { f(&mut ctx) };
+                        if next == 0 { break; }
+                        f = unsafe { std::mem::transmute::<usize, BlockFn>(next) };
+                    }
+                    jit.runs += 1 + ctx.hops as u64;
+                    jit.linked += ctx.hops as u64;
+                    if ctx.hops > 0 { pure_run = 0; }
+                    prev = ctx.last;
                     let n = ctx.cycles;
                     self.advance(n);
                     c += n;
                 }
                 None => {
                     pure_run = 0;
+                    prev = NONE;
                     // the interpreter, to the end of the next branch's delay slot
                     let mut k = 0;
                     loop {
@@ -923,6 +1150,43 @@ mod tests {
         }
     }
 
+    /// The same with slices of 64 cycles, so blocks link to each other
+    #[test]
+    fn linked_blocks_match_the_interpreter() {
+        let mut linked = 0;
+        for seed in 1..300u64 {
+            let mut g = Rng(seed * 0x9E37_79B9_7F4A_7C15 | 1);
+            let len = 8 + g.below(40) as usize;
+            let mut code = program(&mut g, len);
+            // round the program 8 times (r20 counts; the program only uses r1-r10)
+            code.truncate(len);
+            code.extend([i(0x09, 20, 20, 0xFFFF), i(0x05, 20, 0, (-(len as i32) - 2) as u32), 0]);
+            let end = BASE + 4 * (len as u32 + 3);
+            code.extend([2 << 26 | (end >> 2 & 0x03FF_FFFF), 0]);
+            let mut g2 = Rng(seed);
+            let (mut a, mut ra) = setup(&mut g2, &code);
+            let mut g2 = Rng(seed);
+            let (mut b, mut rb) = setup(&mut g2, &code);
+            a.gpr[20] = 8;
+            b.gpr[20] = 8;
+            let mut jit = Jit::new();
+            jit.hot = 1;
+            let mut k = 0;
+            while b.pc != end && k < 10_000 { b.run_jit(&mut rb, &mut jit, 64); k += 1; }
+            let ctx = format!("seed {seed}: {:08X?}", code);
+            assert_eq!(b.pc, end, "{ctx}");
+            // the interpreter to the same point (the end is a J-to-itself loop)
+            let mut k = 0;
+            while a.cycles < b.cycles && k < 100_000 { a.step(&mut ra); k += 1; }
+            assert_eq!((a.pc, a.cycles, a.cop0[COUNT]), (b.pc, b.cycles, b.cop0[COUNT]), "{ctx}");
+            for r in 0..32 { assert_eq!(a.gpr[r], b.gpr[r], "r{r} {ctx}"); }
+            assert_eq!((a.hi, a.lo, a.sa), (b.hi, b.lo, b.sa), "{ctx}");
+            assert!(ra.0 == rb.0, "memory {ctx}");
+            linked += jit.linked;
+        }
+        assert!(linked > 1000, "only {linked} linked runs");
+    }
+
     #[test]
     fn a_block_that_loops_to_itself_goes_round_inside() {
         // r2 = 1000; loop: ADDIU r2, -1; BNE r2, r0, loop; ADDIU r3, 1 (slot); then J here
@@ -966,9 +1230,66 @@ mod tests {
         for _ in 0..4 { c.run_jit(&mut ram, &mut jit, 1); }
         assert_eq!(c.gpr[2], 4);
         ram.write32(0x1000, i(0x09, 2, 2, 0x100));
+        // a write straight to the test's RAM: tell the JIT, as the CPU's stores and DMA do
+        note_write(0x1000);
         for _ in 0..2 { c.run_jit(&mut ram, &mut jit, 1); }
         assert_eq!(c.gpr[2], 0x204);
         assert_eq!(jit.stale, 1);
+    }
+
+    #[test]
+    fn translated_stores_into_code_are_noticed() {
+        // BASE: SW r3, 0x20(r4); J BASE+0x20; NOP   BASE+0x20: ADDIU r2, r2, 1; J BASE; NOP
+        let mut ram = Ram(vec![0; 0x40_0000]);
+        let add1 = i(0x09, 2, 2, 1);
+        let code = [i(0x2B, 4, 3, 0x20), 2 << 26 | ((BASE + 0x20) >> 2 & 0x03FF_FFFF), 0];
+        let tail = [add1, 2 << 26 | (BASE >> 2 & 0x03FF_FFFF), 0];
+        for (k, w) in code.iter().enumerate() { ram.write32(0x1000 + 4 * k as u32, *w); }
+        for (k, w) in tail.iter().enumerate() { ram.write32(0x1020 + 4 * k as u32, *w); }
+        let mut c = R5900::new();
+        c.jump(BASE);
+        c.gpr[3] = add1 as u128;
+        c.gpr[4] = BASE as i32 as i64 as u64 as u128;
+        let mut jit = Jit::new();
+        jit.hot = 1;
+        // the store writes the same instruction back: checked, not translated again
+        for _ in 0..6 { c.run_jit(&mut ram, &mut jit, 1); }
+        assert_eq!(jit.stale, 0);
+        let before = c.gpr[2];
+        assert!(before >= 2, "{before}");
+        // now it writes ADDIU r2, r2, 0x100 over the loop's first instruction
+        c.gpr[3] = i(0x09, 2, 2, 0x100) as u128;
+        for _ in 0..8 { c.run_jit(&mut ram, &mut jit, 1); }
+        assert_eq!(jit.stale, 1);
+        assert_eq!(c.gpr[2] & 0xFF, before & 0xFF, "the old ADDIU 1 ran after the rewrite");
+        assert!(c.gpr[2] >= before + 0x100);
+    }
+
+    #[test]
+    /// Speed: a loop of 4 blocks that store (not pure), linked or not
+    #[test]
+    #[ignore]
+    fn bench_linked_blocks() {
+        // 4 blocks: SW r3, k(r9); ADDIU r3, r3, 1; J next; NOP ... the last BNE r2 back
+        let mut code = Vec::new();
+        for k in 0..4u32 {
+            let next = BASE + 16 * (k + 1);
+            code.extend([i(0x2B, 9, 3, 4 * k), i(0x09, 3, 3, 1), 2 << 26 | (next >> 2 & 0x03FF_FFFF), 0]);
+        }
+        code.extend([i(0x09, 2, 2, 0xFFFF), i(0x05, 2, 0, (-(code.len() as i32) - 2) as u32), 0]);
+        let end = BASE + 4 * code.len() as u32;
+        code.extend([2 << 26 | (end >> 2 & 0x03FF_FFFF), 0]);
+        let mut ram = Ram(vec![0; 0x40_0000]);
+        for (k, w) in code.iter().enumerate() { ram.write32(0x1000 + 4 * k as u32, *w); }
+        let mut c = R5900::new();
+        c.jump(BASE);
+        c.gpr[2] = 2_000_000;
+        c.gpr[9] = 0x8010_0000;
+        let mut jit = Jit::new();
+        let t = std::time::Instant::now();
+        while c.pc != end { c.run_jit(&mut ram, &mut jit, 256); }
+        let el = t.elapsed();
+        println!("{} block runs ({} linked) in {:?}: {:.1} ns a block", jit.runs, jit.linked, el, el.as_nanos() as f64 / jit.runs as f64);
     }
 
     #[test]

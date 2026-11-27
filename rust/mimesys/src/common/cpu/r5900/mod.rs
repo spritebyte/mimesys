@@ -69,13 +69,20 @@ pub fn vu1_src_cfg() -> Option<(u32, Option<u32>)> {
 }
 
 /// A fixed (PS2_WATCH) or source (PS2_VU1_SRC) watch is on: the JIT stays off
-pub fn watching() -> bool { watch().is_some() || vu1_src().is_some() }
+pub fn watching() -> bool { watch().is_some() || src_track() }
+
+/// Source tracking (who wrote each quadword, where DMA data came from) is on: PS2_VU1_SRC,
+/// or PS2_GS_XFER (each logged GS upload names its EE source and that memory's writer)
+pub fn src_track() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| vu1_src().is_some() || std::env::var_os("PS2_GS_XFER").is_some())
+}
 
 /// Who last wrote each quadword: RAM (32 MB) then the scratchpad (16 KB)
 const WR_SPR: usize = 0x20_0000;
 fn writers() -> Option<&'static Vec<std::sync::atomic::AtomicU64>> {
     static T: std::sync::OnceLock<Option<Vec<std::sync::atomic::AtomicU64>>> = std::sync::OnceLock::new();
-    T.get_or_init(|| vu1_src().map(|_| (0..WR_SPR + 0x400).map(|_| std::sync::atomic::AtomicU64::new(0)).collect())).as_ref()
+    T.get_or_init(|| src_track().then(|| (0..WR_SPR + 0x400).map(|_| std::sync::atomic::AtomicU64::new(0)).collect())).as_ref()
 }
 
 /// Writer kinds
@@ -148,6 +155,50 @@ pub fn watch_take() -> Vec<String> {
 
 /// A hit counts (always: the log keeps the last ones)
 pub fn watch_note() -> bool { true }
+
+/// Set when the EE starts a DMA channel: the EE's slice ends after the current block /
+/// instruction so the DMA runs within a few cycles, as on hardware. The PS2 BIOS copies a
+/// font CLUT into a shared buffer, starts a VIF1 DMA from it and overwrites the buffer
+/// ~40 cycles later: a DMA that waited for the slice's end read the next upload's data
+pub static SLICE_BREAK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn request_slice_break() { SLICE_BREAK.store(true, std::sync::atomic::Ordering::Relaxed); }
+
+/// The slice should end now (clears the request)
+#[inline]
+pub fn slice_break() -> bool {
+    SLICE_BREAK.load(std::sync::atomic::Ordering::Relaxed) && SLICE_BREAK.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Debugging timeline (PS2_GS_XFER and PS2_WATCH both set): EE stores into the watched
+/// range, the EE's VIF1 / GIF DMA register writes, VIF1 / GIF DMA tags, DMA reads from the
+/// watched range, kept in order with the EE cycle; the last 1000 are printed when a logged
+/// GS upload starts or ends (`tl_flush`)
+pub static NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static NOW_PC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn tl_on() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| src_track() && watch().is_some() && std::env::var_os("PS2_GS_XFER").is_some())
+}
+
+pub fn set_now(c: u64) { NOW.store(c, std::sync::atomic::Ordering::Relaxed); }
+
+static TL: std::sync::Mutex<std::collections::VecDeque<String>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+
+pub fn tl(s: &str) {
+    if let Ok(mut l) = TL.lock() {
+        if l.len() >= 1000 { l.pop_front(); }
+        l.push_back(format!("T {:>11} {}", NOW.load(std::sync::atomic::Ordering::Relaxed), s));
+    }
+}
+
+/// Print the kept timeline
+pub fn tl_flush() {
+    if let Ok(mut l) = TL.lock() {
+        for s in l.drain(..) { crate::dlog!("{}", s); }
+    }
+}
 mod mmi;
 #[cfg(test)]
 mod tests;
@@ -576,9 +627,20 @@ impl R5900 {
                 self.sp_write(o, n as usize, v)
             }
             Target::Phys(pa) => {
-                if pa < 0x0200_0000 { wr_note(pa, self.cur_pc, self.gpr[31] as u32, WR_EE); }
+                if src_track() {
+                    NOW.store(self.cycles, std::sync::atomic::Ordering::Relaxed);
+                    NOW_PC.store(self.cur_pc, std::sync::atomic::Ordering::Relaxed);
+                }
+                if pa < 0x0200_0000 {
+                    jit::note_write(pa);
+                    wr_note(pa, self.cur_pc, self.gpr[31] as u32, WR_EE);
+                }
                 match n {
                     _ if watch_hit(pa, n) && watch_value(v) && watch_note() => {
+                        if tl_on() {
+                            tl(&format!("EE store{} [{:08X}] = {:X} pc {:08X} ra {:08X}",
+                                n * 8, pa, v & (u128::MAX >> (128 - 8 * n)), self.cur_pc, self.gpr[31] as u32));
+                        }
                         watch_log(format!("EE store{} [{:08X}] = {:X} at pc {:08X} ra {:08X} sp {:08X} (va {:08X}) cycle {}",
                             n * 8, pa, v & (u128::MAX >> (128 - 8 * n)), self.cur_pc, self.gpr[31] as u32, self.gpr[29] as u32, va, self.cycles));
                         match n { 1 => bus.write8(pa, v as u8), 2 => bus.write16(pa, v as u16), 4 => bus.write32(pa, v as u32),

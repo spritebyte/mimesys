@@ -315,7 +315,13 @@ fn gs_frame_vram_dump() {
     for y in 0..h {
         for x in 0..w {
             let p = super::mem::read(&gs.vram, psm, x, y, bp, bw);
-            ppm.extend_from_slice(&[p as u8, (p >> 8) as u8, (p >> 16) as u8]);
+            // GS_DUMP_ALPHA=1: the alpha byte as grey instead
+            if std::env::var_os("GS_DUMP_ALPHA").is_some() {
+                let a = (p >> 24) as u8;
+                ppm.extend_from_slice(&[a, a, a]);
+            } else {
+                ppm.extend_from_slice(&[p as u8, (p >> 8) as u8, (p >> 16) as u8]);
+            }
         }
     }
     std::fs::write(&a[5], ppm).unwrap();

@@ -1,6 +1,6 @@
 # Third-party notices
 
-mimesys is MIT-licensed (see `LICENSE`). Some parts come from, or were ported from, other
+mimesys is GPL-licensed (see `LICENSE`). Some parts come from, or were ported from, other
 projects under permissive licenses. Their notices are kept here and in the files named below,
 and must ship with any source or binary distribution.
 
@@ -162,7 +162,6 @@ and MAME's `src/devices/` or `src/mame/`.
 | `saturn/scsp.rs` | `sound/scsp.cpp`, `sound/scspdsp.cpp` | ElSemi, R. Belmont, kingshriek |
 | `saturn/scudsp.rs` | `cpu/scudsp/scudsp.cpp` | Angelo Salese, Mariusz Wojcieszek |
 
-## Open items before an MIT release
 - **Rastan driver** (`arcade/rastan/rastan_system.rs`, `rastan_sound.rs`): modelled on MAME's
   `taito/rastan.cpp`, which is **GPL-2.0+** (Jarek Burczynski). To be rewritten from the
   hardware facts (memory map, inputs, PC060HA sound link) before release. The video chips

@@ -25,54 +25,80 @@ pub const PSMZ24: u32 = 0x31;
 pub const PSMZ16: u32 = 0x32;
 pub const PSMZ16S: u32 = 0x3A;
 
-#[inline] fn b(v: u32, i: u32) -> u32 { (v >> i) & 1 }
+const fn b(v: u32, i: u32) -> u32 { (v >> i) & 1 }
 
 /// Block order inside a page
-#[inline] fn blk32(bx: u32, by: u32) -> u32 { b(bx, 0) | b(by, 0) << 1 | b(bx, 1) << 2 | b(by, 1) << 3 | b(bx, 2) << 4 }
-#[inline] fn blk16(bx: u32, by: u32) -> u32 { b(by, 0) | b(bx, 0) << 1 | b(by, 1) << 2 | b(bx, 1) << 3 | b(by, 2) << 4 }
-#[inline] fn blk16s(bx: u32, by: u32) -> u32 { b(by, 0) | b(bx, 0) << 1 | b(by, 2) << 2 | b(by, 1) << 3 | b(bx, 1) << 4 }
+const fn blk32(bx: u32, by: u32) -> u32 { b(bx, 0) | b(by, 0) << 1 | b(bx, 1) << 2 | b(by, 1) << 3 | b(bx, 2) << 4 }
+const fn blk16(bx: u32, by: u32) -> u32 { b(by, 0) | b(bx, 0) << 1 | b(by, 1) << 2 | b(bx, 1) << 3 | b(by, 2) << 4 }
+const fn blk16s(bx: u32, by: u32) -> u32 { b(by, 0) | b(bx, 0) << 1 | b(by, 2) << 2 | b(by, 1) << 3 | b(bx, 1) << 4 }
 
 /// The element inside a block (words, halfwords, bytes, nibbles)
-#[inline] fn col32(x: u32, y: u32) -> u32 { (x & 1) | (y & 1) << 1 | (x >> 1 & 3) << 2 | (y >> 1 & 3) << 4 }
-#[inline] fn col16(x: u32, y: u32) -> u32 {
+const fn col32(x: u32, y: u32) -> u32 { (x & 1) | (y & 1) << 1 | (x >> 1 & 3) << 2 | (y >> 1 & 3) << 4 }
+const fn col16(x: u32, y: u32) -> u32 {
     let xp = x & 7;
     b(x, 3) | (xp & 1) << 1 | (y & 1) << 2 | (xp >> 1 & 3) << 3 | (y >> 1 & 3) << 5
 }
-#[inline] fn col8(x: u32, y: u32) -> u32 {
+const fn col8(x: u32, y: u32) -> u32 {
     let (c, y4) = (y >> 2 & 3, y & 3);
     (y4 >> 1) | b(x, 3) << 1 | b(x, 0) << 2 | (y4 & 1) << 3 | b(x, 1) << 4 | (b(x, 2) ^ (y4 >> 1) ^ (c & 1)) << 5 | c << 6
 }
-#[inline] fn col4(x: u32, y: u32) -> u32 {
+const fn col4(x: u32, y: u32) -> u32 {
     let (c, y4) = (y >> 2 & 3, y & 3);
     (y4 >> 1) | b(x, 3) << 1 | b(x, 4) << 2 | b(x, 0) << 3 | (y4 & 1) << 4 | b(x, 1) << 5 | (b(x, 2) ^ (y4 >> 1) ^ (c & 1)) << 6 | c << 7
 }
 
 /// The formulas above, tabulated per page (offset of each pixel from the page's start:
-/// bytes, nibbles for 4-bit), so an address is a page number and one lookup
+/// bytes, nibbles for 4-bit), so an address is a page number and one lookup. Built at
+/// compile time.
 struct Tables {
-    t32: Vec<u32>, t32z: Vec<u32>,
-    t16: Vec<u32>, t16s: Vec<u32>, t16z: Vec<u32>, t16sz: Vec<u32>,
-    t8: Vec<u32>, t4: Vec<u32>,
+    t32: [u32; 64 * 32], t32z: [u32; 64 * 32],
+    t16: [u32; 64 * 64], t16s: [u32; 64 * 64], t16z: [u32; 64 * 64], t16sz: [u32; 64 * 64],
+    t8: [u32; 128 * 64], t4: [u32; 128 * 128],
 }
 
-fn tables() -> &'static Tables {
-    static T: std::sync::OnceLock<Tables> = std::sync::OnceLock::new();
-    T.get_or_init(|| {
-        let mk = |w: u32, h: u32, f: &dyn Fn(u32, u32) -> u32| -> Vec<u32> {
-            (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| f(x, y)).collect()
-        };
-        Tables {
-            t32: mk(64, 32, &|x, y| blk32(x >> 3 & 7, y >> 3 & 3) * 256 + col32(x & 7, y & 7) * 4),
-            t32z: mk(64, 32, &|x, y| (blk32(x >> 3 & 7, y >> 3 & 3) ^ 0x18) * 256 + col32(x & 7, y & 7) * 4),
-            t16: mk(64, 64, &|x, y| blk16(x >> 4 & 3, y >> 3 & 7) * 256 + col16(x & 15, y & 7) * 2),
-            t16s: mk(64, 64, &|x, y| blk16s(x >> 4 & 3, y >> 3 & 7) * 256 + col16(x & 15, y & 7) * 2),
-            t16z: mk(64, 64, &|x, y| (blk16(x >> 4 & 3, y >> 3 & 7) ^ 0x18) * 256 + col16(x & 15, y & 7) * 2),
-            t16sz: mk(64, 64, &|x, y| (blk16s(x >> 4 & 3, y >> 3 & 7) ^ 0x18) * 256 + col16(x & 15, y & 7) * 2),
-            t8: mk(128, 64, &|x, y| blk32(x >> 4 & 7, y >> 4 & 3) * 256 + col8(x & 15, y & 15)),
-            t4: mk(128, 128, &|x, y| blk16(x >> 5 & 3, y >> 4 & 7) * 512 + col4(x & 31, y & 15)),
-        }
-    })
+const fn build() -> Tables {
+    let mut t = Tables {
+        t32: [0; 64 * 32], t32z: [0; 64 * 32],
+        t16: [0; 64 * 64], t16s: [0; 64 * 64], t16z: [0; 64 * 64], t16sz: [0; 64 * 64],
+        t8: [0; 128 * 64], t4: [0; 128 * 128],
+    };
+    let mut i = 0;
+    while i < 64 * 32 {
+        let (x, y) = (i as u32 % 64, i as u32 / 64);
+        let blk = blk32(x >> 3 & 7, y >> 3 & 3);
+        t.t32[i] = blk * 256 + col32(x & 7, y & 7) * 4;
+        t.t32z[i] = (blk ^ 0x18) * 256 + col32(x & 7, y & 7) * 4;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 64 * 64 {
+        let (x, y) = (i as u32 % 64, i as u32 / 64);
+        let (b16, b16s, c) = (blk16(x >> 4 & 3, y >> 3 & 7), blk16s(x >> 4 & 3, y >> 3 & 7), col16(x & 15, y & 7) * 2);
+        t.t16[i] = b16 * 256 + c;
+        t.t16s[i] = b16s * 256 + c;
+        t.t16z[i] = (b16 ^ 0x18) * 256 + c;
+        t.t16sz[i] = (b16s ^ 0x18) * 256 + c;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 128 * 64 {
+        let (x, y) = (i as u32 % 128, i as u32 / 128);
+        t.t8[i] = blk32(x >> 4 & 7, y >> 4 & 3) * 256 + col8(x & 15, y & 15);
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 128 * 128 {
+        let (x, y) = (i as u32 % 128, i as u32 / 128);
+        t.t4[i] = blk16(x >> 5 & 3, y >> 4 & 7) * 512 + col4(x & 31, y & 15);
+        i += 1;
+    }
+    t
 }
+
+static TABLES: Tables = build();
+
+#[inline(always)]
+fn tables() -> &'static Tables { &TABLES }
 
 const VMASK: usize = VRAM_SIZE - 1;
 

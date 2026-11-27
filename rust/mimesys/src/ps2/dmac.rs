@@ -61,6 +61,9 @@ pub struct Dmac {
     /// GIF PATH3 quadwords for the GS
     #[serde(skip)]
     pub gif_out: Vec<u128>,
+    /// debugging (PS2_GS_XFER): EE source address of each `gif_out` quadword
+    #[serde(skip)]
+    pub gif_src: Vec<u32>,
     /// words for VIF0's / VIF1's command streams
     #[serde(skip)]
     pub vif0_out: Vec<u32>,
@@ -95,7 +98,7 @@ pub struct Dmac {
 impl Default for Dmac {
     fn default() -> Self {
         Self { ch: Default::default(), ctrl: 0, stat: 0, pcr: 0, sqwc: 0, rbsr: 0, rbor: 0, stadr: 0,
-            enable: 0x1201, gif_out: Vec::new(), vif0_out: Vec::new(), vif1_out: Vec::new(), vif1_src: Vec::new(), done: [0; 10], mfifo_empty: false, gif_hold: false, gif_one_packet: false, gif_left: 0, gif_eop: false, gif_stop: false }
+            enable: 0x1201, gif_out: Vec::new(), gif_src: Vec::new(), vif0_out: Vec::new(), vif1_out: Vec::new(), vif1_src: Vec::new(), done: [0; 10], mfifo_empty: false, gif_hold: false, gif_one_packet: false, gif_left: 0, gif_eop: false, gif_stop: false }
     }
 }
 
@@ -118,8 +121,10 @@ fn mem_write(ram: &mut [u8], spr: &mut [u8], a: u32, v: u128) {
         let o = (a & 0x01FF_FFF0) as usize;
         if crate::common::cpu::r5900::watch_hit(o as u32, 16) && crate::common::cpu::r5900::watch_note() {
             crate::common::cpu::r5900::watch_log(format!("DMA write [{:08X}] = {:032X}", o, v));
+            if crate::common::cpu::r5900::tl_on() { crate::common::cpu::r5900::tl(&format!("DMA write [{:08X}] = {:032X}", o, v)); }
         }
         crate::common::cpu::r5900::wr_note(o as u32, 0, 0, crate::common::cpu::r5900::WR_DMA);
+        crate::common::cpu::r5900::jit::note_write(o as u32);
         ram[o..o + 16].copy_from_slice(&v.to_le_bytes());
     }
 }
@@ -168,6 +173,12 @@ impl Dmac {
             0xE050 => self.rbor = v,
             0xE060 => self.stadr = v,
             _ => if let Some(n) = BASES.iter().position(|&b| off & !0xFF == b) {
+                if (n == VIF1 || n == GIF) && off & 0xF0 <= 0x30 && crate::common::cpu::r5900::tl_on() {
+                    let reg = ["CHCR", "MADR", "QWC", "TADR"][(off >> 4 & 3) as usize];
+                    let pc = crate::common::cpu::r5900::NOW_PC.load(std::sync::atomic::Ordering::Relaxed);
+                    crate::common::cpu::r5900::tl(&format!("EE writes {} {reg} = {:08X} (pc {pc:08X}; CHCR was {:08X})",
+                        if n == VIF1 { "VIF1" } else { "GIF" }, v & mask, self.ch[n].chcr));
+                }
                 let c = &mut self.ch[n];
                 let merge = |old: u32| (old & !mask) | (v & mask);
                 match off & 0xF0 {
@@ -175,6 +186,7 @@ impl Dmac {
                         let was = c.chcr & STR;
                         c.chcr = merge(c.chcr);
                         if was == 0 && c.chcr & STR != 0 {
+                            crate::common::cpu::r5900::request_slice_break();
                             // a chain resuming with QWC left: the TAG field's ID decides
                             let id = c.chcr >> 28 & 7;
                             c.tag_end = c.chcr >> 2 & 3 == 1 && c.qwc > 0 && (id == 0 || id == 7);
@@ -254,6 +266,10 @@ impl Dmac {
             while self.ch[n].qwc > 0 {
                 let a = self.ch[n].madr;
                 let q = mem_read(ram, spr, a);
+                if (n == VIF1 || n == GIF) && crate::common::cpu::r5900::tl_on()
+                    && crate::common::cpu::r5900::watch_hit(a & 0x1FFF_FFFF, 16) {
+                    crate::common::cpu::r5900::tl(&format!("{} DMA reads [{a:08X}] = {q:032X}", if n == VIF1 { "VIF1" } else { "GIF" }));
+                }
                 self.sink(n, q, ram, spr, sif);
                 let c = &mut self.ch[n];
                 c.madr = c.madr.wrapping_add(16);
@@ -283,6 +299,11 @@ impl Dmac {
             let addr = (lo >> 32) as u32 & 0xFFFF_FFF0;
             let tadr = c.tadr;
             let asp = c.chcr >> 4 & 3;
+            if (n == VIF1 || n == GIF) && crate::common::cpu::r5900::tl_on() {
+                let ids = ["refe", "cnt", "next", "ref", "refs", "call", "ret", "end"];
+                crate::common::cpu::r5900::tl(&format!("{} tag at {tadr:08X}: {} addr {addr:08X} qwc {} | {:016X}",
+                    if n == VIF1 { "VIF1" } else { "GIF" }, ids[id as usize], lo & 0xFFFF, (tag >> 64) as u64));
+            }
             let mut end = false;
             match id {
                 0 => { c.madr = addr; c.tadr = tadr + 16; end = true; }                  // refe
@@ -334,6 +355,7 @@ impl Dmac {
             }
             GIF => {
                 self.gif_out.push(q);
+                if crate::common::cpu::r5900::src_track() { self.gif_src.push(self.ch[GIF].madr); }
                 // follow the GIFtags to see where a packet ends
                 let ended = if self.gif_left == 0 {
                     let lo = q as u64;
@@ -354,7 +376,7 @@ impl Dmac {
             VIF0 => for k in 0..4 { self.vif0_out.push((q >> (32 * k)) as u32); },
             VIF1 => {
                 for k in 0..4 { self.vif1_out.push((q >> (32 * k)) as u32); }
-                if crate::common::cpu::r5900::vu1_src().is_some() {
+                if crate::common::cpu::r5900::src_track() {
                     let a = self.ch[VIF1].madr;
                     self.vif1_src.extend([a, a + 4, a + 8, a + 12]);
                 }
@@ -373,7 +395,7 @@ impl Dmac {
         if n == VIF0 { self.vif0_out.extend([hi as u32, (hi >> 32) as u32]); }
         if n == VIF1 {
             self.vif1_out.extend([hi as u32, (hi >> 32) as u32]);
-            if crate::common::cpu::r5900::vu1_src().is_some() { self.vif1_src.extend([u32::MAX, u32::MAX]); }
+            if crate::common::cpu::r5900::src_track() { self.vif1_src.extend([u32::MAX, u32::MAX]); }
         }
     }
 
@@ -421,7 +443,7 @@ impl Dmac {
             if mfifo { c.madr = rbor | (c.madr & rbsr); }
             mem_write(ram, spr, c.madr & 0x7FFF_FFFF, q);
             // PS2_VU1_SRC: the copy keeps the scratchpad quadword's writer
-            if crate::common::cpu::r5900::vu1_src().is_some() {
+            if crate::common::cpu::r5900::src_track() {
                 let w = crate::common::cpu::r5900::wr_get(0x8000_0000 | c.sadr);
                 crate::common::cpu::r5900::wr_set_raw(c.madr & 0x01FF_FFF0, w & !3 | crate::common::cpu::r5900::WR_SPR_FROM);
             }
