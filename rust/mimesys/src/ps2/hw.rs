@@ -115,7 +115,7 @@ impl RpcLog {
                     format!("end {:X}", g(8))
                 }
             }
-            _ => format!("{} cmd {:X}", if to_iop { "EE" } else { "IOP" }, cid & 0xFFFF),
+            _ => format!("{} cmd {:X} [{:X} {:X}]", if to_iop { "EE" } else { "IOP" }, cid & 0xFFFF, g(3), g(4)),
         };
         // PS2_SIF_LOG=1: every RPC packet as it goes (with PS2_IOP_PCS, shows the order)
         static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -123,9 +123,62 @@ impl RpcLog {
             let n = self.counts.get(&text).copied().unwrap_or(0);
             if n < 4 || n.is_power_of_two() { crate::dlog!("PS2: SIF {} (#{})", text, n + 1); }
         }
+        if crate::common::cpu::r5900::tl_on() { crate::common::cpu::r5900::tl(&format!("SIF {text}")); }
         *self.counts.entry(text.clone()).or_insert(0) += 1;
         if self.recent.len() >= 24 { self.recent.pop_front(); }
         self.recent.push_back(text);
+    }
+}
+
+/// The IOP's USB host controller (OHCI, 1F80_1600): a controller with nothing plugged in.
+/// Its reset completes at once and it never interrupts; registers otherwise hold what is
+/// written. Without it Sony's USBD waits for the reset (HcCommandStatus HCR) to clear,
+/// gives up, and leaves its thread spinning (Disgaea hangs loading the module).
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Ohci {
+    regs: [u32; 32],
+}
+
+impl Default for Ohci {
+    fn default() -> Self { let mut o = Self { regs: [0; 32] }; o.reset(); o }
+}
+
+impl Ohci {
+    const RH_PORTS: u32 = 2;
+
+    fn reset(&mut self) {
+        self.regs = [0; 32];
+        self.regs[0x34 / 4] = 0x2EDF;                       // HcFmInterval
+        self.regs[0x44 / 4] = 0x628;                        // HcLSThreshold
+        self.regs[0x48 / 4] = 1 << 9 | Self::RH_PORTS;      // HcRhDescriptorA: NPS, 2 ports
+    }
+
+    pub fn read(&self, a: u32) -> u32 {
+        let o = a & 0xFC;
+        match o {
+            0x00 => 0x10,                                           // HcRevision 1.0
+            0x14 => self.regs[0x10 / 4],                            // HcInterruptDisable reads the enables
+            0x54..=0x58 => 1 << 8,                                  // ports: powered, nothing connected
+            0x5C..=0xFC => 0,
+            _ => self.regs[o as usize / 4],
+        }
+    }
+
+    pub fn write(&mut self, a: u32, v: u32) {
+        let o = a & 0xFC;
+        match o {
+            0x00 => {}
+            0x08 => {                                               // HcCommandStatus
+                if v & 1 != 0 { self.reset(); }                     // HCR: done at once
+                self.regs[2] = v & !1 & 0xF;
+            }
+            0x0C => self.regs[3] &= !v,                             // HcInterruptStatus: write 1 to clear
+            0x10 => self.regs[4] |= v,                              // HcInterruptEnable
+            0x14 => self.regs[4] &= !v,                             // HcInterruptDisable
+            0x48 => self.regs[0x12] = (v & !0xFF) | Self::RH_PORTS,
+            0x54..=0xFC => {}
+            _ => self.regs[o as usize / 4] = v,
+        }
     }
 }
 
@@ -204,6 +257,8 @@ pub struct Hw {
     /// (Buffy starts a GIF DMA, then waits for OPH and then for APATH)
     #[serde(default)]
     pub gif_busy: u32,
+    #[serde(default)]
+    pub ohci: Ohci,
     /// debugging: recording VIF1 over a frame (vif1_frame.bin): the VIF1 / VU1 state at
     /// its start, then every feed (words, PATH3 running, PATH3 held) and VU1 start
     #[serde(skip)]
@@ -247,6 +302,7 @@ impl Hw {
             gif_mode: 0,
             gif_pause: false,
             gif_busy: 0,
+            ohci: Ohci::default(),
             vif_rec: None,
             dmac: Dmac::default(),
             timers: Default::default(),
@@ -451,6 +507,7 @@ impl Hw {
             0x1F80_1100..=0x1F80_112F => self.iop_timers[((a >> 4) & 3) as usize].read(a & 0xF),
             0x1F80_1480..=0x1F80_14AF => self.iop_timers[3 + ((a >> 4) & 3) as usize].read(a & 0xF),
             0x1F80_8200..=0x1F80_82FF => self.sio2.read(a),
+            0x1F80_1600..=0x1F80_16FF => self.ohci.read(a),
             0x1F90_0000..=0x1F90_07FF => {
                 let o = a & 0x7FC;
                 self.spu2.read16(o) as u32 | (self.spu2.read16(o + 2) as u32) << 16
@@ -468,6 +525,11 @@ impl Hw {
             0x1F80_1070 => self.i_stat &= v | !mask,
             0x1F80_2080 => self.iop_putc(v as u8),
             0x1F80_8200..=0x1F80_82FF => self.sio2.write(a, v & mask),
+            0x1F80_1600..=0x1F80_16FF => {
+                // (the command / interrupt registers act on the 1 bits written)
+                let v = if (0x08..=0x14).contains(&(a & 0xFC)) { v & mask } else { (self.ohci.read(a) & !mask) | (v & mask) };
+                self.ohci.write(a, v);
+            }
             0x1F80_1074 => self.i_mask = (self.i_mask & !mask) | (v & mask),
             0x1F80_1078 => self.i_ctrl = v & 1,
             0x1F80_1080..=0x1F80_10FF | 0x1F80_1500..=0x1F80_157F => self.iop_dma.write(a, v, mask),
@@ -828,7 +890,10 @@ impl IopView<'_> {
     fn wr32(&mut self, pa: u32, v: u32, mask: u32) {
         let h = &mut *self.0;
         match pa {
-            0x0000_0000..=0x007F_FFFF => wr32m(&mut h.iop_ram, pa as usize & (IOP_RAM_SIZE - 1), v, mask),
+            0x0000_0000..=0x007F_FFFF => {
+                if iop_watch_hit(pa) { iop_watch_note(pa, v & mask); }
+                wr32m(&mut h.iop_ram, pa as usize & (IOP_RAM_SIZE - 1), v, mask)
+            }
             0x1D00_0000..=0x1D00_00FF => h.sif_iop_write(pa, v),
             0x1F40_2000..=0x1F40_20FF => {
                 for k in 0..4 {
@@ -839,6 +904,24 @@ impl IopView<'_> {
             _ => h.note("IOP bus", pa, Some(v)),
         }
     }
+}
+
+/// Debugging: PS2_IOP_WATCH=addr[,addr...] logs IOP word stores there (with the IOP pc;
+/// into the PS2_DMA_TL timeline too). Used to follow the IOP kernel's current thread.
+fn iop_watch() -> &'static [u32] {
+    static W: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    W.get_or_init(|| std::env::var("PS2_IOP_WATCH").map(|v| v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).map(|a| a & !3).collect()).unwrap_or_default())
+}
+
+#[inline]
+fn iop_watch_hit(pa: u32) -> bool { let w = iop_watch(); !w.is_empty() && w.contains(&(pa & !3 & (IOP_RAM_SIZE as u32 - 1))) }
+
+fn iop_watch_note(pa: u32, v: u32) {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let pc = crate::common::cpu::r3000::IOP_PC.load(std::sync::atomic::Ordering::Relaxed);
+    let s = format!("IOP store [{:06X}] = {v:08X} (IOP pc {pc:08X})", pa & !3);
+    if crate::common::cpu::r5900::tl_on() { crate::common::cpu::r5900::tl(&s); }
+    if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 400 { crate::dlog!("PS2: {s}"); }
 }
 
 impl R3000Bus for IopView<'_> {
@@ -859,12 +942,12 @@ impl R3000Bus for IopView<'_> {
     }
     fn read32(&mut self, pa: u32) -> u32 { self.rd32(pa) }
     fn write8(&mut self, pa: u32, v: u8) {
-        if pa < 0x80_0000 { self.0.iop_ram[pa as usize & (IOP_RAM_SIZE - 1)] = v; return; }
+        if pa < 0x80_0000 { if iop_watch_hit(pa) { iop_watch_note(pa, v as u32); } self.0.iop_ram[pa as usize & (IOP_RAM_SIZE - 1)] = v; return; }
         let sh = 8 * (pa & 3);
         self.wr32(pa & !3, (v as u32) << sh, 0xFF << sh);
     }
     fn write16(&mut self, pa: u32, v: u16) {
-        if pa < 0x80_0000 { let o = pa as usize & (IOP_RAM_SIZE - 1); self.0.iop_ram[o..o + 2].copy_from_slice(&v.to_le_bytes()); return; }
+        if pa < 0x80_0000 { if iop_watch_hit(pa) { iop_watch_note(pa, v as u32); } let o = pa as usize & (IOP_RAM_SIZE - 1); self.0.iop_ram[o..o + 2].copy_from_slice(&v.to_le_bytes()); return; }
         let sh = 8 * (pa & 2);
         self.wr32(pa & !3, (v as u32) << sh, 0xFFFF << sh);
     }
@@ -873,5 +956,26 @@ impl R3000Bus for IopView<'_> {
         if pa < 0x80_0000 { return rd32(&self.0.iop_ram, pa as usize & (IOP_RAM_SIZE - 1)); }
         if pa >= 0x1FC0_0000 { return rd32(&self.0.bios, pa as usize & (BIOS_SIZE - 1)); }
         self.rd32(pa)
+    }
+}
+
+#[cfg(test)]
+mod ohci_tests {
+    use super::Ohci;
+
+    #[test]
+    fn ohci_reset_completes_at_once() {
+        let mut o = Ohci::default();
+        o.write(0x1F80_1610, 0x8000_0073);
+        o.write(0x1F80_1634, 0x2778_2EDF);
+        o.write(0x1F80_1608, 1);
+        assert_eq!(o.read(0x1F80_1608) & 1, 0, "HCR clears");
+        assert_eq!(o.read(0x1F80_1610), 0, "the reset clears the enables");
+        assert_eq!(o.read(0x1F80_1634), 0x2EDF);
+        assert_eq!(o.read(0x1F80_1600), 0x10);
+        assert_eq!(o.read(0x1F80_1648) & 0xFF, 2);
+        o.write(0x1F80_1610, 0x73);
+        o.write(0x1F80_1614, 0x3);
+        assert_eq!(o.read(0x1F80_1614), 0x70);
     }
 }

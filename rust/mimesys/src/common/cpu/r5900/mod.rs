@@ -63,9 +63,21 @@ pub fn vu1_src_cfg() -> Option<(u32, Option<u32>)> {
         let v = std::env::var("PS2_VU1_SRC").ok()?;
         let hex = |x: &str| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok();
         let mut it = v.split(',');
-        let q = hex(it.next()?)?;
+        let q = it.next()?;
+        let q = if q.trim() == "*" { u32::MAX } else { hex(q)? };
         Some((q, it.next().and_then(hex)))
     })
+}
+
+/// PS2_VU1_SRC=qw|*,w3|*,prefix: a third field keeps only rows whose word 0, in hex,
+/// starts with it (a float's sign / exponent / mantissa top: e.g. C47 for -768 to -1023.x)
+pub fn vu1_src_w0_ok(w0: u32) -> bool {
+    static W: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let p = W.get_or_init(|| {
+        let v = std::env::var("PS2_VU1_SRC").ok()?;
+        v.split(',').nth(2).map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty())
+    });
+    p.as_ref().is_none_or(|p| format!("{w0:08X}").starts_with(p.as_str()))
 }
 
 /// A fixed (PS2_WATCH) or source (PS2_VU1_SRC) watch is on: the JIT stays off
@@ -127,6 +139,27 @@ pub fn src_log(s: String) {
         if l.len() >= 48 { l.pop_front(); }
         l.push_back(s);
     }
+}
+
+static REF_LOG: std::sync::Mutex<Vec<(u32, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Source tracking: a VIF1 REF tag points at memory the game never wrote (only the
+/// kernel's boot clear). One line per tag writer pc (first 24), with a count
+pub fn ref_log(key: u32, s: String) {
+    if let Ok(mut l) = REF_LOG.lock() {
+        if let Some(e) = l.iter_mut().find(|e| e.0 == key) { e.1 = s; return; }
+        if l.len() < 24 { l.push((key, s)); }
+    }
+}
+
+pub fn ref_take() -> Vec<String> {
+    REF_LOG.lock().map(|l| l.iter().map(|e| e.1.clone()).collect()).unwrap_or_default()
+}
+
+/// Memory at `a` was never written by the game: nothing, or only kernel code (pc 8xxx_xxxx)
+pub fn wr_untouched(a: u32) -> bool {
+    let v = wr_get(a);
+    v & 3 == 0 || (v & 3 == WR_EE && (v >> 32) as u32 >= 0x8000_0000)
 }
 
 pub fn src_take() -> Vec<String> {

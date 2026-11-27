@@ -982,6 +982,34 @@ fn mfifo_vif1_drains_the_ring() {
     assert_eq!(d.ch[super::dmac::SPR_FROM].madr, 0x80_0000);
 }
 
+/// SPR_FROM destination chain (CHCR MOD 1): CNT / END tags in the scratchpad, each
+/// followed by its data, ADDR = where it goes. GoW II sends Kratos's bone matrices this
+/// way (CHCR 104, QWC 0); copying nothing left them zero and Kratos invisible
+#[test]
+fn spr_from_destination_chain() {
+    use super::dmac::{Dmac, SPR_FROM};
+    let mut d = Dmac::default();
+    let mut ram = vec![0u8; 0x200_0000];
+    let mut spr = vec![0u8; 0x4000];
+    let mut sif = super::hw::Sif::default();
+    let w = |d: &mut Dmac, a: u32, v: u32| d.write(a & 0xFFFF, v, u32::MAX);
+    let put = |spr: &mut Vec<u8>, i: usize, q: u128| spr[i * 16..i * 16 + 16].copy_from_slice(&q.to_le_bytes());
+    put(&mut spr, 0, 0x1000_0002 | 0x56_7D20u128 << 32);     // CNT 2 qw -> 567D20
+    put(&mut spr, 1, 0x1111);
+    put(&mut spr, 2, 0x2222);
+    put(&mut spr, 3, 0x7000_0001 | 0x56_6260u128 << 32);     // END 1 qw -> 566260
+    put(&mut spr, 4, 0x3333);
+    w(&mut d, 0x1000_E000, 1);
+    w(&mut d, 0x1000_D080, 0);
+    w(&mut d, 0x1000_D020, 0);
+    w(&mut d, 0x1000_D000, 0x104);
+    d.step(&mut ram, &mut spr, &mut sif);
+    let q = |ram: &Vec<u8>, a: usize| u128::from_le_bytes(ram[a..a + 16].try_into().unwrap());
+    assert_eq!([q(&ram, 0x56_7D20), q(&ram, 0x56_7D30), q(&ram, 0x56_6260)], [0x1111, 0x2222, 0x3333]);
+    assert_eq!(d.ch[SPR_FROM].chcr & 0x100, 0, "ended at the END tag");
+    assert_eq!(d.ch[SPR_FROM].sadr, 0x50);
+}
+
 /// SPU2 auto-DMA goes a block (512 samples' worth of a half) at a time as the input
 /// buffer plays: 12 KB on core 1 is 12 blocks, the last one sent 10 halves (53 ms) in
 #[test]
@@ -1369,7 +1397,7 @@ fn vif1_frame_replay() {
         let c0 = vu.total_cycles;
         let h0 = vu.host_ns;
         let mut out: Vec<u8> = Vec::new();
-        let mut scan = |gs: &mut Vec<u128>, vu: &super::vu::Vu, vif: &super::vif::Vif, all: &mut usize| {
+        let mut scan = |gs: &mut Vec<u128>, vu: &super::vu::Vu, vif: &super::vif::Vif, all: &mut usize, data: &[u8]| {
             for (k, q) in gs.iter().enumerate() {
                 let (x, y) = ((*q as u32) & 0xFFFF, ((*q >> 32) as u32) & 0xFFFF);
                 let z = (*q >> 64) as u32;
@@ -1382,6 +1410,12 @@ fn vif1_frame_replay() {
                         *all + k, vu.programs - p0, vu.start_pc, vif.top);
                 }
             }
+            // VIF_PROGS=1: which program (count, start pc) made each stretch of GS output
+            if std::env::var_os("VIF_PROGS").is_some() && !gs.is_empty() {
+                let w = |q: u32, k: usize| { let a = ((q as usize) * 16 + 4 * k) & (data.len() - 1); u32::from_le_bytes(data[a..a + 4].try_into().unwrap()) };
+                let vi12 = vu.vi[12] as u32;
+                println!("out {} +{} from program {} (start {:X}, TOP {:X}) vi12 {:X} handler {:X}", *all, gs.len(), vu.programs - p0, vu.start_pc, vu.top, vi12, w(vi12 + 69, 1));
+            }
             *all += gs.len();
             out.extend(gs.iter().flat_map(|q| q.to_le_bytes()));
             gs.clear();
@@ -1393,14 +1427,14 @@ fn vif1_frame_replay() {
                         let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs, gif_running: r, gif_held: h };
                         // just before program n: its data memory and code
                         vif.feed(&[w], &mut cx);
-                        if !gs.is_empty() { scan(&mut gs, &vu, &vif, &mut all); }
+                        if !gs.is_empty() { scan(&mut gs, &vu, &vif, &mut all, &data); }
                     }
                 }
                 VifEvent::Run(a) => {
                     vu.start(a);
                     vu.run(&code, &mut data, &mut gs);
                     if std::env::var("VIF_CYC").is_ok() { println!("prog {} at {:04X}: total cycles {} gs {}", vu.programs, a, vu.total_cycles, gs.len()); }
-                    scan(&mut gs, &vu, &vif, &mut all);
+                    scan(&mut gs, &vu, &vif, &mut all, &data);
                 }
             }
         }

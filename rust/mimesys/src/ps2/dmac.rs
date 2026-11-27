@@ -169,7 +169,7 @@ impl Dmac {
                 let was = self.stat;
                 self.stat &= !(v & 0xE3FF);
                 self.stat ^= v & 0x63FF_0000;
-                if crate::common::cpu::r5900::tl_on() {
+                if v & !0xE0 != 0 && crate::common::cpu::r5900::tl_on() {
                     let pc = crate::common::cpu::r5900::NOW_PC.load(std::sync::atomic::Ordering::Relaxed);
                     crate::common::cpu::r5900::tl(&format!("EE writes D_STAT {v:08X} (pc {pc:08X}): {was:08X} -> {:08X}", self.stat));
                 }
@@ -180,7 +180,7 @@ impl Dmac {
             0xE050 => self.rbor = v,
             0xE060 => self.stadr = v,
             _ => if let Some(n) = BASES.iter().position(|&b| off & !0xFF == b) {
-                if off & 0xF0 <= 0x30 && crate::common::cpu::r5900::tl_on() {
+                if off & 0xF0 <= 0x30 && !(SIF0..=SIF2).contains(&n) && crate::common::cpu::r5900::tl_on() {
                     let reg = ["CHCR", "MADR", "QWC", "TADR"][(off >> 4 & 3) as usize];
                     let pc = crate::common::cpu::r5900::NOW_PC.load(std::sync::atomic::Ordering::Relaxed);
                     crate::common::cpu::r5900::tl(&format!("EE writes {} {reg} = {:08X} (pc {pc:08X}; CHCR was {:08X})",
@@ -195,8 +195,10 @@ impl Dmac {
                         if was == 0 && c.chcr & STR != 0 {
                             crate::common::cpu::r5900::request_slice_break();
                             // a chain resuming with QWC left: the TAG field's ID decides
+                            // (destination chain, SIF0 / SPR_FROM: ID 0 is CNTS, only END ends)
                             let id = c.chcr >> 28 & 7;
-                            c.tag_end = c.chcr >> 2 & 1 == 1 && c.qwc > 0 && (id == 0 || id == 7);
+                            let ends = if n == SIF0 || n == SPR_FROM { id == 7 } else { id == 0 || id == 7 };
+                            c.tag_end = c.chcr >> 2 & 1 == 1 && c.qwc > 0 && ends;
                             if c.chcr >> 2 & 1 == 1 && c.qwc == 0 { c.tag_end = false; }
                         }
                     }
@@ -224,7 +226,7 @@ impl Dmac {
     fn finish(&mut self, n: usize) {
         self.ch[n].chcr &= !STR;
         self.stat |= 1 << n;
-        if crate::common::cpu::r5900::tl_on() {
+        if !(SIF0..=SIF2).contains(&n) && crate::common::cpu::r5900::tl_on() {
             crate::common::cpu::r5900::tl(&format!("DMA {} ends: D_STAT {:08X}", CH_NAMES[n], self.stat));
         }
         self.done[n] += 1;
@@ -315,6 +317,23 @@ impl Dmac {
                 let ids = ["refe", "cnt", "next", "ref", "refs", "call", "ret", "end"];
                 crate::common::cpu::r5900::tl(&format!("{} tag at {tadr:08X}: {} addr {addr:08X} qwc {} | {:016X}",
                     if n == VIF1 { "VIF1" } else { "GIF" }, ids[id as usize], lo & 0xFFFF, (tag >> 64) as u64));
+            }
+            // source tracking: a REF tag whose data the game never wrote (GoW II's bone
+            // palettes): who built the tag
+            if n == VIF1 && matches!(id, 0 | 3 | 4) && addr & 0x8000_0000 == 0 && c.qwc >= 4
+                && crate::common::cpu::r5900::src_track() && crate::common::cpu::r5900::wr_untouched(addr) {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static HITS: AtomicU32 = AtomicU32::new(0);
+                let k = HITS.fetch_add(1, Ordering::Relaxed) + 1;
+                let ta = if tadr & 0x8000_0000 != 0 { 0x8000_0000 | tadr & 0x3FF0 } else { tadr & 0x01FF_FFF0 };
+                let w = crate::common::cpu::r5900::wr_get(ta);
+                // one line per (tag writer pc, qwc)
+                let key = (w >> 32) as u32 ^ (lo as u32 & 0xFFFF) << 20;
+                let place = if ta & 0x8000_0000 != 0 { format!("scratchpad {:04X}", ta & 0x3FF0) } else { format!("{ta:08X}") };
+                let wt = crate::common::cpu::r5900::wr_describe(ta);
+                crate::common::cpu::r5900::ref_log(key, format!(
+                    "tag at {place} = {:016X} {:016X}: ref to {addr:08X} qwc {} ({}) | tag {} | hit #{k}",
+                    lo, (tag >> 64) as u64, lo & 0xFFFF, crate::common::cpu::r5900::wr_describe(addr), wt));
             }
             let mut end = false;
             match id {
@@ -439,34 +458,55 @@ impl Dmac {
         }
     }
 
-    /// SPR_FROM (normal or interleave mode): scratchpad -> memory
+    /// SPR_FROM: scratchpad -> memory, normal, interleave (MOD 2) or destination chain
+    /// (MOD 1: CNT / CNTS / END tags in the scratchpad, each followed by its data, ADDR
+    /// = where in memory it goes). GoW II builds its skinning bone matrices in the
+    /// scratchpad and sends them out this way; without chain mode they stayed zero
     fn spr_from(&mut self, ram: &mut [u8], spr: &mut [u8]) {
         let mfifo = self.mfifo_drain().is_some();
         let (rbor, rbsr) = (self.rbor, self.rbsr);
         // interleave (MOD 2): TQWC quadwords, then skip SQWC in memory (D_SQWC); the
         // scratchpad side is contiguous. MGS2's movies turn 16x16 macroblocks into lines so
         let inter = self.ch[SPR_FROM].chcr >> 2 & 3 == 2;
+        let chain = self.ch[SPR_FROM].chcr >> 2 & 3 == 1;
         let (tqwc, sqwc) = (self.sqwc >> 16 & 0xFF, self.sqwc & 0xFF);
         let mut run = 0;
-        let c = &mut self.ch[SPR_FROM];
-        while c.qwc > 0 {
-            let q = mem_read(ram, spr, 0x8000_0000 | c.sadr);
-            // MFIFO: SPR_FROM fills the ring buffer (RBOR + offset & RBSR)
-            if mfifo { c.madr = rbor | (c.madr & rbsr); }
-            mem_write(ram, spr, c.madr & 0x7FFF_FFFF, q);
-            // PS2_VU1_SRC: the copy keeps the scratchpad quadword's writer
-            if crate::common::cpu::r5900::src_track() {
-                let w = crate::common::cpu::r5900::wr_get(0x8000_0000 | c.sadr);
-                crate::common::cpu::r5900::wr_set_raw(c.madr & 0x01FF_FFF0, w & !3 | crate::common::cpu::r5900::WR_SPR_FROM);
+        let mut guard = 0u32;
+        loop {
+            let c = &mut self.ch[SPR_FROM];
+            while c.qwc > 0 {
+                let q = mem_read(ram, spr, 0x8000_0000 | c.sadr);
+                // MFIFO: SPR_FROM fills the ring buffer (RBOR + offset & RBSR)
+                if mfifo { c.madr = rbor | (c.madr & rbsr); }
+                mem_write(ram, spr, c.madr & 0x7FFF_FFFF, q);
+                // PS2_VU1_SRC: the copy keeps the scratchpad quadword's writer
+                if crate::common::cpu::r5900::src_track() && c.madr & 0x8000_0000 == 0 {
+                    let w = crate::common::cpu::r5900::wr_get(0x8000_0000 | c.sadr);
+                    crate::common::cpu::r5900::wr_set_raw(c.madr & 0x01FF_FFF0, w & !3 | crate::common::cpu::r5900::WR_SPR_FROM);
+                }
+                c.sadr = (c.sadr + 16) & 0x3FF0;
+                c.madr = c.madr.wrapping_add(16);
+                if mfifo { c.madr = rbor | (c.madr & rbsr); }
+                c.qwc -= 1;
+                if inter {
+                    run += 1;
+                    if run == tqwc { run = 0; c.madr = c.madr.wrapping_add(sqwc * 16); }
+                }
+                guard += 1;
+                if guard > 0x10_0000 { break; }
             }
+            if !chain || c.tag_end || guard > 0x10_0000 { break; }
+            // the next destination tag, read from the scratchpad at SADR
+            let tag = mem_read(ram, spr, 0x8000_0000 | c.sadr);
             c.sadr = (c.sadr + 16) & 0x3FF0;
-            c.madr = c.madr.wrapping_add(16);
-            if mfifo { c.madr = rbor | (c.madr & rbsr); }
-            c.qwc -= 1;
-            if inter {
-                run += 1;
-                if run == tqwc { run = 0; c.madr = c.madr.wrapping_add(sqwc * 16); }
-            }
+            let lo = tag as u64;
+            c.chcr = (c.chcr & 0xFFFF) | ((lo as u32) & 0xFFFF_0000);
+            c.qwc = (lo & 0xFFFF) as u32;
+            c.madr = (lo >> 32) as u32 & 0xFFFF_FFF0;
+            let id = lo >> 28 & 7;
+            let irq = lo >> 31 & 1 != 0;
+            c.tag_end = id == 7 || (irq && c.chcr & (1 << 7) != 0);
+            guard += 1;
         }
         if mfifo { self.mfifo_empty = false; }
         self.finish(SPR_FROM);

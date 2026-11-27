@@ -66,6 +66,9 @@ const SEG_MASK: [u32; 8] = [0x1FFF_FFFF, 0x1FFF_FFFF, 0x1FFF_FFFF, 0x1FFF_FFFF, 
 /// debugging: instructions kept for `dump_trace`
 const TRACE_LEN: usize = 256;
 
+/// Debugging: the PC of the IOP's last store (an I/O handler can name its writer)
+pub static IOP_PC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct R3000 {
     pub regs: [u32; 32],
@@ -309,6 +312,7 @@ impl R3000 {
             self.scratch[o..o + 4].copy_from_slice(&v.to_le_bytes());
             return Ok(());
         }
+        IOP_PC.store(self.cur_pc, std::sync::atomic::Ordering::Relaxed);
         bus.write32(va & SEG_MASK[(va >> 29) as usize], v);
         Ok(())
     }
@@ -321,6 +325,7 @@ impl R3000 {
             self.scratch[o..o + 2].copy_from_slice(&v.to_le_bytes());
             return Ok(());
         }
+        IOP_PC.store(self.cur_pc, std::sync::atomic::Ordering::Relaxed);
         bus.write16(va & SEG_MASK[(va >> 29) as usize], v);
         Ok(())
     }
@@ -332,6 +337,7 @@ impl R3000 {
             self.scratch[(va & 0x3FF) as usize] = v;
             return Ok(());
         }
+        IOP_PC.store(self.cur_pc, std::sync::atomic::Ordering::Relaxed);
         bus.write8(va & SEG_MASK[(va >> 29) as usize], v);
         Ok(())
     }

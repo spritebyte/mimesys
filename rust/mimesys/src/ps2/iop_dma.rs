@@ -112,6 +112,11 @@ impl IopDma {
             0x1F80_1578 => self.dmacen = merge(self.dmacen),
             0x1F80_157C => self.dmacinten = merge(self.dmacinten),
             _ => if let Some(n) = chan(a) {
+                if n == CDVD && crate::common::cpu::r5900::tl_on() {
+                    let pc = crate::common::cpu::r3000::IOP_PC.load(std::sync::atomic::Ordering::Relaxed);
+                    let reg = ["MADR", "BCR", "CHCR", "TADR"][(a >> 2 & 3) as usize];
+                    crate::common::cpu::r5900::tl(&format!("IOP writes CDVD DMA {reg} = {:08X} (IOP pc {pc:08X}; CHCR was {:08X})", v & mask, self.ch[n].chcr));
+                }
                 let c = &mut self.ch[n];
                 match a & 0xC {
                     0x0 => c.madr = merge(c.madr) & 0xFF_FFFF,
@@ -251,6 +256,13 @@ impl IopDma {
     }
 
     /// Channel 3 is running (the CDVD drive may write)
+    /// debugging: channel 3's registers and the enables it needs
+    pub fn cdvd_state(&self) -> String {
+        let c = &self.ch[CDVD];
+        format!("chcr {:08X} madr {:06X} bcr {:08X} | DPCR enable {} DMACEN {} | DICR {:08X}",
+            c.chcr, c.madr, c.bcr, self.enabled(CDVD) as u8, self.dmacen & 1, self.dicr)
+    }
+
     pub fn cdvd_active(&self) -> bool {
         self.ch[CDVD].chcr >> 24 & 1 != 0 && self.enabled(CDVD) && self.dmacen & 1 != 0
     }
@@ -384,8 +396,12 @@ pub(crate) fn spu_dma_cycles() -> u32 {
 /// interrupt, so SIFCMD sees the packet): stands for the EE side's time per transfer,
 /// which the EE here spends far faster than hardware. Without it, Shadow Hearts' EE polls
 /// two RPC servers back to back so tightly that the IOP's CDVDFSV RPC thread never
-/// sleeps and the equal-priority read thread never runs again (PS2_SIF_DELAY=n, 0 = none)
+/// sleeps and the equal-priority read thread never runs again. Ecco the Dolphin needs
+/// more than 1000: after a LoadModule reply its next LoadModule must arrive after the IOP's
+/// loadfile thread has gone back to sleep, so the just-started module's low-priority
+/// thread can run its sceCdInit before the next file's read starts (else it stops that
+/// read's DMA and the load hangs). 2000 works; 3000 for margin (PS2_SIF_DELAY=n, 0 = none)
 pub(crate) fn sif_delay() -> u32 {
     static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("PS2_SIF_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(1000))
+    *V.get_or_init(|| std::env::var("PS2_SIF_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(3000))
 }

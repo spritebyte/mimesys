@@ -120,6 +120,9 @@ pub struct Cdvd {
     pub n_age: u64,
     #[serde(skip)]
     pub n_dma_waits: u32,
+    /// debugging: reads logged as stuck waiting for DMA (500 waits, ~1 M IOP cycles; the first 40)
+    #[serde(skip)]
+    debug_waits: u32,
     #[serde(skip)]
     pub sectors: u64,
     /// the disc's end: the image's, or the volume size its ISO 9660 descriptor gives if
@@ -172,7 +175,7 @@ impl Default for Cdvd {
             istat: 0, sticky: 0, config_left: 0, cfg: [0; 4], nvm: Vec::new(), nvm_loaded: false, reads: vec![0; 64], sub03: Vec::new(), log: Vec::new(), region: Vec::new(),
             disc: None, disc_type: 0, dvd: false, serial: String::new(), ready: 0x40, status: 0, error: 0,
             pos: 0, spinning: false, op: Op::Idle, timer: 0, speed: 0, key: [0; 16], key_xor: 0, dec_set: 0, toc_due: false,
-            n_log: Vec::new(), n_hist: VecDeque::new(), n_age: 0, n_dma_waits: 0, sectors: 0, volume_end: 0, past_end: 0, layer1: 0,
+            n_log: Vec::new(), n_hist: VecDeque::new(), n_age: 0, n_dma_waits: 0, debug_waits: 0, sectors: 0, volume_end: 0, past_end: 0, layer1: 0,
         }
     }
 }
@@ -295,6 +298,10 @@ impl Cdvd {
             0x05 => if self.n_params.len() < 16 { self.n_params.push(v) },
             0x07 => {
                 // BREAK: abandon a read in progress
+                if crate::common::cpu::r5900::tl_on() {
+                    let pc = crate::common::cpu::r3000::IOP_PC.load(std::sync::atomic::Ordering::Relaxed);
+                    crate::common::cpu::r5900::tl(&format!("CDVD BREAK (IOP pc {pc:08X}; {:?})", self.op));
+                }
                 if self.ready & 0x80 != 0 {
                     let stage = match self.op { Op::Read { lba, .. } => if lba == self.pos { "reading" } else { "seeking" }, _ => "busy" };
                     let (age, waits, pos) = (self.n_age, self.n_dma_waits, self.pos);
@@ -446,6 +453,9 @@ impl Cdvd {
 
 impl Cdvd {
     fn irq(&mut self, i_stat: &mut u32) {
+        if crate::common::cpu::r5900::tl_on() {
+            crate::common::cpu::r5900::tl(&format!("CDVD irq: ready {:02X} status {:02X} pos {} error {:02X}", self.ready, self.status, self.pos, self.error));
+        }
         self.istat |= 2;
         *i_stat |= IOP_CDVD;
     }
@@ -514,6 +524,10 @@ impl Cdvd {
 
     fn n_command(&mut self, c: u8, i_stat: &mut u32) {
         if self.n_log.len() < 64 { self.n_log.push(c); }
+        if crate::common::cpu::r5900::tl_on() {
+            let pc = crate::common::cpu::r3000::IOP_PC.load(std::sync::atomic::Ordering::Relaxed);
+            crate::common::cpu::r5900::tl(&format!("CDVD N {c:02X} {:02X?} (IOP pc {pc:08X}; was {:?}, ready {:02X})", self.n_params, self.op, self.ready));
+        }
         if self.n_hist.len() >= 16 { self.n_hist.pop_front(); }
         self.n_age = 0;
         self.n_dma_waits = 0;
@@ -618,6 +632,17 @@ impl Cdvd {
                     }
                     if !dma.cdvd_room(block as usize) {
                         // the IOP hasn't set up the next DMA yet: wait
+                        if self.n_dma_waits == 500 && self.debug_waits < 40 {
+                            self.debug_waits += 1;
+                            crate::dlog!("PS2: CDVD read lba {lba} ({left} left, {block}-byte blocks) waits for IOP DMA 3: {}", dma.cdvd_state());
+                            if crate::common::cpu::r5900::tl_on() {
+                                crate::dlog!("PS2: the DMA timeline before it:");
+                                crate::common::cpu::r5900::tl_flush();
+                            }
+                        }
+                        if self.n_dma_waits == 0 && crate::common::cpu::r5900::tl_on() {
+                            crate::common::cpu::r5900::tl(&format!("CDVD read lba {lba} waits for DMA 3: {}", dma.cdvd_state()));
+                        }
                         self.n_dma_waits += 1;
                         self.set_status(0x0A);
                         self.timer += 2000;

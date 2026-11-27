@@ -44,7 +44,7 @@ pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
 /// Printed at the top of the debug log so a log says which build made it
-const PATCH: &str = "0315";
+const PATCH: &str = "0329";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;
@@ -325,6 +325,9 @@ impl Ps2System {
                         let r = &self.iop.regs;
                         crate::dlog!("PS2: IOP reached {:08X} (frame {} line {}, ra {:08X}, sp {:08X}, v0 {:08X} a0 {:08X} a1 {:08X} s0-s4 {:X} {:X} {:X} {:X} {:X})",
                             self.iop.pc, self.current_frame + 1, line, r[31], r[29], r[2], r[4], r[5], r[16], r[17], r[18], r[19], r[20]);
+                        if crate::common::cpu::r5900::tl_on() {
+                            crate::common::cpu::r5900::tl(&format!("IOP reached {:08X} (ra {:08X} sp {:08X} a0 {:08X})", self.iop.pc, r[31], r[29], r[4]));
+                        }
                     }
                     if let Some(p) = self.iop_prof.as_mut() { *p.entry(self.iop.pc & 0x1F_FFC0).or_insert(0) += 1; }
                     if let Some(w) = self.iop_win.as_mut() { w.step(self.iop.pc, self.iop.regs[29], self.iop.regs[31], self.current_frame + 1, line); }
@@ -527,6 +530,7 @@ impl Ps2System {
             if h.cdvd.past_end > 0 { crate::dlog!("PS2:   CDVD reads past the image's end (zeros): {} | image {} sectors, volume {}", h.cdvd.past_end, h.cdvd.disc.as_ref().map_or(0, |d| d.leadout), h.cdvd.volume_end); }
             let r: Vec<String> = c.reads.iter().enumerate().filter(|(_, n)| **n > 0).map(|(k, n)| format!("{k:02X}x{n}")).collect();
             crate::dlog!("PS2:   CDVD last N: {} | disc {} sectors", c.n_hist.iter().cloned().collect::<Vec<_>>().join(" | "), c.disc.as_ref().map_or(0, |d| d.leadout));
+            crate::dlog!("PS2:   IOP DMA 3 (CDVD): {}", h.iop_dma.cdvd_state());
             crate::dlog!("PS2:   CDVD register reads: {} | S so far: {:02X?} | S 03 subs {:02X?}", r.join(" "), &c.log[c.log.len().saturating_sub(40)..], c.sub03);
         }
         // EE and IOP RAM to <data>/GD_EMU/PS2/ (once, 30 s in) for working out what the
@@ -635,6 +639,22 @@ impl Ps2System {
             } else {
                 crate::dlog!("PS2:   IOP threads: thbase not found");
             }
+            {
+                // and by a scan for thread blocks (tag 7F01 with the id above it), for kernels
+                // whose list the walk above misses
+                let mut out = Vec::new();
+                for b in (0..iram.len() as u32 - 0x40).step_by(4) {
+                    if r(b) & 0xFFFF != 0x7F01 || r(b) >> 16 == 0 || out.len() >= 40 { continue; }
+                    let status = r(b + 4) & 0xFFFF;
+                    let entry = r(b + 0x30);
+                    if !matches!(status, 1 | 2 | 4 | 8 | 0xC | 0x10) || r(b + 4) >> 16 > 127 || !(0x800..0x20_0000).contains(&entry) { continue; }
+                    let st = match status { 1 => "run", 2 => "ready", 4 => "wait", 8 => "susp", 0xC => "wait+susp", _ => "dormant" };
+                    let wait = match r(b + 0x14) & 0xFFFF { 0 => String::new(), 1 => " sleep".into(), 2 => format!(" delay"), 3 => format!(" sema {:X}", r(b + 0x18)),
+                        4 => format!(" evflag {:X}", r(b + 0x18)), 5 => format!(" mbox {:X}", r(b + 0x18)), n => format!(" wait{n}") };
+                    out.push(format!("#{} {st}{wait} prio {} entry {:X} pc {:X}", r(b) >> 16, r(b + 4) >> 16, entry, r(r(b + 8) + 0x8C)));
+                }
+                crate::dlog!("PS2:   IOP threads (scan): {}", out.join(" | "));
+            }
             let tm: Vec<String> = self.hw.timers.iter().map(|t| format!("mode {:X} count {:X} comp {:X}", t.mode, t.count, t.comp)).collect();
             crate::dlog!("PS2:   EE timers: {}", tm.join(" | "));
         }
@@ -657,6 +677,9 @@ impl Ps2System {
             if let Some(q) = crate::common::cpu::r5900::vu1_src() {
                 crate::dlog!("PS2:   VU1 qw {:03X} sources (latest last):", q);
                 for w in crate::common::cpu::r5900::src_take() { crate::dlog!("PS2:     {}", w); }
+                let r = crate::common::cpu::r5900::ref_take();
+                crate::dlog!("PS2:   VIF1 REF tags to memory the game never wrote: {}", if r.is_empty() { "none" } else { "" });
+                for w in r { crate::dlog!("PS2:     {}", w); }
             }
             crate::dlog!("PS2:   SIF RPC recent: {}", r.recent.iter().cloned().collect::<Vec<_>>().join(" | "));
             let w: Vec<String> = r.waiting.values().map(|(t, n)| format!("{t} (call #{n} of {})", r.calls)).collect();

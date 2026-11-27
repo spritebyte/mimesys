@@ -350,12 +350,14 @@ impl Vif {
             if self.vif1 && has_data {
                 if let Some((q, want)) = crate::common::cpu::r5900::vu1_src_cfg() {
                     let w3 = u32::from_le_bytes(cx.data[a + 12..a + 16].try_into().unwrap());
-                    if q == addr & qmask && want.is_none_or(|x| x == w3) {
+                    let w0 = u32::from_le_bytes(cx.data[a..a + 4].try_into().unwrap());
+                    if (q == u32::MAX || q == addr & qmask) && want.is_none_or(|x| x == w3)
+                        && crate::common::cpu::r5900::vu1_src_w0_ok(w0) {
                         let words: Vec<String> = (0..4).map(|k| format!("{:08X}", u32::from_le_bytes(cx.data[a + 4 * k..a + 4 * k + 4].try_into().unwrap()))).collect();
                         let src = if self.dbg_first == u32::MAX { u32::MAX } else { self.dbg_first.wrapping_add((row_bit / 8) as u32) };
                         let who = if src == u32::MAX { "unknown".to_string() } else { crate::common::cpu::r5900::wr_describe(src) };
-                        crate::common::cpu::r5900::src_log(format!("{} from EE {:08X} (UNPACK {:08X} row {}, VU1 programs {}): {}",
-                            words.join(" "), src, c, n, cx.vu.programs, who));
+                        crate::common::cpu::r5900::src_log(format!("qw {:03X} = {} from EE {:08X} (UNPACK {:08X} row {}, VU1 programs {}): {}",
+                            addr & qmask, words.join(" "), src, c, n, cx.vu.programs, who));
                     }
                 }
             }
