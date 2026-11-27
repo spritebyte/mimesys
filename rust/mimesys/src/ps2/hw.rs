@@ -199,6 +199,11 @@ pub struct Hw {
     pub gif_mode: u32,
     #[serde(default)]
     pub gif_pause: bool,
+    /// EE cycles PATH3's last data keeps the GIF busy (GIF_STAT OPH, APATH 3): the DMA
+    /// moves it at once here, but software may wait to see the transfer under way
+    /// (Buffy starts a GIF DMA, then waits for OPH and then for APATH)
+    #[serde(default)]
+    pub gif_busy: u32,
     /// debugging: recording VIF1 over a frame (vif1_frame.bin): the VIF1 / VU1 state at
     /// its start, then every feed (words, PATH3 running, PATH3 held) and VU1 start
     #[serde(skip)]
@@ -241,6 +246,7 @@ impl Hw {
             irq_written: false,
             gif_mode: 0,
             gif_pause: false,
+            gif_busy: 0,
             vif_rec: None,
             dmac: Dmac::default(),
             timers: Default::default(),
@@ -711,13 +717,14 @@ impl EeBus for EeView<'_> {
 impl Hw {
     /// Words for VIF0 (`vif1` false) or VIF1; what they send to the GS goes there
     /// GIF_STAT: M3R, M3P, IMT, PSE; while PATH3 is held with the GIF channel running, its
-    /// data waits in the FIFO (FQC, P3Q). The GIF is otherwise always idle here.
+    /// data waits in the FIFO (FQC, P3Q); OPH and APATH 3 for a while after PATH3 data.
     pub fn gif_stat(&self) -> u32 {
         let mut s = (self.gif_mode & 5) | (self.vif1.mskpath3 as u32) << 1 | (self.gif_pause as u32) << 3;
         let g = &self.dmac.ch[super::dmac::GIF];
         if self.dmac.gif_hold && g.chcr & 0x100 != 0 {
             s |= 1 << 6 | g.qwc.clamp(1, 16) << 24;
         }
+        if self.gif_busy > 0 { s |= 1 << 9 | 3 << 10; }
         s
     }
 

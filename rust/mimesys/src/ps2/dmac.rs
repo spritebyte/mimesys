@@ -129,6 +129,8 @@ fn mem_write(ram: &mut [u8], spr: &mut [u8], a: u32, v: u128) {
     }
 }
 
+const CH_NAMES: [&str; 10] = ["VIF0", "VIF1", "GIF", "IPU_FROM", "IPU_TO", "SIF0", "SIF1", "SIF2", "SPR_FROM", "SPR_TO"];
+
 impl Dmac {
     pub fn read(&self, off: u32) -> u32 {
         match off {
@@ -164,8 +166,13 @@ impl Dmac {
             0xE010 => {
                 // status bits clear on 1, mask bits toggle on 1
                 let v = v & mask;
+                let was = self.stat;
                 self.stat &= !(v & 0xE3FF);
                 self.stat ^= v & 0x63FF_0000;
+                if crate::common::cpu::r5900::tl_on() {
+                    let pc = crate::common::cpu::r5900::NOW_PC.load(std::sync::atomic::Ordering::Relaxed);
+                    crate::common::cpu::r5900::tl(&format!("EE writes D_STAT {v:08X} (pc {pc:08X}): {was:08X} -> {:08X}", self.stat));
+                }
             }
             0xE020 => self.pcr = v,
             0xE030 => self.sqwc = v,
@@ -173,11 +180,11 @@ impl Dmac {
             0xE050 => self.rbor = v,
             0xE060 => self.stadr = v,
             _ => if let Some(n) = BASES.iter().position(|&b| off & !0xFF == b) {
-                if (n == VIF1 || n == GIF) && off & 0xF0 <= 0x30 && crate::common::cpu::r5900::tl_on() {
+                if off & 0xF0 <= 0x30 && crate::common::cpu::r5900::tl_on() {
                     let reg = ["CHCR", "MADR", "QWC", "TADR"][(off >> 4 & 3) as usize];
                     let pc = crate::common::cpu::r5900::NOW_PC.load(std::sync::atomic::Ordering::Relaxed);
                     crate::common::cpu::r5900::tl(&format!("EE writes {} {reg} = {:08X} (pc {pc:08X}; CHCR was {:08X})",
-                        if n == VIF1 { "VIF1" } else { "GIF" }, v & mask, self.ch[n].chcr));
+                        CH_NAMES[n], v & mask, self.ch[n].chcr));
                 }
                 let c = &mut self.ch[n];
                 let merge = |old: u32| (old & !mask) | (v & mask);
@@ -189,8 +196,8 @@ impl Dmac {
                             crate::common::cpu::r5900::request_slice_break();
                             // a chain resuming with QWC left: the TAG field's ID decides
                             let id = c.chcr >> 28 & 7;
-                            c.tag_end = c.chcr >> 2 & 3 == 1 && c.qwc > 0 && (id == 0 || id == 7);
-                            if c.chcr >> 2 & 3 == 1 && c.qwc == 0 { c.tag_end = false; }
+                            c.tag_end = c.chcr >> 2 & 1 == 1 && c.qwc > 0 && (id == 0 || id == 7);
+                            if c.chcr >> 2 & 1 == 1 && c.qwc == 0 { c.tag_end = false; }
                         }
                     }
                     0x10 => c.madr = merge(c.madr) & !0xF,
@@ -217,6 +224,9 @@ impl Dmac {
     fn finish(&mut self, n: usize) {
         self.ch[n].chcr &= !STR;
         self.stat |= 1 << n;
+        if crate::common::cpu::r5900::tl_on() {
+            crate::common::cpu::r5900::tl(&format!("DMA {} ends: D_STAT {:08X}", CH_NAMES[n], self.stat));
+        }
         self.done[n] += 1;
     }
 
@@ -247,7 +257,7 @@ impl Dmac {
                 IPU_FROM | IPU_TO | SIF2 => {}
                 VIF1 if self.ch[n].chcr & 1 == 0 => {}
                 GIF if self.gif_hold && !self.gif_one_packet => {}
-                VIF1 | GIF if self.mfifo_drain() == Some(n) && self.ch[n].chcr >> 2 & 3 == 1 => self.mfifo(n, ram, spr, sif),
+                VIF1 | GIF if self.mfifo_drain() == Some(n) && self.ch[n].chcr >> 2 & 1 == 1 => self.mfifo(n, ram, spr, sif),
                 _ => self.source(n, ram, spr, sif),
             }
         }
@@ -255,7 +265,9 @@ impl Dmac {
 
     /// A channel reading memory (normal or source chain) into its device
     fn source(&mut self, n: usize, ram: &mut [u8], spr: &mut [u8], sif: &mut Sif) {
-        let chain = self.ch[n].chcr >> 2 & 3 == 1;
+        // MOD 1 is chain; the undefined MOD 3 also runs as chain (FF12 starts its MFIFO
+        // drain, VIF1, with CHCR 14D: as a normal transfer it ended at once with QWC 0)
+        let chain = self.ch[n].chcr >> 2 & 1 == 1;
         // interleave (SPR_TO, MOD 2): TQWC quadwords, then skip SQWC in memory
         let inter = n == SPR_TO && self.ch[n].chcr >> 2 & 3 == 2;
         let (tqwc, sqwc) = (self.sqwc >> 16 & 0xFF, self.sqwc & 0xFF);
@@ -466,7 +478,7 @@ impl Dmac {
         if self.ctrl & 1 == 0 || self.enable & 0x1_0000 != 0 { return None; }
         let n = IPU_TO;
         if self.ch[n].chcr & STR == 0 { return None; }
-        let chain = self.ch[n].chcr >> 2 & 3 == 1;
+        let chain = self.ch[n].chcr >> 2 & 1 == 1;
         for _ in 0..64 {
             if self.ch[n].qwc > 0 {
                 let a = self.ch[n].madr;

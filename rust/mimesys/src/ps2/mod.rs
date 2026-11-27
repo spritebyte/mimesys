@@ -44,7 +44,7 @@ pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
 /// Printed at the top of the debug log so a log says which build made it
-const PATCH: &str = "0312";
+const PATCH: &str = "0315";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;
@@ -397,9 +397,11 @@ impl Ps2System {
         }
         let vu = if prof { h.vu1.host_ns + h.vu0.host_ns - vu0 } else { 0 };
         lap(1, vu);
-        // GIF PATH3: what the GIF channel moved goes to the GS
+        // GIF PATH3: what the GIF channel moved goes to the GS (busy for ~2 cycles a qword)
+        h.gif_busy = h.gif_busy.saturating_sub(ee);
         if !h.dmac.gif_out.is_empty() {
             let q = std::mem::take(&mut h.dmac.gif_out);
+            h.gif_busy = h.gif_busy.max(16 + 2 * q.len() as u32);
             gs::set_feed_path(3);
             let src = std::mem::take(&mut h.dmac.gif_src);
             for (i, v) in q.into_iter().enumerate() {
@@ -506,6 +508,16 @@ impl Ps2System {
         crate::dlog!("PS2:   INTC {:04X}/{:04X} D_STAT {:08X} D_CTRL {:X} SIF0 {:08X} SIF1 {:08X} | IOP I_STAT {:05X}/{:05X} ctrl {} DICR {:08X} DICR2 {:08X}",
             h.intc_stat, h.intc_mask, h.dmac.stat, h.dmac.ctrl, h.dmac.ch[dmac::SIF0].chcr, h.dmac.ch[dmac::SIF1].chcr,
             h.i_stat, h.i_mask, h.i_ctrl, h.iop_dma.dicr, h.iop_dma.dicr2);
+        {
+            let d = &h.dmac;
+            let ch = |n: usize| { let c = &d.ch[n]; format!("chcr {:08X} madr {:08X} qwc {:X} tadr {:08X}", c.chcr, c.madr, c.qwc, c.tadr) };
+            crate::dlog!("PS2:   DMA VIF1 {} | GIF {} | SPR_FROM {} | RBOR {:08X} RBSR {:08X}",
+                ch(dmac::VIF1), ch(dmac::GIF), ch(dmac::SPR_FROM), d.rbor, d.rbsr);
+        }
+        if crate::common::cpu::r5900::tl_on() {
+            crate::dlog!("PS2:   DMA timeline (PS2_DMA_TL) since the last report, up to 1000 events:");
+            crate::common::cpu::r5900::tl_flush();
+        }
         {
             let c = &h.cdvd;
             crate::dlog!("PS2:   CDVD disc {:02X} {} serial {} | ready {:02X} status {:02X} pos {} op {:?} | N {:02X?} | sectors {}",

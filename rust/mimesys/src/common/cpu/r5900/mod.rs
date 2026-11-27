@@ -170,7 +170,8 @@ pub fn slice_break() -> bool {
     SLICE_BREAK.load(std::sync::atomic::Ordering::Relaxed) && SLICE_BREAK.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Debugging timeline (PS2_GS_XFER and PS2_WATCH both set): EE stores into the watched
+/// Debugging timeline (PS2_DMA_TL=1, or PS2_GS_XFER and PS2_WATCH both set; also D_STAT
+/// reads / writes and DMA channel ends; printed at an EE crash too): EE stores into the watched
 /// range, the EE's VIF1 / GIF DMA register writes, VIF1 / GIF DMA tags, DMA reads from the
 /// watched range, kept in order with the EE cycle; the last 1000 are printed when a logged
 /// GS upload starts or ends (`tl_flush`)
@@ -179,7 +180,8 @@ pub static NOW_PC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::
 
 pub fn tl_on() -> bool {
     static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *T.get_or_init(|| src_track() && watch().is_some() && std::env::var_os("PS2_GS_XFER").is_some())
+    *T.get_or_init(|| std::env::var_os("PS2_DMA_TL").is_some()
+        || (src_track() && watch().is_some() && std::env::var_os("PS2_GS_XFER").is_some()))
 }
 
 pub fn set_now(c: u64) { NOW.store(c, std::sync::atomic::Ordering::Relaxed); }
@@ -494,6 +496,7 @@ impl R5900 {
     pub fn dump_trace(&mut self, why: &str, n: usize) {
         if self.trace_dumped || self.trace.len() != TRACE_LEN { return; }
         self.trace_dumped = true;
+        if tl_on() { crate::dlog!("R5900: {why}; the DMA timeline before it:"); tl_flush(); }
         crate::dlog!("R5900: {why}; the last {n} instructions (pc instr sp ra):");
         let n = n.min(TRACE_LEN);
         for k in TRACE_LEN - n..TRACE_LEN {
@@ -627,7 +630,7 @@ impl R5900 {
                 self.sp_write(o, n as usize, v)
             }
             Target::Phys(pa) => {
-                if src_track() {
+                if src_track() || tl_on() {
                     NOW.store(self.cycles, std::sync::atomic::Ordering::Relaxed);
                     NOW_PC.store(self.cur_pc, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -654,10 +657,13 @@ impl R5900 {
                 }
             }
         }
-        // an acknowledged interrupt mustn't be taken again before the system's next look
+        // an acknowledged interrupt mustn't be taken again before the system's next look;
+        // INT1 also rises at once (D_STAT: unmasking a channel whose transfer already ended).
+        // The Thing enables VIF1's interrupt with VIF1's status bit set, and its handler only
+        // copes if it runs straight after the EI that follows, before the queue is armed
         if let Some((i0, i1)) = bus.irq_lines() {
             if !i0 { self.set_int0(false); }
-            if !i1 { self.set_int1(false); }
+            self.set_int1(i1);
         }
         Ok(())
     }
