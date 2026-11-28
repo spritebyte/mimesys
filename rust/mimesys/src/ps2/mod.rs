@@ -44,7 +44,7 @@ pub fn debug() -> bool { DEBUG.load(std::sync::atomic::Ordering::Relaxed) }
 
 const STATE_VERSION: u32 = 1;
 /// Printed at the top of the debug log so a log says which build made it
-const PATCH: &str = "0329";
+const PATCH: &str = "0336";
 
 pub const EE_HZ: u64 = 294_912_000;
 const LINES: u32 = 262;
@@ -104,6 +104,9 @@ pub struct Ps2System {
     /// go in the report)
     iop_pc_hits: std::collections::HashMap<u32, u64>,
     iop_prof: Option<std::collections::HashMap<u32, u64>>,
+    /// PS2_EE_PROFILE=1: where the EE is at the end of each slice (64-byte blocks) and its
+    /// ra (callers), printed with each report (not idle time)
+    ee_prof: Option<(std::collections::HashMap<u32, u64>, std::collections::HashMap<u32, u64>)>,
     /// PS2_IOP_WINDOW=start,stop: what the IOP runs from reaching `start` until it reaches
     /// `stop` (64-byte blocks and stacks, i.e. threads), logged at `stop`
     iop_win: Option<IopWindow>,
@@ -209,6 +212,7 @@ impl Ps2System {
             iop_pc_hits: Default::default(),
             iop_pcs: std::env::var("PS2_IOP_PCS").map(|v| v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect()).unwrap_or_default(),
             iop_prof: std::env::var("PS2_IOP_PROFILE").ok().map(|_| Default::default()),
+            ee_prof: std::env::var("PS2_EE_PROFILE").ok().map(|_| Default::default()),
             iop_win: std::env::var("PS2_IOP_WINDOW").ok().and_then(|v| {
                 let a: Vec<u32> = v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect();
                 (a.len() == 2).then(|| IopWindow { start: a[0], stop: a[1], ..Default::default() })
@@ -302,6 +306,10 @@ impl Ps2System {
                         c += self.ee.step(&mut bus);
                         if crate::common::cpu::r5900::slice_break() { break; }
                     }
+                }
+                if let Some((pcs, ras)) = self.ee_prof.as_mut() {
+                    *pcs.entry(self.ee.pc & !0x3F).or_insert(0) += 1;
+                    *ras.entry(self.ee.gpr[31] as u32).or_insert(0) += 1;
                 }
             }
             done += c;
@@ -501,6 +509,19 @@ impl Ps2System {
             let top: Vec<String> = v.iter().take(12).map(|(n, a)| format!("{a:X} {:.1}%", 100.0 * *n as f64 / total.max(1) as f64)).collect();
             crate::dlog!("PS2:   IOP profile (non-idle steps {}): {}", total, top.join(", "));
             p.clear();
+        }
+        if let Some((pcs, ras)) = self.ee_prof.as_mut() {
+            let top = |m: &std::collections::HashMap<u32, u64>, k: usize| {
+                let total: u64 = m.values().sum();
+                let mut v: Vec<_> = m.iter().map(|(&a, &n)| (n, a)).collect();
+                v.sort_unstable_by(|x, y| y.cmp(x));
+                (total, v.iter().take(k).map(|(n, a)| format!("{a:X} {:.1}%", 100.0 * *n as f64 / total.max(1) as f64)).collect::<Vec<_>>().join(", "))
+            };
+            let (n, p) = top(pcs, 24);
+            crate::dlog!("PS2:   EE profile (samples {n}): {p}");
+            crate::dlog!("PS2:   EE profile ra: {}", top(ras, 16).1);
+            pcs.clear();
+            ras.clear();
         }
         if !self.iop_pcs.is_empty() {
             let hits: Vec<String> = self.iop_pcs.iter().map(|a| format!("{a:X}:{}", self.iop_pc_hits.get(a).copied().unwrap_or(0))).collect();

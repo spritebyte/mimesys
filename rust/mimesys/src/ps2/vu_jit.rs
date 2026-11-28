@@ -2,8 +2,9 @@
 //! Cranelift, doing exactly what `Vu::step` does pair by pair (VU_JITCHECK=1 runs every
 //! program on the interpreter too and reports any difference).
 //!
-//! - A block runs from its start to the delay slot of the first branch / jump, the pair
-//!   after an E bit, or `MAX_PAIRS`.
+//! - A block runs from its start to the delay slot of the first jump / unconditional
+//!   branch, the pair after an E bit, or `MAX_PAIRS`. Conditional branches leave the block
+//!   after their delay slot when taken (VU_JIT_SUPER=0: blocks end at every branch).
 //! - All state stays in the `Vu`. Translated code does the per-pair bookkeeping (PC,
 //!   stalls, cycle, delay slots, E bit, flag landing) and the common instructions itself:
 //!   FMACs (on host floats when nothing leaves f32's range, else the exact f64 path),
@@ -33,17 +34,20 @@ pub struct Ctx {
     pub path1: *mut Vec<u128>,
     /// the constants table (loaded once per pair, so constants stay local to their pair)
     pub ktab: *const u8,
+    /// a branch back inside a block leaves it once the cycle is past this (as `Vu::run`'s
+    /// cycle limit)
+    pub limit: u64,
 }
 
 impl Ctx {
     pub fn new(vu: *mut Vu, data: &mut [u8], path1: *mut Vec<u128>) -> Self {
-        Ctx { vu, data: data.as_mut_ptr(), data_len: data.len(), path1, ktab: KT.0.as_ptr() as *const u8 }
+        Ctx { vu, data: data.as_mut_ptr(), data_len: data.len(), path1, ktab: KT.0.as_ptr() as *const u8, limit: u64::MAX }
     }
 }
 
 type BlockFn = unsafe extern "C" fn(*mut Ctx);
 
-const MAX_PAIRS: usize = 64;
+const MAX_PAIRS: usize = 16;
 fn max_pairs() -> usize { std::env::var("VU_JIT_PAIRS").ok().and_then(|v| v.parse().ok()).unwrap_or(MAX_PAIRS) }
 /// Starts before a block is translated
 const HOT: u32 = 2;
@@ -97,6 +101,9 @@ pub struct VuJit {
     in_flight: usize,
     /// micro memory's write count at this get
     cgen: u64,
+    /// per slot, the last block found: (pc, cgen, version, f): no search while
+    /// micro memory is unwritten
+    quick: Vec<(u32, u64, usize, BlockFn)>,
     pub translated: u64,
     pub stale: u64,
     pub runs: u64,
@@ -107,6 +114,8 @@ pub struct VuJit {
 }
 
 unsafe impl Send for VuJit {}
+
+unsafe extern "C" fn nop_block(_: *mut Ctx) {}
 
 /// Whether the JIT is on (PS2_VU_JIT=0: off)
 pub fn enabled() -> bool {
@@ -174,7 +183,7 @@ fn fast_on() -> bool {
 /// MAC / status flags (FS* / FM*, or an upper half run by a handler). Mid-block exits only come
 /// after pair 0, so a push there is kept. The flags' sticky status bits are ORed in at
 /// once instead (nothing reads status in the window, and landings keep bits 6-11).
-fn dead_pushes(words: &[u64]) -> Vec<bool> {
+fn dead_pushes(words: &[u64], targets: &[bool]) -> Vec<bool> {
     let n = words.len();
     let mut dead = vec![false; n];
     if !inline_on() || std::env::var_os("VU_JIT_ALL_FLAGS").is_some() { return dead; }
@@ -187,6 +196,12 @@ fn dead_pushes(words: &[u64]) -> Vec<bool> {
             | UpClass::Ftoi(_) | UpClass::Abs | UpClass::Clip);
         flag_op || up_helper
     }).collect();
+    // (a branch may leave the block after its delay slot: the flags must be right there)
+    let exit: Vec<bool> = (0..n).map(|k| {
+        let br = |w: u64| (w >> 32) as u32 & (1 << 31) == 0 && is_branch(w as u32);
+        br(words[k]) || (k > 0 && br(words[k - 1]))
+    }).collect();
+    let touch: Vec<bool> = (0..n).map(|k| touch[k] || exit[k] || targets[k]).collect();
     for i in 1..n {
         if !pushes[i] { continue; }
         let Some(j) = (i + 1..n).find(|&j| pushes[j]) else { continue };
@@ -194,6 +209,24 @@ fn dead_pushes(words: &[u64]) -> Vec<bool> {
     }
     dead
 }
+
+/// Debugging: VU_JIT_PROF=file appends each block's code ranges by part (`Em::cat`)
+fn prof_path() -> Option<&'static str> {
+    static P: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    P.get_or_init(|| std::env::var("VU_JIT_PROF").ok()).as_deref()
+}
+
+/// Blocks run on through conditional branches (VU_JIT_SUPER=0: they end there)
+fn super_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VU_JIT_SUPER").map_or(true, |v| v != "0"))
+}
+/// In-block branches jump (VU_JIT_LOOP=0: they leave the block)
+fn loop_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VU_JIT_LOOP").map_or(true, |v| v != "0"))
+}
+fn is_cond_branch(lo: u32) -> bool { matches!(lo >> 25, 0x28 | 0x29 | 0x2C..=0x2F) }
 
 fn is_branch(lo: u32) -> bool { matches!(lo >> 25, 0x20 | 0x21 | 0x24 | 0x25 | 0x28 | 0x29 | 0x2C..=0x2F) }
 
@@ -229,7 +262,7 @@ fn spawn() -> Option<(std::sync::mpsc::Sender<Msg>, std::sync::mpsc::Receiver<Do
 
 impl VuJit {
     pub fn new() -> Self {
-        Self { table: Vec::new(), cold: Vec::new(), pending: Vec::new(), local: None, worker: None, epoch: 0, in_epoch: 0, sync: false, in_flight: 0, cgen: 0,
+        Self { table: Vec::new(), cold: Vec::new(), pending: Vec::new(), local: None, worker: None, epoch: 0, in_epoch: 0, sync: false, in_flight: 0, cgen: 0, quick: Vec::new(),
                translated: 0, stale: 0, runs: 0, last: None, compile_ns: 0 }
     }
 
@@ -268,8 +301,15 @@ impl VuJit {
             self.table = (0..n).map(|_| Vec::new()).collect();
             self.cold = vec![0; n];
             self.pending = vec![false; n];
+            self.quick = vec![(u32::MAX, u64::MAX, 0, nop_block as BlockFn); n];
         }
         let slot = (pc as usize / 8) & (n - 1);
+        let q = self.quick[slot];
+        if q.0 == pc && q.1 == cgen {
+            self.table[slot][q.2].hits += 1;
+            self.runs += 1;
+            return Some(q.3);
+        }
         if let Some(f) = self.find(code, slot, pc) { return Some(f); }
         // translations done meanwhile
         let mut got = false;
@@ -310,6 +350,7 @@ impl VuJit {
     /// Drop every translation (their code is freed)
     fn reset(&mut self) {
         for v in &mut self.table { v.clear(); }
+        for q in &mut self.quick { q.1 = u64::MAX; }
         self.pending.iter_mut().for_each(|p| *p = false);
         self.epoch = self.epoch.wrapping_add(1);
         self.in_epoch = 0;
@@ -322,12 +363,13 @@ impl VuJit {
         let word = |a: usize| u64::from_le_bytes(code[a..a + 8].try_into().unwrap());
         // (compared again only after micro memory was written)
         let cgen = self.cgen;
-        for b in &mut self.table[slot] {
+        for (i, b) in self.table[slot].iter_mut().enumerate() {
             if b.pc != pc { continue; }
             if b.seen == cgen || b.words.iter().enumerate().all(|(k, &w)| word((b.addr + 8 * k) & mask) == w) {
                 b.seen = cgen;
                 b.hits += 1;
                 self.runs += 1;
+                self.quick[slot] = (pc, cgen, i, b.f);
                 return Some(b.f);
             }
         }
@@ -338,6 +380,7 @@ impl VuJit {
         let slot = (d.pc as usize / 8) & (n - 1);
         self.compile_ns += d.ns;
         self.pending[slot] = false;
+        self.quick[slot].1 = u64::MAX;
         let v = &mut self.table[slot];
         if v.len() >= VERSIONS { v.remove(0); }
         // SAFETY: `f` is a finished translation that lives as long as its translator
@@ -355,8 +398,18 @@ impl VuJit {
             words.push(w);
             let (lo, hi) = (w as u32, (w >> 32) as u32);
             let lower = hi & (1 << 31) == 0;
-            let ends = (lower && is_branch(lo)) || hi & (1 << 30) != 0;
+            let ebit = hi & (1 << 30) != 0;
+            let ends = (lower && is_branch(lo)) || ebit;
             if ends {
+                let a = (addr + 8 * words.len()) & mask;
+                let slot = u64::from_le_bytes(code[a..a + 8].try_into().unwrap());
+                let slot_branch = (slot >> 32) as u32 & (1 << 31) == 0 && is_branch(slot as u32);
+                let slot_ebit = (slot >> 32) as u32 & (1 << 30) != 0;
+                // a conditional branch: on past its delay slot (left when taken)
+                if super_on() && !ebit && is_cond_branch(lo) && !slot_branch && !slot_ebit && words.len() + 2 < max_pairs() {
+                    words.push(slot);
+                    continue;
+                }
                 // its delay slot / the pair after the E bit comes too
                 let a = (addr + 8 * words.len()) & mask;
                 words.push(u64::from_le_bytes(code[a..a + 8].try_into().unwrap()));
@@ -418,9 +471,24 @@ impl Translator {
         if std::env::var("VU_JIT_DUMP").map_or(false, |v| v == format!("{pc:X}")) {
             if let Some(c) = ctx.compiled_code() { std::fs::write("vu_block.bin", c.code_buffer()).ok(); }
         }
+        let prof: Option<Vec<(u32, u32, u32)>> = prof_path().map(|_| {
+            let base = ctx.func.params.base_srcloc();
+            ctx.compiled_code().map_or(Vec::new(), |c| c.buffer.get_srclocs_sorted().iter()
+                .map(|m| (m.start, m.end, if m.loc.is_rel() { m.loc.relocate(base).bits() } else { m.loc.as_abs().bits() }))
+                .chain(std::iter::once((0, c.code_info().total_size, 1000))).collect())
+        });
         module.clear_context(&mut ctx);
         module.finalize_definitions().expect("finalize block");
         let code = module.get_finalized_function(id);
+        if let (Some(path), Some(v)) = (prof_path(), prof) {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let a = code as usize;
+                let mut t = String::new();
+                for (s0, e0, c) in v { t += &format!("{:x} {:x} {c} {pc:x}\n", a + s0 as usize, a + e0 as usize); }
+                let _ = f.write_all(t.as_bytes());
+            }
+        }
         if std::env::var("VU_JIT_DUMP").map_or(false, |v| v == format!("{pc:X}")) { println!("block {pc:04X} at {code:p}"); }
         self.fctx = fctx;
         unsafe { std::mem::transmute::<*const u8, BlockFn>(code) }
@@ -503,6 +571,8 @@ impl Em<'_, '_> {
         if ret { Some(self.b.inst_results(call)[0]) } else { None }
     }
 
+    /// Debugging (VU_JIT_PROF): the part of the pair the next instructions belong to
+    fn cat(&mut self, c: u32) { if prof_path().is_some() { self.b.set_srcloc(ir::SourceLoc::new(c)); } }
     fn ld(&mut self, ty: ir::Type, off: usize) -> Value { self.b.ins().load(ty, self.fl, self.vu, off as i32) }
     fn st(&mut self, v: Value, off: usize) { self.b.ins().store(self.fl, v, self.vu, off as i32); }
 
@@ -514,7 +584,26 @@ impl Em<'_, '_> {
         // handler that may write VF
         let mut written: HashMap<(usize, usize), usize> = HashMap::new();
         let mut barrier: Option<usize> = None;
-        let dead = dead_pushes(words);
+        // conditional branches to a pair of this block: jump there rather than leave
+        // (delay slot index -> target index)
+        let n = words.len();
+        let mut jumps: HashMap<usize, usize> = HashMap::new();
+        let mut labels: HashMap<usize, ir::Block> = HashMap::new();
+        if super_on() && loop_on() {
+            for k in 1..n.saturating_sub(1) {
+                let (lo, hi) = (words[k - 1] as u32, (words[k - 1] >> 32) as u32);
+                if hi & (1 << 31) != 0 || !is_cond_branch(lo) { continue; }
+                let imm11 = ((lo as i32) << 21 >> 21) as u32;
+                let t = start.wrapping_add(8 * k as u32).wrapping_add(imm11.wrapping_mul(8));
+                if let Some(ti) = (0..n).find(|&i| start.wrapping_add(8 * i as u32) == t) {
+                    jumps.insert(k, ti);
+                    labels.entry(ti).or_insert_with(|| self.b.create_block());
+                }
+            }
+        }
+        let targets: Vec<bool> = (0..n).map(|i| labels.contains_key(&i)).collect();
+        let mut since_target: Option<usize> = None;
+        let dead = dead_pushes(words, &targets);
         if std::env::var_os("VU_JIT_DEAD").is_some() {
             let pushes = words.iter().filter(|&&w| matches!(super::vu::up_class((w >> 32) as u32), UpClass::Fm(..))).count();
             println!("block {start:04X}: {} pairs, {pushes} FMAC pushes, {} dead", words.len(), dead.iter().filter(|&&d| d).count());
@@ -526,11 +615,17 @@ impl Em<'_, '_> {
             }
         }
         for (i, &w) in words.iter().enumerate() {
+            if let Some(&l) = labels.get(&i) {
+                self.b.ins().jump(l, &[]);
+                self.b.switch_to_block(l);
+                since_target = Some(i);
+            }
             self.vwrites.clear();
             self.dead_push = dead[i];
             let (lo, hi) = (w as u32, (w >> 32) as u32);
             let lower = hi & (1 << 31) == 0;
             let a = start.wrapping_add(8 * i as u32);
+            self.cat(2);
             // a branch in the pair before: this pair is its delay slot
             let delay = if take_next {
                 let t = self.ld(types::I32, o.branch);
@@ -546,13 +641,15 @@ impl Em<'_, '_> {
             // Results land 4 cycles after their pair and the cycle moves on at least one a
             // pair, so only fields written in the last 3 pairs can stall: before the block
             // (pairs 0-2), or by this block's pairs (known), or by a handler's (not known)
+            self.cat(3);
             let reads = Vu::jit_reads(lo, hi);
             let near = |w: usize| i - w <= 3;
             let mut fields = Vec::new();
             for (r, m) in reads {
                 for f in 0..4 {
                     if m & (8 >> f) == 0 { continue; }
-                    let check = i < 3 || barrier.is_some_and(near) || written.get(&(r, f)).is_some_and(|&w| near(w));
+                    // (entered by a branch: what ran before isn't known)
+                    let check = i < 3 || since_target.is_some_and(|t| i - t < 3) || barrier.is_some_and(near) || written.get(&(r, f)).is_some_and(|&w| near(w));
                     if check { fields.push(r * 4 + f); }
                 }
             }
@@ -577,15 +674,18 @@ impl Em<'_, '_> {
             // WAITQ stalls the whole pair (the upper half reads the new Q)
             if lower && super::vu::is_waitq(lo) { self.call(h_wait_q as *const () as usize, &[], false); }
             // flags / Q / P due
+            self.cat(4);
             let cyc = self.ld(types::I64, o.cycle);
-            let due = self.ld(types::I64, o.next_due);
+            let due = self.ld(types::I64, o.qp_due);
             let d = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, cyc, due);
             if inline_on() { self.if_then(d, |e| e.land()); }
             else { self.if_then(d, |e| { e.call(h_land as *const () as usize, &[], false); }); }
             // PATH1 transfer in progress
+            self.cat(5);
             let k = self.ld(types::I8, o.kick_on);
             self.if_then(k, |e| { e.call(h_kick as *const () as usize, &[], false); });
             // the upper half (its result is committed after the lower half)
+            self.cat(if matches!(super::vu::up_class(hi), UpClass::Fm(..)) { 6 } else { 8 });
             let up = match super::vu::up_class(hi) {
                 UpClass::Nop => Up::None,
                 UpClass::Fm(k, src, acc) if inline_on() => self.fm(hi, k, src, acc),
@@ -607,6 +707,7 @@ impl Em<'_, '_> {
                 }
             };
             // the lower half
+            self.cat(9);
             if !lower {
                 let v = self.c32(lo);
                 self.st(v, o.i);
@@ -616,11 +717,13 @@ impl Em<'_, '_> {
             }
             self.helper_lower = lower && !(inline_on() && self.lower_inline(lo, a));
             if self.helper_lower {
+                self.cat(10);
                 let lv = self.c32(lo);
                 let lf = self.b.ins().iconst(self.ptr, Vu::jit_lower_fn(lo) as i64);
                 let vit = self.c32(Vu::jit_vit(lo));
                 self.call(h_lower as *const () as usize, &[lv, lf, vit], false);
             }
+            self.cat(11);
             match up {
                 Up::None => {}
                 Up::Helper => { self.call(h_commit as *const () as usize, &[], false); barrier = Some(i); }
@@ -630,6 +733,7 @@ impl Em<'_, '_> {
             for &(r, dest) in &self.vwrites {
                 for f in 0..4 { if dest & (8 >> f) != 0 { written.insert((r, f), i); } }
             }
+            self.cat(12);
             let cyc = self.ld(types::I64, o.cycle);
             let cyc = self.b.ins().iadd_imm_s(cyc, 1);
             self.st(cyc, o.cycle);
@@ -639,9 +743,25 @@ impl Em<'_, '_> {
                 // the branch's destination; a block entered at a delay slot stops there
                 let more = i + 1 < words.len();
                 let ending_here = hi & (1 << 30) != 0;
+                let jump = jumps.get(&i).map(|&ti| (ti, labels[&ti]));
                 self.if_then(taken, |e| {
                     e.st(t, o.pc);
-                    if more {
+                    if let Some((ti, l)) = jump {
+                        // (no E bit in the branch's pair or here: nothing to count down)
+                        if ti <= i {
+                            let cyc = e.ld(types::I64, o.cycle);
+                            let lim = e.b.ins().load(types::I64, e.fl, e.ctx, std::mem::offset_of!(Ctx, limit) as i32);
+                            let over = e.b.ins().icmp(IntCC::UnsignedGreaterThan, cyc, lim);
+                            let (out, go) = (e.b.create_block(), e.b.create_block());
+                            e.b.ins().brif(over, out, &[], go, &[]);
+                            e.b.switch_to_block(out);
+                            e.b.ins().return_(&[]);
+                            e.b.switch_to_block(go);
+                        }
+                        e.b.ins().jump(l, &[]);
+                        let dead = e.b.create_block();
+                        e.b.switch_to_block(dead);
+                    } else if more {
                         // (the E bit / ending bookkeeping this pair would have done)
                         if ending_next { e.end_count(o, None); }
                         if ending_here { let one = e.b.ins().iconst(types::I8, 1); e.st(one, o.ending); }
@@ -933,6 +1053,7 @@ impl Em<'_, '_> {
         let (res, fl) = if fast_on() { self.fmac_fast(k, s, bv, av) } else { self.fmac_exact(k, s, bv, av) };
         let _ = MSUB;
         // MAC: Z S U O groups, x in bit 3 of each
+        self.cat(7);
         const REV: [u8; 16] = [12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3];
         let rv = self.shuf(res, res, REV);
         let rf = self.shuf(fl, fl, REV);
@@ -977,8 +1098,20 @@ impl Em<'_, '_> {
         Up::Fm { res, acc, fd, dest }
     }
 
-    /// Land the flags due (as `land_flags`); Q / P through the interpreter's code
+    /// Land Q / P when due (with the flags due first)
     fn land(&mut self) {
+        self.land_fl();
+        let o = self.o;
+        let qp = self.ld(types::I64, o.qp_due);
+        let cyc = self.ld(types::I64, o.cycle);
+        let d = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, cyc, qp);
+        self.if_then(d, |e| { e.call(h_land as *const () as usize, &[], false); });
+    }
+
+    /// Land the MAC / status / CLIP results due (as `land_flags`). Translated code does
+    /// this only before reading them (handlers land for themselves): the same values as
+    /// landing at every pair, as the cycle only grows
+    fn land_fl(&mut self) {
         let o = self.o;
         let (head_b, pop_b, clip_b, macb, done_b) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
         self.b.ins().jump(head_b, &[]);
@@ -1025,23 +1158,6 @@ impl Em<'_, '_> {
         self.st(st, o.status);
         self.b.ins().jump(head_b, &[]);
         self.b.switch_to_block(done_b);
-        // Q / P; then the next one due
-        let qp = self.ld(types::I64, o.qp_due);
-        let cyc = self.ld(types::I64, o.cycle);
-        let d = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, cyc, qp);
-        self.if_then(d, |e| { e.call(h_land as *const () as usize, &[], false); });
-        let len = self.ld(types::I32, o.fl_len);
-        let head = self.ld(types::I32, o.fl_head);
-        let idx = self.b.ins().imul_imm_u(head, 24);
-        let idx = self.b.ins().uextend(self.ptr, idx);
-        let ea = self.b.ins().iadd(self.vu, idx);
-        let at = self.b.ins().load(types::I64, fl0, ea, base);
-        let max = self.b.ins().iconst(types::I64, -1);
-        let some = self.b.ins().icmp_imm_s(IntCC::NotEqual, len, 0);
-        let f = self.b.ins().select(some, at, max);
-        let qp = self.ld(types::I64, o.qp_due);
-        let nd = self.b.ins().umin(f, qp);
-        self.st(nd, o.next_due);
     }
 
     /// PS2 floats as sortable integers (exponent 0 = ±0 = 0, sign-magnitude)
@@ -1149,14 +1265,18 @@ impl Em<'_, '_> {
         let o = self.o;
         let cyc = self.ld(types::I64, o.cycle);
         let at = self.b.ins().iadd_imm_s(cyc, 4);
-        let head = self.ld(types::I32, o.fl_head);
+        // a full ring: its oldest is long due (16 pairs back), land it
         let len = self.ld(types::I32, o.fl_len);
         let full = self.b.ins().icmp_imm_s(IntCC::Equal, len, 16);
-        let h1 = self.b.ins().iadd_imm_s(head, 1);
-        let h1 = self.b.ins().band_imm_u(h1, 15);
-        let head = self.b.ins().select(full, h1, head);
-        let c15 = self.c32(15);
-        let len = self.b.ins().select(full, c15, len);
+        let (fold, go) = (self.b.create_block(), self.b.create_block());
+        self.b.set_cold_block(fold);
+        self.b.ins().brif(full, fold, &[], go, &[]);
+        self.b.switch_to_block(fold);
+        self.land_fl();
+        self.b.ins().jump(go, &[]);
+        self.b.switch_to_block(go);
+        let head = self.ld(types::I32, o.fl_head);
+        let len = self.ld(types::I32, o.fl_len);
         let idx = self.b.ins().iadd(head, len);
         let idx = self.b.ins().band_imm_u(idx, 15);
         let idx = self.b.ins().imul_imm_u(idx, 24);
@@ -1171,10 +1291,6 @@ impl Em<'_, '_> {
         self.b.ins().store(fl0, is_clip, ea, base + 20);
         let len = self.b.ins().iadd_imm_s(len, 1);
         self.st(len, o.fl_len);
-        self.st(head, o.fl_head);
-        let due = self.ld(types::I64, o.next_due);
-        let due = self.b.ins().umin(due, at);
-        self.st(due, o.next_due);
     }
 
     /// Write an FMAC result (as `commit`)
@@ -1260,6 +1376,7 @@ impl Em<'_, '_> {
         let sn = (op >> 6 & 31) << 2 | (op & 3);
         let ok = match key {
             0x00 | 0x01 | 0x04 | 0x05 | 0x08 | 0x09 | 0x20 | 0x21 | 0x24 | 0x25 | 0x28 | 0x29 | 0x2C..=0x2F => true,
+            0x10 | 0x12 | 0x13 | 0x14 | 0x16 | 0x17 | 0x18 | 0x1A | 0x1B | 0x1C => true,
             0x40 => matches!(sf, 0x30 | 0x31 | 0x32 | 0x34 | 0x35)
                 || (sf & 0x3C == 0x3C && matches!(sn, 0x30 | 0x31 | 0x34 | 0x35 | 0x36 | 0x37 | 0x3C | 0x3D)),
             _ => false,
@@ -1296,6 +1413,48 @@ impl Em<'_, '_> {
                 let v = self.b.ins().splat(types::I32X4, v);
                 self.dstore(q, dest, v);
             }
+            // flag reads (FCEQ FCAND FCOR / FSEQ FSAND FSOR / FMEQ FMAND FMOR / FCGET)
+            0x10 | 0x12 | 0x13 => {
+                self.land_fl();
+                let c = self.ld(types::I32, o.clip);
+                let m = op & 0xFF_FFFF;
+                let v = match key {
+                    0x10 => self.b.ins().icmp_imm_u(IntCC::Equal, c, m as i64),
+                    0x12 => { let x = self.b.ins().band_imm_u(c, m as i64); self.b.ins().icmp_imm_u(IntCC::NotEqual, x, 0) }
+                    _ => { let x = self.b.ins().bor_imm_u(c, m as i64); let x = self.b.ins().band_imm_u(x, 0xFF_FFFF); self.b.ins().icmp_imm_u(IntCC::Equal, x, 0xFF_FFFF) }
+                };
+                let v = self.b.ins().uextend(types::I32, v);
+                self.set_vi(1, v);
+            }
+            0x14 | 0x16 | 0x17 => {
+                self.land_fl();
+                let s = self.ld(types::I32, o.status);
+                let s = self.b.ins().band_imm_u(s, 0xFFF);
+                let imm = ((op >> 10 & 0x800) | (op & 0x7FF)) as i64;
+                let v = match key {
+                    0x14 => { let x = self.b.ins().icmp_imm_u(IntCC::Equal, s, imm); self.b.ins().uextend(types::I32, x) }
+                    0x16 => self.b.ins().band_imm_u(s, imm),
+                    _ => self.b.ins().bor_imm_u(s, imm),
+                };
+                self.set_vi(it, v);
+            }
+            0x18 | 0x1A | 0x1B => {
+                self.land_fl();
+                let m = self.ld(types::I32, o.mac);
+                let x = self.vi(is);
+                let v = match key {
+                    0x18 => { let c = self.b.ins().icmp(IntCC::Equal, m, x); self.b.ins().uextend(types::I32, c) }
+                    0x1A => self.b.ins().band(m, x),
+                    _ => self.b.ins().bor(m, x),
+                };
+                self.set_vi(it, v);
+            }
+            0x1C => {
+                self.land_fl();
+                let c = self.ld(types::I32, o.clip);
+                let v = self.b.ins().band_imm_u(c, 0xFFF);
+                self.set_vi(it, v);
+            }
             0x08 | 0x09 => {
                 let imm = (op >> 10 & 0x7800) | (op & 0x7FF);
                 let b = self.vi(is);
@@ -1318,8 +1477,25 @@ impl Em<'_, '_> {
             0x28 | 0x29 | 0x2C..=0x2F => {
                 let bvi = |e: &mut Self, r: usize| -> Value {
                     if r == 0 { return e.c32(0); }
+                    if !crate::ps2::vu::branch_vi_on() { return e.vi(r); }
+                    // `bvi`'s fast case inline: no stall and the last pair didn't write r
+                    let (slow, join) = (e.b.create_block(), e.b.create_block());
+                    e.b.set_cold_block(slow);
+                    e.b.append_block_param(join, types::I32);
+                    let st = e.ld(types::I8, o.br_stalled);
+                    let h0 = e.ld(types::I32, o.vi_hist);
+                    let m = e.b.ins().band_imm_u(h0, 0x810F_0000u32 as i64);
+                    let hit = e.b.ins().icmp_imm_u(IntCC::Equal, m, (0x8000_0000u32 | (r as u32) << 16) as i64);
+                    let free = e.b.ins().icmp_imm_u(IntCC::Equal, st, 0);
+                    let go = e.b.ins().band(hit, free);
+                    let fast = e.vi(r);
+                    e.b.ins().brif(go, slow, &[], join, &[ir::BlockArg::Value(fast)]);
+                    e.b.switch_to_block(slow);
                     let rv = e.c32(r as u32);
-                    e.call(h_bvi as *const () as usize, &[rv], true).unwrap()
+                    let v = e.call(h_bvi as *const () as usize, &[rv], true).unwrap();
+                    e.b.ins().jump(join, &[ir::BlockArg::Value(v)]);
+                    e.b.switch_to_block(join);
+                    e.b.block_params(join)[0]
                 };
                 let cond = match key {
                     0x28 | 0x29 => {
@@ -1402,7 +1578,7 @@ impl Em<'_, '_> {
             Some(b) => {
                 let now = self.vi(vt);
                 let ch = self.b.ins().icmp(IntCC::NotEqual, now, b);
-                let h = self.b.ins().bor_imm_u(b, super::vu::hist(vt, 0, false) as i64);
+                let h = self.b.ins().bor_imm_u(b, super::vu::hist(vt, 0, (0x10..=0x1C).contains(&key)) as i64);
                 let z = self.c32(0);
                 self.b.ins().select(ch, h, z)
             }
@@ -1523,6 +1699,9 @@ mod tests {
                 guard += 1;
             }
             assert!(j.runs > 0);
+            // (translated code lands flags only where they're read)
+            a.land_flags();
+            b.land_flags();
             if !same(&a, &b) || da != db {
                 for k in 0..n { let w = u64::from_le_bytes(code[8 * k..8 * k + 8].try_into().unwrap()); eprintln!("  {:08X} {:08X}", (w >> 32) as u32, w as u32); }
                 for reg in 0..32 { if a.vf[reg] != b.vf[reg] { eprintln!("  vf{reg} {:08X?} / {:08X?}", a.vf[reg], b.vf[reg]); } }

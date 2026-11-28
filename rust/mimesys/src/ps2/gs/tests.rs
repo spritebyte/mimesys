@@ -290,7 +290,9 @@ fn gs_frame_replay() {
     let t = std::time::Instant::now();
     let mut gs = super::replay(&file).expect("a GSF1 file");
     gs.flush();
-    println!("replayed in {:?} ({} batches, {} waits)", t.elapsed(), gs.flushes, gs.syncs);
+    println!("replayed in {:?} ({} batches, {} waits, {} prims, {} pixels)", t.elapsed(), gs.flushes, gs.syncs, gs.prims, gs.pixels);
+    // PS2_VRAM_OUT=file: all of VRAM after the replay (to compare drawing changes)
+    if let Ok(p) = std::env::var("PS2_VRAM_OUT") { std::fs::write(p, &gs.vram).unwrap(); }
     let mut out = Vec::new();
     let (w, h) = gs.display(&mut out);
     println!("display {w}x{h} PMODE {:X} SMODE2 {:X} DISPFB1 {:X} DISPLAY1 {:X} DISPFB2 {:X} DISPLAY2 {:X}", gs.pregs[0], gs.pregs[2], gs.pregs[7], gs.pregs[8], gs.pregs[9], gs.pregs[10]);

@@ -1011,7 +1011,9 @@ fn spr_from_destination_chain() {
 }
 
 /// SPU2 auto-DMA goes a block (512 samples' worth of a half) at a time as the input
-/// buffer plays: 12 KB on core 1 is 12 blocks, the last one sent 10 halves (53 ms) in
+/// buffer plays: 12 KB on core 1 is 12 blocks; one at the start, then one a half, so the
+/// last is sent 11 halves (58 ms) in. Right after the start MADR is one block in (Vice
+/// City's sound driver measures that and retries forever on two blocks)
 #[test]
 fn spu2_auto_dma_runs_at_the_audio_rate() {
     let mut d = super::iop_dma::IopDma::default();
@@ -1026,6 +1028,7 @@ fn spu2_auto_dma_runs_at_the_audio_rate() {
     d.write(0x1F80_1508, 0x0100_0201, u32::MAX);
     spu2.write16(0x5B0, 2);                         // core 1 ADMAS
     d.step(&mut ram, &mut sif, &mut sio2, &mut spu2);
+    assert_eq!(d.ch[7].madr, 0xE_7DF0 + 0x400);
     let ms = |c: i64| c * 1000 / 36_864_000;
     let mut t = 0i64;
     while d.ch[7].chcr >> 24 & 1 != 0 && t < 36_864_000 {
@@ -1034,7 +1037,7 @@ fn spu2_auto_dma_runs_at_the_audio_rate() {
         d.step(&mut ram, &mut sif, &mut sio2, &mut spu2);
         t += 10_000;
     }
-    assert!((52..=55).contains(&ms(t)), "{} ms", ms(t));
+    assert!((57..=60).contains(&ms(t)), "{} ms", ms(t));
     // without auto-DMA: the data at once, the end after the transfer's time
     spu2.write16(0x5B0, 0);
     d.write(0x1F80_1508, 0x0100_0201, u32::MAX);
@@ -1397,11 +1400,13 @@ fn vif1_frame_replay() {
         let c0 = vu.total_cycles;
         let h0 = vu.host_ns;
         let mut out: Vec<u8> = Vec::new();
+        let findq0: Option<usize> = std::env::var("VIF_FINDQ").ok().and_then(|v| v.parse().ok());
+        let progs = std::env::var_os("VIF_PROGS").is_some();
         let mut scan = |gs: &mut Vec<u128>, vu: &super::vu::Vu, vif: &super::vif::Vif, all: &mut usize, data: &[u8]| {
             for (k, q) in gs.iter().enumerate() {
                 let (x, y) = ((*q as u32) & 0xFFFF, ((*q >> 32) as u32) & 0xFFFF);
                 let z = (*q >> 64) as u32;
-                let findq: Option<usize> = std::env::var("VIF_FINDQ").ok().and_then(|v| v.parse().ok());
+                let findq = findq0;
                 if findq == Some(*all + k) { println!("qw {} is from program {} (started at {:X}), TOP {:X}, +{k} in its packet", *all + k, vu.programs - p0, vu.start_pc, vu.top); }
                 if x == 0xFFFF && y == 0xFFFF && (z == 0x8000_0000 || z == 0x7FFF_FFFF) {
                     bad += 1;
@@ -1411,7 +1416,7 @@ fn vif1_frame_replay() {
                 }
             }
             // VIF_PROGS=1: which program (count, start pc) made each stretch of GS output
-            if std::env::var_os("VIF_PROGS").is_some() && !gs.is_empty() {
+            if progs && !gs.is_empty() {
                 let w = |q: u32, k: usize| { let a = ((q as usize) * 16 + 4 * k) & (data.len() - 1); u32::from_le_bytes(data[a..a + 4].try_into().unwrap()) };
                 let vi12 = vu.vi[12] as u32;
                 println!("out {} +{} from program {} (start {:X}, TOP {:X}) vi12 {:X} handler {:X}", *all, gs.len(), vu.programs - p0, vu.start_pc, vu.top, vi12, w(vi12 + 69, 1));
@@ -1423,10 +1428,16 @@ fn vif1_frame_replay() {
         for e in ev {
             match e {
                 VifEvent::Feed(words, r, h) => {
-                    for w in words {
+                    // (VIF_WORDS=1: a word at a time)
+                    if std::env::var_os("VIF_WORDS").is_some() {
+                        for w in words {
+                            let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs, gif_running: r, gif_held: h };
+                            vif.feed(&[w], &mut cx);
+                            if !gs.is_empty() { scan(&mut gs, &vu, &vif, &mut all, &data); }
+                        }
+                    } else {
                         let mut cx = super::vif::VifCtx { code: &mut code, data: &mut data, vu: &mut vu, gs: &mut gs, gif_running: r, gif_held: h };
-                        // just before program n: its data memory and code
-                        vif.feed(&[w], &mut cx);
+                        vif.feed(&words, &mut cx);
                         if !gs.is_empty() { scan(&mut gs, &vu, &vif, &mut all, &data); }
                     }
                 }
@@ -1439,6 +1450,8 @@ fn vif1_frame_replay() {
             }
         }
         if let Ok(p) = std::env::var("VIF_OUT") { std::fs::write(p, &out).unwrap(); }
+        // VIF_DATA_OUT=file: VU1 data memory at the end
+        if let Ok(p) = std::env::var("VIF_DATA_OUT") { std::fs::write(p, &data).unwrap(); }
         println!("{} GS quadwords, {} programs, {} bad vertices", all, vu.programs - p0, bad);
         let ns = t0.elapsed().as_nanos() as f64;
         let cns = vu.jit.0.as_ref().map_or(0, |j| j.compile_ns) as f64;

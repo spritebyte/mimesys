@@ -36,6 +36,7 @@ pub struct Ctx {
 }
 
 /// A pixel's colour (RGB) and alpha from a stored value (display and blending)
+#[inline(always)]
 pub fn to_rgba(p: u32, psm: u32) -> ([u8; 3], u8) {
     match psm {
         PSMCT32 | PSMZ32 => ([p as u8, (p >> 8) as u8, (p >> 16) as u8], (p >> 24) as u8),
@@ -342,7 +343,9 @@ impl Job {
         // for (`sync`); bands are disjoint rows, so no two threads touch one pixel of a
         // frame or Z buffer; textures a batch reads aren't written in it
         let mem = unsafe { std::slice::from_raw_parts_mut(self.vram.ptr(), mem::VRAM_SIZE) };
-        let mut r = Raster { vram: mem, clut: self.clut.get().expect("CLUT"), y0: 0, y1: 2048, pixels: 0 };
+        let mem: &mut [u8; mem::VRAM_SIZE] = mem.try_into().expect("VRAM");
+        let clut: &[u32; 512] = self.clut.get().expect("CLUT").as_slice().try_into().expect("CLUT size");
+        let mut r = Raster { vram: mem, clut, y0: 0, y1: 2048, pixels: 0 };
         if self.single {
             for cmd in &self.cmds { r.draw(cmd); }
         } else {
@@ -489,33 +492,94 @@ fn pages_of(bp: u32, bw: u32, ph: i32, y0: i32, y1: i32) -> Pages {
 
 /// Where a batch draws: the memory, the CLUT, the rows this thread owns
 struct Raster<'a> {
-    vram: &'a mut [u8],
-    clut: &'a [u32],
+    // (fixed sizes: masked offsets then need no bounds checks)
+    vram: &'a mut [u8; mem::VRAM_SIZE],
+    clut: &'a [u32; 512],
     y0: i32,
     y1: i32,
     pixels: u64,
 }
 
+/// Frame formats with their own copy of the pixel pipeline (the rest share F_ANY's)
+const F_32: u8 = 0;
+const F_24: u8 = 1;
+const F_16: u8 = 2;
+const F_ANY: u8 = 3;
+/// Texture formats likewise: none, PSMCT32, PSMT8, PSMT4, any other
+const T_NONE: u8 = 0;
+const T_32: u8 = 1;
+const T_8: u8 = 2;
+const T_4: u8 = 3;
+const T_ANY: u8 = 4;
+
+#[inline(always)]
+fn fpsm_of<const F: u8>(c: &Ctx) -> u32 { match F { F_32 => PSMCT32, F_24 => PSMCT24, F_16 => PSMCT16, _ => c.fpsm } }
+#[inline(always)]
+fn f16_of<const F: u8>(c: &Ctx) -> bool { match F { F_32 | F_24 => false, F_16 => true, _ => c.f16 } }
+#[inline(always)]
+fn tpsm_of<const T: u8>(c: &Ctx) -> u32 { match T { T_32 => PSMCT32, T_8 => PSMT8, T_4 => PSMT4, _ => c.tpsm } }
+
+/// A texture coordinate (whole texels) after the wrap mode
+#[inline(always)]
+fn wrap(p: i32, size: u32, mode: u32, min: u32, max: u32) -> u32 {
+    match mode {
+        0 => (p as u32) & (size - 1),
+        1 => p.clamp(0, size as i32 - 1) as u32,
+        // (a game can set MINU above MAXU: no panic, MAX wins)
+        2 => p.max(min as i32).min(max as i32).max(0) as u32,
+        _ => ((p as u32) & min) | max,
+    }
+}
+
 impl Raster<'_> {
+    /// The primitive through a copy of the pipeline made for its frame and texture
+    /// formats (the format checks then go away from the per-pixel code)
     fn draw(&mut self, cmd: &Cmd) {
+        match cmd.c.fpsm {
+            PSMCT32 => self.draw_t::<F_32>(cmd),
+            PSMCT24 => self.draw_t::<F_24>(cmd),
+            PSMCT16 => self.draw_t::<F_16>(cmd),
+            _ => self.draw_t::<F_ANY>(cmd),
+        }
+    }
+
+    fn draw_t<const F: u8>(&mut self, cmd: &Cmd) {
+        if !cmd.c.tme { return self.draw_k::<F, T_NONE>(cmd); }
+        match cmd.c.tpsm {
+            PSMCT32 => self.draw_k::<F, T_32>(cmd),
+            PSMT8 => self.draw_k::<F, T_8>(cmd),
+            PSMT4 => self.draw_k::<F, T_4>(cmd),
+            _ => self.draw_k::<F, T_ANY>(cmd),
+        }
+    }
+
+    fn draw_k<const F: u8, const T: u8>(&mut self, cmd: &Cmd) {
         let c = &cmd.c;
         match &cmd.k {
-            Kind::Point(v) => self.draw_point(c, v),
-            Kind::Line(a, b) => self.draw_line(c, a, b),
-            Kind::Sprite(a, b) => self.draw_sprite(c, a, b),
-            Kind::Tri(a, b, d) => self.draw_triangle(c, a, b, d),
+            Kind::Point(v) => self.draw_point::<F, T>(c, v),
+            Kind::Line(a, b) => self.draw_line::<F, T>(c, a, b),
+            Kind::Sprite(a, b) => self.draw_sprite::<F, T>(c, a, b),
+            Kind::Tri(a, b, d) => self.draw_triangle::<F, T>(c, a, b, d),
         }
     }
 
     // ------------------------------------------------------------------ primitives
 
-    fn draw_point(&mut self, c: &Ctx, v: &Vertex) {
-        let c = *c;
-        let (u, t) = tex_coord(&c, v.s, v.t, v.q, v.u, v.v);
-        self.plot(&c, (v.x + 8) >> 4, (v.y + 8) >> 4, v.z, v.rgba.map(|x| x as i32), u, t, v.f as i32);
+    /// A pixel of a point or line (sprites and triangles clip before they get to `plot`)
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn plot_clipped<const F: u8, const T: u8>(&mut self, c: &Ctx, x: i32, y: i32, z: u32, rgba: [i32; 4], u: i32, v: i32, fog: i32) {
+        if x < c.sc[0] || x > c.sc[1] || y < c.sc[2] || y > c.sc[3] || x < 0 || y < self.y0 || y >= self.y1 { return; }
+        self.plot::<F, T>(c, x, y, z, rgba, u, v, fog);
     }
 
-    fn draw_line(&mut self, c: &Ctx, a: &Vertex, b: &Vertex) {
+    fn draw_point<const F: u8, const T: u8>(&mut self, c: &Ctx, v: &Vertex) {
+        let c = *c;
+        let (u, t) = tex_coord(&c, v.s, v.t, v.q, v.u, v.v);
+        self.plot_clipped::<F, T>(&c, (v.x + 8) >> 4, (v.y + 8) >> 4, v.z, v.rgba.map(|x| x as i32), u, t, v.f as i32);
+    }
+
+    fn draw_line<const F: u8, const T: u8>(&mut self, c: &Ctx, a: &Vertex, b: &Vertex) {
         let c = *c;
         let (x0, y0, x1, y1) = (a.x as f32 / 16.0, a.y as f32 / 16.0, b.x as f32 / 16.0, b.y as f32 / 16.0);
         let n = (x1 - x0).abs().max((y1 - y0).abs()).ceil().max(1.0) as i32;
@@ -525,13 +589,13 @@ impl Raster<'_> {
             let rgba = if c.iip { core::array::from_fn(|j| lerp(a.rgba[j] as f32, b.rgba[j] as f32) as i32) } else { b.rgba.map(|x| x as i32) };
             let z = lerp(a.z as f32, b.z as f32) as u32;
             let (u, t) = tex_coord(&c, lerp(a.s, b.s), lerp(a.t, b.t), lerp(a.q, b.q), lerp(a.u as f32, b.u as f32) as u32, lerp(a.v as f32, b.v as f32) as u32);
-            self.plot(&c, lerp(x0, x1).floor() as i32, lerp(y0, y1).floor() as i32, z, rgba, u, t, lerp(a.f as f32, b.f as f32) as i32);
+            self.plot_clipped::<F, T>(&c, lerp(x0, x1).floor() as i32, lerp(y0, y1).floor() as i32, z, rgba, u, t, lerp(a.f as f32, b.f as f32) as i32);
         }
     }
 
     /// Sprites: an axis-aligned rectangle; colour and Z from the second vertex,
     /// texture coordinates interpolated corner to corner
-    fn draw_sprite(&mut self, c: &Ctx, a: &Vertex, b: &Vertex) {
+    fn draw_sprite<const F: u8, const T: u8>(&mut self, c: &Ctx, a: &Vertex, b: &Vertex) {
         let c = *c;
         let (mut p, mut q) = (*a, *b);
         if p.x > q.x { std::mem::swap(&mut p.x, &mut q.x); std::mem::swap(&mut p.u, &mut q.u); std::mem::swap(&mut p.s, &mut q.s); }
@@ -544,7 +608,7 @@ impl Raster<'_> {
         let (w, h) = (((q.x - p.x) as f32).max(1.0), ((q.y - p.y) as f32).max(1.0));
         let rgba = b.rgba.map(|x| x as i32);
         // the column parts of the texture coordinates, once per sprite
-        let cols: Vec<(f32, f32)> = if c.tme {
+        let cols: Vec<(f32, f32)> = if T != T_NONE {
             (x0..x1).map(|x| {
                 let kx = ((x * 16 - p.x) as f32 / w).clamp(0.0, 1.0);
                 (p.s + (q.s - p.s) * kx, p.u as f32 + (q.u as f32 - p.u as f32) * kx)
@@ -555,18 +619,19 @@ impl Raster<'_> {
             let tt = p.t + (q.t - p.t) * ky;
             let vv = p.v as f32 + (q.v as f32 - p.v as f32) * ky;
             for x in x0..x1 {
-                let (u, t) = if c.tme {
+                let Some((dst, z)) = self.depth::<F>(&c, x, y, b.z) else { continue };
+                let (u, t) = if T != T_NONE {
                     let (s, uu) = cols[(x - x0) as usize];
                     tex_coord(&c, s, tt, b.q, uu as u32, vv as u32)
                 } else { (0, 0) };
-                self.plot(&c, x, y, b.z, rgba, u, t, b.f as i32);
+                self.shade::<F, T>(&c, x, y, z, dst, rgba, u, t, b.f as i32);
             }
         }
     }
 
     /// Triangles: edge functions in exact integers on the 12.4 grid (top-left rule), one
     /// span per row; attributes from barycentric weights (w / area, as before)
-    fn draw_triangle(&mut self, c: &Ctx, a: &Vertex, b: &Vertex, v2: &Vertex) {
+    fn draw_triangle<const F: u8, const T: u8>(&mut self, c: &Ctx, a: &Vertex, b: &Vertex, v2: &Vertex) {
         let c = *c;
         let vs = [a, b, v2];
         let px: [i64; 3] = vs.map(|v| v.x as i64);
@@ -601,8 +666,6 @@ impl Raster<'_> {
         let (fs, ft, fq) = (vs.map(|v| v.s as f64), vs.map(|v| v.t as f64), vs.map(|v| v.q as f64));
         let (fu, fv) = (vs.map(|v| v.u as f64), vs.map(|v| v.v as f64));
         let ff = vs.map(|v| v.f as f64);
-        let inside = |w: i64, k: usize| w > 0 || (w == 0 && tl[k]);
-        let _ = inside;
         for y in miny..=maxy {
             let w0 = [at(0, minx, y), at(1, minx, y), at(2, minx, y)];
             // the row's span from the edge equations: pixel n (from minx) is inside edge k
@@ -628,13 +691,21 @@ impl Raster<'_> {
                 // relative to vertex 0, so an attribute equal at all three vertices comes out
                 // exactly (Persona 3's text: the second pass needs Z >= the first pass's FFFF)
                 let mix = |f: &[f64; 3]| f[0] + l[1] * (f[1] - f[0]) + l[2] * (f[2] - f[0]);
-                let rgba = if c.iip { std::array::from_fn(|k| (mix(&fr[k]) + 0.5) as i32) } else { flat };
                 let z = mix(&fz).max(0.0) as u32;
-                let (u, t) = if c.tme {
-                    tex_coord(&c, mix(&fs) as f32, mix(&ft) as f32, mix(&fq) as f32, mix(&fu) as u32, mix(&fv) as u32)
-                } else { (0, 0) };
-                let f = if c.fge { mix(&ff) as i32 } else { 0 };
-                self.plot(&c, x, y, z, rgba, u, t, f);
+                // the Z test first: a hidden pixel needs no colour or texture
+                if let Some((dst, z)) = self.depth::<F>(&c, x, y, z) {
+                    let rgba = if c.iip { std::array::from_fn(|k| (mix(&fr[k]) + 0.5) as i32) } else { flat };
+                    // (only the coordinates the texture uses: UV or STQ)
+                    let (u, t) = if T == T_NONE {
+                        (0, 0)
+                    } else if c.fst {
+                        (mix(&fu) as u32 as i32, mix(&fv) as u32 as i32)
+                    } else {
+                        tex_coord(&c, mix(&fs) as f32, mix(&ft) as f32, mix(&fq) as f32, 0, 0)
+                    };
+                    let f = if c.fge { mix(&ff) as i32 } else { 0 };
+                    self.shade::<F, T>(&c, x, y, z, dst, rgba, u, t, f);
+                }
                 x += 1;
                 for k in 0..3 { w[k] += stepx[k]; }
             }
@@ -643,70 +714,108 @@ impl Raster<'_> {
 
     // ------------------------------------------------------------------ textures
 
-    /// A texel as RGBA (0-255)
-    #[inline]
-    fn texel(&self, c: &Ctx, u: i32, v: i32) -> [i32; 4] {
-        #[inline]
-        fn wrap(p: i32, size: u32, mode: u32, min: u32, max: u32) -> u32 {
-            match mode {
-                0 => (p as u32) & (size - 1),
-                1 => p.clamp(0, size as i32 - 1) as u32,
-                // (a game can set MINU above MAXU: no panic, MAX wins)
-                2 => p.max(min as i32).min(max as i32).max(0) as u32,
-                _ => ((p as u32) & min) | max,
-            }
-        }
-        let u = wrap(u, c.tw, c.wms, c.minu, c.maxu);
-        let v = wrap(v, c.th, c.wmt, c.minv, c.maxv);
-        let raw = mem::read(&self.vram, c.tpsm, u, v, c.tbp, c.tbw);
+    /// A texel as RGBA8 packed in a word (R in the low byte), at whole-texel
+    /// coordinates already wrapped
+    #[inline(always)]
+    fn fetch<const T: u8>(&self, c: &Ctx, u: u32, v: u32) -> u32 {
+        let psm = tpsm_of::<T>(c);
+        let raw = mem::read(self.vram, psm, u, v, c.tbp, c.tbw);
         let conv16 = |p: u32| {
-            let e = |x: u32| ((x << 3) | (x >> 2)) as i32;
+            let e = |x: u32| (x << 3) | (x >> 2);
             let a = if p & 0x8000 != 0 { c.ta1 } else if c.aem && p & 0x7FFF == 0 { 0 } else { c.ta0 };
-            [e(p & 31), e(p >> 5 & 31), e(p >> 10 & 31), a]
+            e(p & 31) | e(p >> 5 & 31) << 8 | e(p >> 10 & 31) << 16 | (a as u32) << 24
         };
-        match c.tpsm {
-            PSMCT32 | PSMZ32 => [raw as i32 & 255, (raw >> 8) as i32 & 255, (raw >> 16) as i32 & 255, (raw >> 24) as i32 & 255],
+        match psm {
+            PSMCT32 | PSMZ32 => raw,
             PSMCT24 | PSMZ24 => {
                 let a = if c.aem && raw & 0xFF_FFFF == 0 { 0 } else { c.ta0 };
-                [raw as i32 & 255, (raw >> 8) as i32 & 255, (raw >> 16) as i32 & 255, a]
+                raw & 0xFF_FFFF | (a as u32) << 24
             }
             PSMT8 | PSMT4 | PSMT8H | PSMT4HL | PSMT4HH => {
-                let e = self.clut[((c.clut_base + raw) % 512) as usize];
-                if c.cpsm == 0 { [e as i32 & 255, (e >> 8) as i32 & 255, (e >> 16) as i32 & 255, (e >> 24) as i32 & 255] } else { conv16(e) }
+                let e = self.clut[((c.clut_base + raw) & 511) as usize];
+                if c.cpsm == 0 { e } else { conv16(e) }
             }
             PSMCT16 | PSMCT16S | PSMZ16 | PSMZ16S => conv16(raw),
             // undefined formats (FFX's pause screen uses 9) read as PSMCT32, as PCSX2 has it
-            _ => [raw as i32 & 255, (raw >> 8) as i32 & 255, (raw >> 16) as i32 & 255, (raw >> 24) as i32 & 255],
+            _ => raw,
         }
+    }
+
+    /// The texture's colour at (u, v) in 1/16 texels: point sampled, or bilinear (a
+    /// neighbour with weight 0 isn't fetched: 1:1 sprites land on texel centres)
+    #[inline(always)]
+    fn sample<const T: u8>(&self, c: &Ctx, u: i32, v: i32) -> [i32; 4] {
+        let unpack = |p: u32| [(p & 255) as i32, (p >> 8 & 255) as i32, (p >> 16 & 255) as i32, (p >> 24) as i32];
+        if !c.linear {
+            let (u, v) = (wrap(u >> 4, c.tw, c.wms, c.minu, c.maxu), wrap(v >> 4, c.th, c.wmt, c.minv, c.maxv));
+            return unpack(self.fetch::<T>(c, u, v));
+        }
+        let (u, v) = (u - 8, v - 8);
+        let (iu, iv, fu, fv) = (u >> 4, v >> 4, (u & 15) as u64, (v & 15) as u64);
+        let u0 = wrap(iu, c.tw, c.wms, c.minu, c.maxu);
+        let v0 = wrap(iv, c.th, c.wmt, c.minv, c.maxv);
+        // the four channels in 16-bit lanes: weights are out of 16 each way, so every
+        // lane stays under 65536 (255 * 256 at most) and the lanes never carry
+        let spread = |p: u32| {
+            let p = p as u64;
+            (p & 0xFF) | (p & 0xFF00) << 8 | (p & 0xFF_0000) << 16 | (p & 0xFF00_0000) << 24
+        };
+        let a = spread(self.fetch::<T>(c, u0, v0));
+        let u1 = if fu != 0 { wrap(iu + 1, c.tw, c.wms, c.minu, c.maxu) } else { u0 };
+        let top = if fu != 0 { a * (16 - fu) + spread(self.fetch::<T>(c, u1, v0)) * fu } else { a * 16 };
+        let mix = if fv != 0 {
+            let v1 = wrap(iv + 1, c.th, c.wmt, c.minv, c.maxv);
+            let d = spread(self.fetch::<T>(c, u0, v1));
+            let bot = if fu != 0 { d * (16 - fu) + spread(self.fetch::<T>(c, u1, v1)) * fu } else { d * 16 };
+            top * (16 - fv) + bot * fv
+        } else { top * 16 };
+        let r = mix >> 8;
+        [(r & 0xFF) as i32, (r >> 16 & 0xFF) as i32, (r >> 32 & 0xFF) as i32, (r >> 48 & 0xFF) as i32]
     }
 
     // ------------------------------------------------------------------ the pixel pipeline
 
+    /// One pixel through the pipeline (inside the scissor and this thread's rows)
     #[allow(clippy::too_many_arguments)]
-    #[inline]
-    fn plot(&mut self, c: &Ctx, x: i32, y: i32, z: u32, rgba: [i32; 4], u: i32, v: i32, fog: i32) {
-        if x < c.sc[0] || x > c.sc[1] || y < c.sc[2] || y > c.sc[3] || x < 0 || y < self.y0 || y >= self.y1 { return; }
+    #[inline(always)]
+    fn plot<const F: u8, const T: u8>(&mut self, c: &Ctx, x: i32, y: i32, z: u32, rgba: [i32; 4], u: i32, v: i32, fog: i32) {
+        if let Some((dst, z)) = self.depth::<F>(c, x, y, z) { self.shade::<F, T>(c, x, y, z, dst, rgba, u, v, fog); }
+    }
+
+    /// The tests that only throw a pixel away, before its colour is worked out: the
+    /// destination alpha test and the Z test (a pixel failing either writes nothing,
+    /// whatever the alpha test says, so they can go first). The frame's pixel and the
+    /// clamped Z if it passes
+    #[inline(always)]
+    fn depth<const F: u8>(&self, c: &Ctx, x: i32, y: i32, z: u32) -> Option<(u32, u32)> {
         let (xu, yu) = (x as u32, y as u32);
+        let read_dst = || mem::read(self.vram, fpsm_of::<F>(c), xu, yu, c.fbp, c.fbw);
+        let dst = if c.date {
+            let dst = read_dst();
+            let bit = if f16_of::<F>(c) { dst >> 15 & 1 } else { dst >> 31 & 1 };
+            if bit != c.datm { return None; }
+            Some(dst)
+        } else { None };
+        let z = z.min(c.zmax);
+        if c.zte && c.ztst != 1 {
+            if c.ztst == 0 { return None; }
+            let old = mem::read(self.vram, c.zpsm, xu, yu, c.zbp, c.fbw);
+            let pass = if c.ztst == 2 { z >= old } else { z > old };
+            if !pass { return None; }
+        }
+        Some((dst.unwrap_or_else(read_dst), z))
+    }
+
+    /// The rest of the pipeline for a pixel that passed `depth`
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn shade<const F: u8, const T: u8>(&mut self, c: &Ctx, x: i32, y: i32, z: u32, dst: u32, rgba: [i32; 4], u: i32, v: i32, fog: i32) {
+        let (xu, yu) = (x as u32, y as u32);
+        let (fpsm, f16) = (fpsm_of::<F>(c), f16_of::<F>(c));
         // texture function
         let mut col = rgba;
-        if c.tme {
-            // (u, v in 1/16 texels)
-            let tx = if c.linear {
-                let (u, v) = (u - 8, v - 8);
-                let (iu, iv, fu, fv) = (u >> 4, v >> 4, u & 15, v & 15);
-                // (a neighbour with weight 0 isn't fetched: 1:1 sprites land on texel centres)
-                let a = self.texel(c, iu, iv);
-                let b = if fu != 0 { self.texel(c, iu + 1, iv) } else { a };
-                let (d, e) = if fv != 0 {
-                    let d = self.texel(c, iu, iv + 1);
-                    (d, if fu != 0 { self.texel(c, iu + 1, iv + 1) } else { d })
-                } else { (a, b) };
-                core::array::from_fn(|k| {
-                    let top = a[k] * (16 - fu) + b[k] * fu;
-                    let bot = d[k] * (16 - fu) + e[k] * fu;
-                    (top * (16 - fv) + bot * fv) >> 8
-                })
-            } else { self.texel(c, u >> 4, v >> 4) };
+        if T != T_NONE {
+            let tx = self.sample::<T>(c, u, v);
             let tcc = c.tcc;
             let m = |t: i32, f: i32| ((t * f) >> 7).min(255);
             col = match c.tfx {
@@ -743,48 +852,29 @@ impl Raster<'_> {
                 }
             }
         }
-        let dst = mem::read(&self.vram, c.fpsm, xu, yu, c.fbp, c.fbw);
-        // destination alpha test
-        if c.date {
-            let bit = if c.f16 { dst >> 15 & 1 } else { dst >> 31 & 1 };
-            if bit != c.datm { return; }
-        }
-        // Z test
-        let z = z.min(c.zmax);
-        if c.zte {
-            if c.ztst != 1 {
-                if c.ztst == 0 { return; }
-                let old = mem::read(&self.vram, c.zpsm, xu, yu, c.zbp, c.fbw);
-                let pass = if c.ztst == 2 { z >= old } else { z > old };
-                if !pass { return; }
-            }
-        }
+        // (destination alpha and Z tests: done in `depth`)
         // blending
         if c.abe && !(c.pabe && col[3] < 0x80) {
-            let (drgb, da) = to_rgba(dst, c.fpsm);
-            let src = col;
-            let pick = |sel: u32, k: usize| match sel { 0 => src[k], 1 => drgb[k] as i32, _ => 0 };
+            let (drgb, da) = to_rgba(dst, fpsm);
+            // A, B, D: source, destination or 0 (3 is reserved: 0 too)
+            let ops = [[col[0], col[1], col[2]], [drgb[0] as i32, drgb[1] as i32, drgb[2] as i32], [0; 3], [0; 3]];
+            let (oa, ob, od) = (ops[(c.asel[0] & 3) as usize], ops[(c.asel[1] & 3) as usize], ops[(c.asel[2] & 3) as usize]);
             let cc = match c.csel { 0 => col[3], 1 => da as i32, _ => c.fix };
-            for k in 0..3 {
-                let a = pick(c.asel[0], k);
-                let b = pick(c.asel[1], k);
-                let d = pick(c.asel[2], k);
-                col[k] = (((a - b) * cc) >> 7) + d;
-            }
+            for k in 0..3 { col[k] = (((oa[k] - ob[k]) * cc) >> 7) + od[k]; }
         }
         for k in 0..3 { col[k] = if c.clamp_col { col[k].clamp(0, 255) } else { col[k] & 255 }; }
         let mut a = col[3].clamp(0, 255) as u32;
         if c.fba { a |= 0x80; }
         if write_fb {
             let mut new = col[0] as u32 | (col[1] as u32) << 8 | (col[2] as u32) << 16 | a << 24;
-            if c.f16 { new = pack16(new); }
+            if f16 { new = pack16(new); }
             let mask = if keep_alpha { c.fmask_keep_a } else { c.fmask };
             let out = (new & !mask) | (dst & mask);
-            mem::write(&mut self.vram, c.fpsm, xu, yu, c.fbp, c.fbw, out);
+            mem::write(self.vram, fpsm, xu, yu, c.fbp, c.fbw, out);
             self.pixels += 1;
         }
         if write_z && c.zte {
-            mem::write(&mut self.vram, c.zpsm, xu, yu, c.zbp, c.fbw, z);
+            mem::write(self.vram, c.zpsm, xu, yu, c.zbp, c.fbw, z);
         }
     }
 }

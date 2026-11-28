@@ -250,11 +250,14 @@ impl Spu2 {
             0x1B0 => {
                 let was = old & 3 != 0;
                 if v & 3 == 0 || !was {
-                    // (re)started: play from the start, both halves to fill
+                    // (re)started: play from the start. One block is asked for now and
+                    // the next when the first half has played (so the DMA's MADR sits one
+                    // block in for a half: Vice City's sound driver measures the ADMA
+                    // position and retries forever if it is always two blocks in)
                     let k = &mut self.cores[c];
                     k.in_pos = 0;
                     k.in_half = 0;
-                    k.in_free = 2;
+                    k.in_free = 1;
                 }
             }
             0x1C0..=0x2DF => {

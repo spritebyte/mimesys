@@ -370,6 +370,14 @@ pub struct R5900 {
     /// INT0 / INT1 lines (Cause.IP2 / IP3)
     irq: u32,
     pub cycles: u64,
+    /// COP0 25: the performance counter control (PCCR) and the two counters (PCR0/1),
+    /// counted up to `pc_sync` cycles
+    #[serde(default)]
+    pccr: u32,
+    #[serde(default)]
+    pcr: [u32; 2],
+    #[serde(default)]
+    pc_sync: u64,
     #[serde(skip)]
     trace: Vec<(u32, u32, u32, u32)>,
     #[serde(skip)]
@@ -409,7 +417,7 @@ impl R5900 {
             cop0: [0; 32], fpr: [0; 32], acc: 0, fcr31: 0,
             tlb: vec![TlbEntry::default(); 48],
             map: vec![0; 1 << 20], mapped: Vec::new(),
-            scratch: vec![0; 0x4000], irq: 0, cycles: 0,
+            scratch: vec![0; 0x4000], irq: 0, cycles: 0, pccr: 0, pcr: [0; 2], pc_sync: 0,
             trace: Vec::new(), trace_pos: 0, trace_dumped: false, last_exception: None, tlb_gen: 0,
         };
         c.reset();
@@ -1100,13 +1108,37 @@ impl R5900 {
         Ok(1)
     }
 
+    /// Brings the performance counters up to now. Counting events are approximated as
+    /// one per cycle (event 1, processor cycles, is the one games time with: GTA3's
+    /// CTimer turns PCR0 into milliseconds at 294912 a ms); 0 and 15 count nothing.
+    /// The four mode bits (EXL/K/S/U) aren't told apart: any of them counts. A counter
+    /// sets bit 31 when it overflows 31 bits (no interrupt)
+    fn perf_sync(&mut self) {
+        let n = self.cycles.wrapping_sub(self.pc_sync);
+        self.pc_sync = self.cycles;
+        if self.pccr >> 31 == 0 || n == 0 { return; }
+        for k in 0..2 {
+            let ctl = self.pccr >> (k * 10);
+            let event = ctl >> 5 & 31;
+            if ctl & 0x1E == 0 || event == 0 || event == 15 { continue; }
+            let v = (self.pcr[k] & 0x7FFF_FFFF) as u64 + n;
+            let ovf = if v > 0x7FFF_FFFF { 1 << 31 } else { 0 };
+            self.pcr[k] = (v as u32 & 0x7FFF_FFFF) | ovf | (self.pcr[k] & 1 << 31);
+        }
+    }
+
     fn cop0_op(&mut self, bus: &mut dyn EeBus, i: u32, rs: u32, rt: u32, rd: u32) -> Res<u32> {
         if !self.kernel() && self.cop0[STATUS] & (1 << 28) == 0 { return Err(self.cop_unusable(0)); }
         match rs {
             0x00 => {
-                // MFC0 (Debug / Perf have sub-registers: read 0)
+                // MFC0 (MFPS / MFPC for 25: the low bits pick PCCR, PCR0 or PCR1; the
+                // debug registers (24) read 0)
                 let v = match rd as usize {
-                    24 | 25 => 0,
+                    24 => 0,
+                    25 => {
+                        self.perf_sync();
+                        match i & 0x3F { 1 => self.pcr[0], 3 => self.pcr[1], _ => self.pccr }
+                    }
                     RANDOM => self.random(),
                     r => self.cop0[r],
                 };
@@ -1128,7 +1160,12 @@ impl R5900 {
                         }
                     }
                     WIRED => { self.cop0[WIRED] = v & 0x3F; self.cop0[RANDOM] = 47; }
-                    24 | 25 => {}
+                    24 => {}
+                    // MTPS / MTPC
+                    25 => {
+                        self.perf_sync();
+                        match i & 0x3F { 1 => self.pcr[0] = v, 3 => self.pcr[1] = v, _ => self.pccr = v }
+                    }
                     _ => self.cop0[r] = v,
                 }
             }

@@ -103,29 +103,29 @@ fn tables() -> &'static Tables { &TABLES }
 const VMASK: usize = VRAM_SIZE - 1;
 
 /// Byte offset of a 32-bit pixel (PSMCT32 / 24, and Z32 / Z24 with `z`)
-#[inline]
+#[inline(always)]
 pub fn addr32(x: u32, y: u32, bp: u32, bw: u32, z: bool) -> usize {
     let (x, y) = (x & 2047, y & 2047);
     let page = (x >> 6) + (y >> 5) * bw.max(1);
     let t = tables();
     let i = ((y & 31) * 64 + (x & 63)) as usize;
     let off = if z { t.t32z[i] } else { t.t32[i] };
-    ((bp + page * 32) as usize * 256 + off as usize) & VMASK
+    ((bp + page * 32) as usize * 256 + off as usize) & (VMASK & !3)
 }
 
 /// Byte offset of a 16-bit pixel (`s`: PSMCT16S's block order; `z`: a Z format)
-#[inline]
+#[inline(always)]
 pub fn addr16(x: u32, y: u32, bp: u32, bw: u32, s: bool, z: bool) -> usize {
     let (x, y) = (x & 2047, y & 2047);
     let page = (x >> 6) + (y >> 6) * bw.max(1);
     let t = tables();
     let i = ((y & 63) * 64 + (x & 63)) as usize;
     let off = match (s, z) { (false, false) => t.t16[i], (true, false) => t.t16s[i], (false, true) => t.t16z[i], _ => t.t16sz[i] };
-    ((bp + page * 32) as usize * 256 + off as usize) & VMASK
+    ((bp + page * 32) as usize * 256 + off as usize) & (VMASK & !1)
 }
 
 /// Byte offset of an 8-bit pixel
-#[inline]
+#[inline(always)]
 pub fn addr8(x: u32, y: u32, bp: u32, bw: u32) -> usize {
     let (x, y) = (x & 2047, y & 2047);
     let page = (x >> 7) + (y >> 6) * (bw >> 1).max(1);
@@ -134,7 +134,7 @@ pub fn addr8(x: u32, y: u32, bp: u32, bw: u32) -> usize {
 }
 
 /// Nibble offset of a 4-bit pixel
-#[inline]
+#[inline(always)]
 pub fn addr4(x: u32, y: u32, bp: u32, bw: u32) -> usize {
     let (x, y) = (x & 2047, y & 2047);
     let page = (x >> 7) + (y >> 7) * (bw >> 1).max(1);
@@ -142,10 +142,10 @@ pub fn addr4(x: u32, y: u32, bp: u32, bw: u32) -> usize {
     ((bp + page * 32) as usize * 512 + off as usize) & (2 * VRAM_SIZE - 1)
 }
 
-#[inline] fn rd32(m: &[u8], o: usize) -> u32 { u32::from_le_bytes(m[o..o + 4].try_into().unwrap()) }
-#[inline] fn wr32(m: &mut [u8], o: usize, v: u32) { m[o..o + 4].copy_from_slice(&v.to_le_bytes()); }
-#[inline] fn rd16(m: &[u8], o: usize) -> u32 { u16::from_le_bytes(m[o..o + 2].try_into().unwrap()) as u32 }
-#[inline] fn wr16(m: &mut [u8], o: usize, v: u32) { m[o..o + 2].copy_from_slice(&(v as u16).to_le_bytes()); }
+#[inline(always)] fn rd32(m: &[u8], o: usize) -> u32 { u32::from_le_bytes(m[o..o + 4].try_into().unwrap()) }
+#[inline(always)] fn wr32(m: &mut [u8], o: usize, v: u32) { m[o..o + 4].copy_from_slice(&v.to_le_bytes()); }
+#[inline(always)] fn rd16(m: &[u8], o: usize) -> u32 { u16::from_le_bytes(m[o..o + 2].try_into().unwrap()) as u32 }
+#[inline(always)] fn wr16(m: &mut [u8], o: usize, v: u32) { m[o..o + 2].copy_from_slice(&(v as u16).to_le_bytes()); }
 
 /// Bits per pixel of a format
 pub fn bpp(psm: u32) -> u32 {
@@ -171,7 +171,7 @@ pub fn xfer_bpp(psm: u32) -> u32 {
 
 /// A pixel's raw value (32-bit formats: the whole word; 24: low 24 bits; 16: the halfword;
 /// 8 / 4: the index, also from the high bits of a 32-bit pixel for 8H / 4HL / 4HH)
-#[inline]
+#[inline(always)]
 pub fn read(m: &[u8], psm: u32, x: u32, y: u32, bp: u32, bw: u32) -> u32 {
     match psm {
         PSMCT32 => rd32(m, addr32(x, y, bp, bw, false)),
@@ -192,7 +192,7 @@ pub fn read(m: &[u8], psm: u32, x: u32, y: u32, bp: u32, bw: u32) -> u32 {
 }
 
 /// Store a pixel's raw value (the other bits of a shared word are kept)
-#[inline]
+#[inline(always)]
 pub fn write(m: &mut [u8], psm: u32, x: u32, y: u32, bp: u32, bw: u32, v: u32) {
     match psm {
         PSMCT32 => wr32(m, addr32(x, y, bp, bw, false), v),

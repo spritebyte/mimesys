@@ -431,3 +431,20 @@ fn ei_and_di_do_nothing_in_user_mode_without_edi() {
     c.step(&mut ram);
     assert_ne!(c.cop0[STATUS] & ST_EIE, 0);
 }
+
+/// COP0 25: PCCR set to count processor cycles on PCR0 (as GTA3's CTimer does), PCR0
+/// cleared, then read back after some instructions: it counted them. Without counters
+/// GTA3's game clock stood still (fades never ended, the intro cutscene drew nothing)
+#[test]
+fn perf_counter_counts_cycles() {
+    // PCCR = CTE | EXL0 K0 S0 U0 | EVENT0 1; PCR0 = 0; 10 NOPs; MFPC r4, 0; MFPS r5
+    let mut code = vec![lui(2, 0x8000), ori(2, 2, 0x3E), r(0x10, 4, 0, 25, 0, 1), r(0x10, 4, 2, 25, 0, 0)];
+    code.extend([NOP; 10]);
+    code.extend([r(0x10, 0, 4, 25, 0, 1), r(0x10, 0, 5, 25, 0, 0)]);
+    let (c, _) = run(&code, code.len());
+    assert!((10..=14).contains(&reg(&c, 4)), "PCR0 {}", reg(&c, 4));
+    assert_eq!(reg(&c, 5) as u32, 0x8000_003E);
+    // counting off: PCR1 (event 0) stays 0
+    let (c, _) = run(&[r(0x10, 0, 6, 25, 0, 3)], 1);
+    assert_eq!(reg(&c, 6), 0);
+}

@@ -132,14 +132,63 @@ impl Vif {
             }
             return false;
         }
-        for (k, &w) in words.iter().enumerate() {
-            let irq = self.word(w, cx);
+        let mut k = 0;
+        while k < words.len() {
+            // a command's data, many words at once
+            let n = if self.left > 1 { self.bulk(&words[k..], cx) } else { 0 };
+            let irq = if n > 0 {
+                k += n;
+                self.left == 0 && self.done()
+            } else {
+                k += 1;
+                self.word(words[k - 1], cx)
+            };
             if irq || self.flusha_wait || self.p3_packet_wait {
-                self.pending.extend(&words[k + 1..]);
+                self.pending.extend(&words[k..]);
                 return irq;
             }
         }
         false
+    }
+
+    /// Data words of an UNPACK / DIRECT / MPG straight from the stream (as `data` word by
+    /// word); the words used, 0: not one of these (or debugging)
+    fn bulk(&mut self, words: &[u32], cx: &mut VifCtx) -> usize {
+        if crate::common::cpu::r5900::src_track() || vif_log() { return 0; }
+        let n = (self.left as usize).min(words.len());
+        let w = &words[..n];
+        match self.code >> 24 & 0x7F {
+            0x60..=0x7F => {
+                self.buf.extend_from_slice(w);
+                self.left -= n as u32;
+                if self.left == 0 { self.unpack(cx); }
+            }
+            0x50 | 0x51 if self.vif1 => {
+                let mut i = 0;
+                // finish a quadword begun earlier, then whole ones
+                while i < n && !self.buf.is_empty() { self.data(w[i], cx); i += 1; }
+                while i + 4 <= n {
+                    let q = w[i] as u128 | (w[i + 1] as u128) << 32 | (w[i + 2] as u128) << 64 | (w[i + 3] as u128) << 96;
+                    cx.gs.push(q);
+                    self.direct_qw += 1;
+                    self.left -= 4;
+                    i += 4;
+                }
+                for &x in &w[i..] { self.data(x, cx); }
+            }
+            0x4A => {
+                let mask = cx.code.len() - 1;
+                for &x in w {
+                    let a = self.addr as usize & mask;
+                    cx.code[a..a + 4].copy_from_slice(&x.to_le_bytes());
+                    self.addr += 4;
+                }
+                cx.vu.code_gen += n as u64;
+                self.left -= n as u32;
+            }
+            _ => return 0,
+        }
+        n
     }
 
     /// A command finished: its I bit stalls the VIF and interrupts
@@ -288,8 +337,21 @@ impl Vif {
         // WL 0 means 256 (PCSX2): with CL 1 that's one row read, the rest filled (KH2)
         let (cl, wl) = (self.cl, if self.wl == 0 { 256 } else { self.wl });
         let qmask = (cx.data.len() / 16 - 1) as u32;
+        let mut buf = std::mem::take(&mut self.buf);
+        if !masked && !(self.vif1 && crate::common::cpu::r5900::vu1_src_cfg().is_some()) && !slow_unpack() {
+            let f = match (vn, vl) {
+                (0, 0) => fast::<0, 0>, (0, 1) => fast::<0, 1>, (0, 2) => fast::<0, 2>,
+                (1, 0) => fast::<1, 0>, (1, 1) => fast::<1, 1>, (1, 2) => fast::<1, 2>,
+                (2, 0) => fast::<2, 0>, (2, 1) => fast::<2, 1>, (2, 2) => fast::<2, 2>,
+                (3, 0) => fast::<3, 0>, (3, 1) => fast::<3, 1>, (3, 2) => fast::<3, 2>,
+                _ => fast::<3, 3>,
+            };
+            f(self, &mut buf, cx.data, num, cl, wl, qmask, unsigned);
+            buf.clear();
+            self.buf = buf;
+            return;
+        }
         let mut bitpos = 0usize;
-        let buf = std::mem::take(&mut self.buf);
         // `bits` bits at bit `p` (elements never span more than two words)
         let peek = |p: usize, bits: usize| -> u32 {
             let lo = buf.get(p / 32).copied().unwrap_or(0) as u64;
@@ -363,6 +425,69 @@ impl Vif {
             }
         }
     }
+}
+
+/// An UNPACK without the mask (as `Vif::unpack`'s general loop): format VN / VL known
+/// at compile time
+#[allow(clippy::too_many_arguments)]
+fn fast<const VN: usize, const VL: usize>(v: &mut Vif, buf: &mut Vec<u32>, data: &mut [u8], num: u32, cl: u32, wl: u32, qmask: u32, unsigned: bool) {
+    let len_bits = buf.len() * 32;
+    // (padding: an element read never runs past the end)
+    buf.push(0);
+    buf.push(0);
+    let peek = |p: usize, bits: usize| -> u32 {
+        let i = p / 32;
+        let x = (buf[i] as u64 | (buf[i + 1] as u64) << 32) >> (p % 32);
+        (if bits >= 32 { x } else { x & ((1u64 << bits) - 1) }) as u32
+    };
+    let bits = if VL == 3 { 16 } else { 32 >> VL };
+    let ext = |x: u32| -> u32 {
+        if bits == 32 || unsigned { x } else { ((x << (32 - bits)) as i32 >> (32 - bits)) as u32 }
+    };
+    let mode = if VL == 3 { 0 } else { v.mode };
+    let mut bitpos = 0usize;
+    for n in 0..num {
+        let in_cycle = n % wl;
+        if !(wl <= cl || in_cycle < cl) { continue; }       // write-filled, mask off: left as it was
+        let addr = if wl <= cl { v.addr + (n / wl) * cl + in_cycle } else { v.addr + n };
+        let mut vals = [0u32; 4];
+        let mut w_ok = true;
+        if VL == 3 {
+            let x = peek(bitpos, 16);
+            bitpos += 16;
+            vals = [(x & 0x1F) << 3, (x >> 5 & 0x1F) << 3, (x >> 10 & 0x1F) << 3, (x >> 15 & 1) << 7];
+        } else {
+            let mut e = [0u32; 4];
+            for x in e.iter_mut().take(VN + 1) { *x = ext(peek(bitpos, bits)); bitpos += bits; }
+            match VN {
+                0 => vals = [e[0]; 4],
+                1 => vals = [e[0], e[1], e[0], e[1]],
+                2 => {
+                    w_ok = bitpos + bits <= len_bits;
+                    vals = [e[0], e[1], e[2], if w_ok { ext(peek(bitpos, bits)) } else { 0 }];
+                }
+                _ => vals = e,
+            }
+        }
+        let a = ((addr & qmask) * 16) as usize;
+        let row = &mut data[a..a + 16];
+        for k in 0..4 {
+            if k == 3 && !w_ok { continue; }
+            let d = vals[k];
+            let x = match mode {
+                1 => d.wrapping_add(v.row[k]),
+                2 => { v.row[k] = v.row[k].wrapping_add(d); v.row[k] }
+                _ => d,
+            };
+            row[4 * k..4 * k + 4].copy_from_slice(&x.to_le_bytes());
+        }
+    }
+}
+
+/// Debugging: VIF_SLOW_UNPACK=1 sends every UNPACK through the general loop
+fn slow_unpack() -> bool {
+    static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *S.get_or_init(|| std::env::var_os("VIF_SLOW_UNPACK").is_some())
 }
 
 /// Debugging (tests): VIF_LOG prints every VIF1 command

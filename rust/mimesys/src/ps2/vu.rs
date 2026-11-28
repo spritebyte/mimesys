@@ -193,6 +193,12 @@ mod branch_serde {
 /// No branch waiting for its delay slot
 pub(crate) const NO_BRANCH: u32 = u32::MAX;
 
+/// PS2_VU_BRANCH_VI=0: branches read VI as it stands
+pub(crate) fn branch_vi_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PS2_VU_BRANCH_VI").map_or(true, |v| v != "0"))
+}
+
 /// A `vi_hist` entry: VI `r` was written (it held `old`), by a flag read when `flag`
 pub(crate) fn hist(r: usize, old: u16, flag: bool) -> u32 { 1 << 31 | (flag as u32) << 24 | (r as u32) << 16 | old as u32 }
 
@@ -277,7 +283,7 @@ impl Vu {
         self.cycle = 0;
     }
 
-    fn land_flags(&mut self) {
+    pub(crate) fn land_flags(&mut self) {
         while let Some(f) = self.flags.front().copied() {
             if f.at > self.cycle { break; }
             self.flags.pop_front();
@@ -354,6 +360,7 @@ impl Vu {
             self.recalc_due();
             let mut j = self.jit.0.take().unwrap_or_default();
             let mut ctx = super::vu_jit::Ctx::new(self as *mut Vu, data, path1 as *mut _);
+            ctx.limit = start + MAX_CYCLES;
             let mut tk = 0;
             let mut reported = false;
             let mut leader = true;
@@ -393,7 +400,10 @@ impl Vu {
             if self.cycle - start > MAX_CYCLES { self.running = false; }
         }
         self.pump_kick(data, path1, u64::MAX);
-        if let Some((v, d, p, _)) = reference {
+        if let Some((mut v, d, p, _)) = reference {
+            // (translated code lands flags only when read: compare with all due landed)
+            v.land_flags();
+            self.land_flags();
             let same = v.pc == self.pc && v.cycle == self.cycle && v.vf == self.vf && v.vi == self.vi && v.acc == self.acc
                 && v.q == self.q && v.p == self.p && v.mac == self.mac && v.status == self.status && v.clip == self.clip
                 && d == *data && p == *path1;
@@ -527,11 +537,15 @@ impl Vu {
         self.pump_kick(data, path1, self.cycle);
         self.kick_on = self.kick.is_some();
     }
+    // (translated code lands MAC / status / CLIP only where they're read: the handlers
+    // land what's due first)
     pub(crate) fn jit_upper(&mut self, hi: u32, f: fn(&mut Vu, u32) -> Option<(Dst, [u32; 4], bool)>) {
+        self.land_flags();
         self.up_pend = f(self, hi);
         self.recalc_due();
     }
     pub(crate) fn jit_lower(&mut self, lo: u32, f: fn(&mut Vu, u32, &mut [u8], &mut Vec<u128>), vit: u32, data: &mut [u8], path1: &mut Vec<u128>) {
+        self.land_flags();
         let h = &mut self.vi_hist;
         (h[3], h[2], h[1]) = (h[2], h[1], h[0]);
         let r = (vit & 0xFF) as usize;
@@ -838,9 +852,7 @@ impl Vu {
     /// back from there; not when the branch itself stalled. Conditional branches only (as
     /// PCSX2). PS2_VU_BRANCH_VI=0: off
     fn bvi(&self, r: usize) -> u16 {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let on = *ON.get_or_init(|| std::env::var("PS2_VU_BRANCH_VI").map_or(true, |v| v != "0"));
-        if r == 0 || !on || self.br_stalled { return self.vi[r]; }
+        if r == 0 || !branch_vi_on() || self.br_stalled { return self.vi[r]; }
         let h0 = self.vi_hist[0];
         if !(h0 >> 31 != 0 && (h0 >> 16 & 15) as usize == r && h0 >> 24 & 1 == 0) { return self.vi[r]; }
         let mut v = self.vi[r];

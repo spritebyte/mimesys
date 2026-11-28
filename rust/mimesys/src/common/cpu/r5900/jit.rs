@@ -162,6 +162,9 @@ pub struct Jit {
     pub stale: u64,
     /// cycles skipped in polling loops (taken by the system's speed report)
     pub idle: u64,
+    /// the polling loop the last run ended in (pc, registers): the next run skips its
+    /// wait after one round that changes nothing
+    poll: Option<(u32, [u128; 32], u128, u128)>,
 }
 
 unsafe impl Send for Jit {}
@@ -228,6 +231,45 @@ fn kind(i: u32) -> K {
     }
 }
 
+/// The GPRs a pure instruction (ALU, load, branch: see `kind`) reads and writes, as bit
+/// masks (bit 32: HI / LO, which make it no polling loop)
+fn regs_of(i: u32) -> (u64, u64) {
+    let (rs, rt, rd) = (1u64 << (i >> 21 & 31), 1u64 << (i >> 16 & 31), 1u64 << (i >> 11 & 31));
+    let (r, w) = match i >> 26 {
+        0x00 => match i & 0x3F {
+            0x08 => (rs, 0),
+            0x09 => (rs, rd),
+            0x10..=0x13 => (1 << 32, 1 << 32),
+            _ => (rs | rt, rd),
+        },
+        0x01 => (rs, if matches!(i >> 16 & 31, 0x10..=0x13) { 1 << 31 } else { 0 }),
+        0x02 => (0, 0),
+        0x03 => (0, 1 << 31),
+        0x04 | 0x05 | 0x14 | 0x15 => (rs | rt, 0),
+        0x06 | 0x07 | 0x16 | 0x17 => (rs, 0),
+        0x2F | 0x33 => (rs, 0),
+        // immediates and loads: rs in, rt out
+        _ => (rs, rt),
+    };
+    (r & !1, w & !1)
+}
+
+/// A pure block that is a polling loop if it loops to itself: every register it reads is
+/// either one it never writes or one it wrote earlier in the same round, so each round
+/// gives the same result until memory changes. (A counting loop reads last round's value:
+/// it goes round inside its block as before.)
+fn polls(ins: &[u32]) -> bool {
+    let all = ins.iter().fold(0u64, |m, &i| m | regs_of(i).1);
+    if all & 1 << 32 != 0 { return false; }
+    let mut done = 0u64;
+    for &i in ins {
+        let (r, w) = regs_of(i);
+        if r & all & !done != 0 { return false; }
+        done |= w;
+    }
+    true
+}
+
 fn off_gpr(r: u32) -> i32 { (std::mem::offset_of!(R5900, gpr) + 16 * r as usize) as i32 }
 fn off_hi() -> i32 { std::mem::offset_of!(R5900, hi) as i32 }
 fn off_lo() -> i32 { std::mem::offset_of!(R5900, lo) as i32 }
@@ -241,7 +283,7 @@ impl Jit {
             module: None, fctx: FunctionBuilderContext::new(),
             slots: vec![(NONE, NONE); SLOTS], index: HashMap::new(), blocks: Vec::new(),
             cold: HashMap::new(), hot: 16, tlb: 0, mem: None, compiled: 0, names: 0,
-            runs: 0, linked: 0, translated: 0, stale: 0, idle: 0,
+            runs: 0, linked: 0, translated: 0, stale: 0, idle: 0, poll: None,
         }
     }
 
@@ -381,17 +423,18 @@ impl Jit {
             K::Mem => matches!(w >> 26, 0x20 | 0x21 | 0x23..=0x25 | 0x27 | 0x37),
             _ => false,
         });
+        let poll = pure && polls(&ins);
         self.translated += 1;
         self.compiled += 1;
         let mut links = no_links();
-        let (f, targets) = self.emit::<B>(va, &ins, &links, idx);
+        let (f, targets) = self.emit::<B>(va, &ins, &links, idx, poll);
         for (k, t) in targets.into_iter().enumerate() { links[k].pc = t; }
         Block { f: Some(f), page, pgen, src, words, check, pure, links }
     }
 
     /// The host code for `ins` at `va` (block `idx`, link cells `links`), and the fixed
     /// exits in link cell order
-    fn emit<B: EeBus>(&mut self, va: u32, ins: &[u32], links: &[Link; 2], idx: u32) -> (BlockFn, Vec<u32>) {
+    fn emit<B: EeBus>(&mut self, va: u32, ins: &[u32], links: &[Link; 2], idx: u32, poll: bool) -> (BlockFn, Vec<u32>) {
         self.names += 1;
         let name = format!("ee{}", self.names);
         let mut fctx = std::mem::replace(&mut self.fctx, FunctionBuilderContext::new());
@@ -420,7 +463,7 @@ impl Jit {
             b.ins().jump(head, &[]);
             b.switch_to_block(head);
             let mut e = Em { b: &mut b, ptr, fl, ctx: c, cpu, cyc, n: 0, exec: h_exec::<B> as *const () as usize, cc, sig: None, start: va, head,
-                links: links.as_ptr() as usize, targets: Vec::new(), idx };
+                links: links.as_ptr() as usize, targets: Vec::new(), idx, poll };
             e.block(va, ins);
             targets = std::mem::take(&mut e.targets);
             b.seal_all_blocks();
@@ -456,6 +499,9 @@ struct Em<'a, 'b> {
     targets: Vec<u32>,
     /// this block's number
     idx: u32,
+    /// a polling loop (see `polls`): it doesn't go round by itself, so the dispatcher can
+    /// see it's waiting and skip the wait
+    poll: bool,
 }
 
 impl Em<'_, '_> {
@@ -568,7 +614,7 @@ impl Em<'_, '_> {
     /// The end of a branch to `pc`, which can be the block's own start (`to`, the
     /// destination if taken): then round again while within the budget
     fn finish_to(&mut self, pc: Value, to: Option<u32>, targets: &[u32]) {
-        if to == Some(self.start) {
+        if to == Some(self.start) && !self.poll {
             let x = self.b.use_var(self.cyc);
             let total = self.b.ins().iadd_imm_u(x, self.n as i64);
             let bud = self.b.ins().load(types::I32, self.fl, self.ctx, ctx_off(std::mem::offset_of!(Ctx, budget)));
@@ -943,6 +989,13 @@ impl R5900 {
         // polling loops: the registers at the start of a run of pure blocks
         let mut snap: Option<(u32, [u128; 32], u128, u128)> = None;
         let mut pure_run = 0u32;
+        // still in the polling loop the last run skipped: one round, then compare
+        if let Some(p) = jit.poll.take() {
+            if p.0 == self.pc && p.1 == self.gpr && p.2 == self.hi && p.3 == self.lo {
+                snap = Some(p);
+                pure_run = 3;
+            }
+        }
         while c < target {
             // a DMA was started: end the slice so it runs now (not inside a delay slot)
             if c > 0 && !self.branch_pending && super::slice_break() { break; }
@@ -967,10 +1020,14 @@ impl R5900 {
                         let n = target - c;
                         self.advance(n);
                         jit.idle += n as u64;
+                        jit.poll = snap;
                         return target;
                     } else {
                         // (snapshots and compares are spaced out: a counting loop pays for them)
-                        if pure_run % 16 == 0 { snap = Some((pc, self.gpr, self.hi, self.lo)); }
+                        // (and again when the run moved on to another loop)
+                        if pure_run % 16 == 0 || (pure_run % 4 == 0 && snap.as_ref().is_some_and(|s| s.0 != pc)) {
+                            snap = Some((pc, self.gpr, self.hi, self.lo));
+                        }
                         pure_run += 1;
                     }
                     if !self.trace.is_empty() {
@@ -1178,7 +1235,10 @@ mod tests {
             // the interpreter to the same point (the end is a J-to-itself loop)
             let mut k = 0;
             while a.cycles < b.cycles && k < 100_000 { a.step(&mut ra); k += 1; }
-            assert_eq!((a.pc, a.cycles, a.cop0[COUNT]), (b.pc, b.cycles, b.cop0[COUNT]), "{ctx}");
+            // (the JIT skips the wait in the end loop from its start: the interpreter can
+            // be in its delay slot then)
+            let apc = if a.pc == end + 4 { end } else { a.pc };
+            assert_eq!((apc, a.cycles, a.cop0[COUNT]), (b.pc, b.cycles, b.cop0[COUNT]), "{ctx}");
             for r in 0..32 { assert_eq!(a.gpr[r], b.gpr[r], "r{r} {ctx}"); }
             assert_eq!((a.hi, a.lo, a.sa), (b.hi, b.lo, b.sa), "{ctx}");
             assert!(ra.0 == rb.0, "memory {ctx}");
@@ -1203,10 +1263,13 @@ mod tests {
         jit.hot = 1;
         // one call: the loop (and the J loop after it) stay inside their blocks
         b.run_jit(&mut rb, &mut jit, 10_000);
-        assert!(jit.runs < 10);
+        assert!(jit.runs < 10, "runs {} idle {}", jit.runs, jit.idle);
         while a.cycles < b.cycles { a.step(&mut ra); }
         assert_eq!((b.gpr[2], b.gpr[3]), (0, 1000));
-        assert_eq!((a.pc, a.gpr[3], a.cycles, a.cop0[COUNT]), (b.pc, b.gpr[3], b.cycles, b.cop0[COUNT]));
+        // (the J loop is a polling loop: skipped from its start, the interpreter may be in
+        // its delay slot)
+        let apc = if a.pc == BASE + 20 { BASE + 16 } else { a.pc };
+        assert_eq!((apc, a.gpr[3], a.cycles, a.cop0[COUNT]), (b.pc, b.gpr[3], b.cycles, b.cop0[COUNT]));
         while a.pc != BASE + 16 { a.step(&mut ra); }
         // a small budget: out to the run loop and back in
         let mut c = R5900::new();
@@ -1215,6 +1278,31 @@ mod tests {
         c.jump(BASE);
         while c.pc != BASE + 16 { c.run_jit(&mut rc, &mut jit, 7); }
         assert_eq!((c.gpr[2], c.gpr[3]), (0, 1000));
+    }
+
+    #[test]
+    fn a_polling_loop_skips_its_wait() {
+        // BASE: LW r2, 0(r9); BEQ r2, r0, BASE; NOP; ADDIU r3, r3, 1; J BASE+16; NOP
+        let code = [i(0x23, 9, 2, 0), i(0x04, 2, 0, 0xFFFE), 0, i(0x09, 3, 3, 1), 2 << 26 | ((BASE + 16) >> 2 & 0x03FF_FFFF), 0];
+        let mut ram = Ram(vec![0; 0x40_0000]);
+        for (k, w) in code.iter().enumerate() { ram.write32(0x1000 + 4 * k as u32, *w); }
+        let mut c = R5900::new();
+        c.jump(BASE);
+        c.gpr[9] = 0x8010_0000;
+        let mut jit = Jit::new();
+        jit.hot = 1;
+        // a few rounds to see it changes nothing, then the rest of the budget is skipped
+        assert_eq!(c.run_jit(&mut ram, &mut jit, 10_000), 10_000);
+        let (runs, idle) = (jit.runs, jit.idle);
+        assert!(runs < 12 && idle > 9_000, "runs {runs} idle {idle}");
+        // the next run: one round to look at memory, then skipped again
+        assert_eq!(c.run_jit(&mut ram, &mut jit, 10_000), 10_000);
+        assert!(jit.runs - runs <= 2 && jit.idle - idle > 9_900, "runs {} idle {}", jit.runs - runs, jit.idle - idle);
+        assert_eq!(c.pc, BASE);
+        // memory changes (as an interrupt or DMA would): out of the loop
+        ram.write32(0x10_0000, 1);
+        c.run_jit(&mut ram, &mut jit, 10_000);
+        assert_eq!(c.gpr[3], 1);
     }
 
     #[test]
